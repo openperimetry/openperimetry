@@ -9,6 +9,7 @@ interface ImportMetaEnv {
   readonly VITE_APP_VERSION?: string
   readonly VITE_API_URL?: string
   readonly VITE_SHOW_ABOUT_PAGE?: string
+  readonly VITE_GITHUB_URL?: string
 }
 
 interface ImportMeta {

@@ -53,5 +53,19 @@ export const HAS_SUPPORT_EMAIL = SUPPORT_EMAIL.length > 0
 export const HAS_ABOUT_PAGE =
   (import.meta.env.VITE_SHOW_ABOUT_PAGE ?? 'false').toLowerCase() === 'true'
 
+/** GitHub repo URL for the "Star on GitHub" link. Empty hides the link. */
+export const GITHUB_URL = envString(
+  import.meta.env.VITE_GITHUB_URL,
+  'https://github.com/openperimetry/openperimetry',
+)
+export const HAS_GITHUB_LINK = GITHUB_URL.length > 0
+
 /** Canonical short marketing tagline. */
 export const APP_TAGLINE = 'Free visual field self-test'
+
+/** Pre-filled WhatsApp share message. Uses the app URL so recipients land
+ *  on the right page regardless of how the link was shared. */
+export function whatsappShareUrl(customText?: string): string {
+  const text = customText ?? `Check out ${APP_NAME} — a free visual field self-test for tracking your peripheral vision: ${APP_URL}`
+  return `https://wa.me/?text=${encodeURIComponent(text)}`
+}

@@ -88,32 +88,36 @@ const [showAuth, setShowAuth] = useState(() => {
   // Dev-only: ?dev=goldmann|static|ring[&mobile=1][&eye=right|left|both]
   // skips calibration with a prebaked CalibrationData and jumps straight to
   // the test. Intended for local development & preview verification only.
+  // Wrapped in queueMicrotask so the setState batch runs outside the
+  // effect body (satisfies react-hooks/set-state-in-effect).
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const devMode = params.get('dev')
     if (!devMode || !['goldmann', 'static', 'ring'].includes(devMode)) return
-    const devMobile = params.get('mobile') === '1'
-    const devEye = (params.get('eye') as Eye) || 'right'
-    const distanceCm = devMobile ? 5 : 50
-    const pxPerDeg = devMobile ? 18 : 36
-    const fakeCal: CalibrationData = {
-      pixelsPerDegree: pxPerDeg,
-      maxEccentricityDeg: devMobile ? 30 : 40,
-      viewingDistanceCm: distanceCm,
-      brightnessFloor: 0.2,
-      reactionTimeMs: 400,
-      fixationOffsetPx: devEye === 'left'
-        ? -Math.round(window.innerWidth * (devMobile ? 0.1 : 0.2))
-        : Math.round(window.innerWidth * (devMobile ? 0.1 : 0.2)),
-      screenWidthPx: typeof screen !== 'undefined' ? screen.width : window.innerWidth,
-      screenHeightPx: typeof screen !== 'undefined' ? screen.height : window.innerHeight,
-    }
-    setEye(devEye)
-    setMobileMode(devMobile)
-    setTestMode(devMode as TestMode)
-    setCalibration(fakeCal)
-    setExtendedField(false)
-    setPage(devMode === 'ring' ? 'ring-test' : devMode === 'static' ? 'static-test' : 'test')
+    queueMicrotask(() => {
+      const devMobile = params.get('mobile') === '1'
+      const devEye = (params.get('eye') as Eye) || 'right'
+      const distanceCm = devMobile ? 5 : 50
+      const pxPerDeg = devMobile ? 18 : 36
+      const fakeCal: CalibrationData = {
+        pixelsPerDegree: pxPerDeg,
+        maxEccentricityDeg: devMobile ? 30 : 40,
+        viewingDistanceCm: distanceCm,
+        brightnessFloor: 0.2,
+        reactionTimeMs: 400,
+        fixationOffsetPx: devEye === 'left'
+          ? -Math.round(window.innerWidth * (devMobile ? 0.1 : 0.2))
+          : Math.round(window.innerWidth * (devMobile ? 0.1 : 0.2)),
+        screenWidthPx: typeof screen !== 'undefined' ? screen.width : window.innerWidth,
+        screenHeightPx: typeof screen !== 'undefined' ? screen.height : window.innerHeight,
+      }
+      setEye(devEye)
+      setMobileMode(devMobile)
+      setTestMode(devMode as TestMode)
+      setCalibration(fakeCal)
+      setExtendedField(false)
+      setPage(devMode === 'ring' ? 'ring-test' : devMode === 'static' ? 'static-test' : 'test')
+    })
   }, [])
 
   // Binocular flow state

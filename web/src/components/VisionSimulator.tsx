@@ -49,6 +49,12 @@ interface IsopterBoundary {
   /** Index in ISOPTER_ORDER: 0=V4e (outermost) … 4=I2e (innermost) */
   orderIdx: number
   points: BoundaryPoint[]
+  /** Mean radius across all angles — used by getVisionQuality for
+   *  angle-independent ring-scotoma gap detection. Per-angle radii drive
+   *  the edge transition shape; mean radii drive the gap/ring decision so
+   *  a screen-shape peanut doesn't trigger ring bands at some angles but
+   *  not others. */
+  meanRadius: number
 }
 
 /**
@@ -146,7 +152,8 @@ function buildTaggedBoundaries(
     // meridians) don't produce lopsided scotoma rings. The clinical
     // VisualFieldMap preserves the original directional geometry.
     const finalBoundary = circularizeBoundary(smooth)
-    boundaries.push({ stimulusKey: key, orderIdx: idx, points: finalBoundary })
+    const meanR = finalBoundary.reduce((s, p) => s + p.normalizedRadius, 0) / finalBoundary.length
+    boundaries.push({ stimulusKey: key, orderIdx: idx, points: finalBoundary, meanRadius: meanR })
   }
 
   // Enforce the nesting invariant: at every angle, a dimmer isopter must not
@@ -174,7 +181,8 @@ function buildTaggedBoundaries(
         const cap = runningMin[refIdx]
         return { ...p, normalizedRadius: Math.min(p.normalizedRadius, cap) }
       })
-      boundaries[bi] = { ...boundaries[bi], points: clamped }
+      const clampedMean = clamped.reduce((s, p) => s + p.normalizedRadius, 0) / clamped.length
+      boundaries[bi] = { ...boundaries[bi], points: clamped, meanRadius: clampedMean }
       // Update running minimum for the next inner isopter.
       for (let i = 0; i < refLength; i++) {
         const refIdx = n === refLength ? i : Math.round((i / refLength) * n) % n
@@ -202,12 +210,13 @@ function buildTaggedBoundaries(
   // clean image in that case, so leave it alone.
   const OUTER_FRAC = 0.92
   if (boundaries.length > 0) {
-    const outerMean = boundaries[0].points.reduce((s, p) => s + p.normalizedRadius, 0) / boundaries[0].points.length
+    const outerMean = boundaries[0].meanRadius
     if (outerMean > 0.001 && outerMean < 0.90) {
       const scale = OUTER_FRAC / outerMean
       for (let bi = 0; bi < boundaries.length; bi++) {
         boundaries[bi] = {
           ...boundaries[bi],
+          meanRadius: boundaries[bi].meanRadius * scale,
           points: boundaries[bi].points.map(p => ({
             ...p,
             normalizedRadius: p.normalizedRadius * scale,
@@ -345,15 +354,26 @@ function circularizeBoundary(points: BoundaryPoint[]): BoundaryPoint[] {
   const n = points.length
   if (n < 2) return points
 
-  // Stage 1: full radial mean. The simulator is a radial approximation
-  // anyway, and per-angle asymmetry from screen clipping produces worse
-  // artefacts than a flat circle would.
-  let sum = 0
-  for (const p of points) sum += p.normalizedRadius
-  const meanRadius = sum / n
+  // Precompute radii indexed by integer degree for cheap mirror lookups.
+  // Resampled boundaries are at 1° resolution so n is typically 360.
+  const radiusAt = (angleDeg: number): number => {
+    const a = ((angleDeg % 360) + 360) % 360
+    const idx = Math.round((a / 360) * n) % n
+    return points[idx].normalizedRadius
+  }
+
+  // 4-fold symmetry: average each angle with its L-R, U-D, and point
+  // reflections. Preserves real clinical asymmetry (superior vs inferior,
+  // nasal vs temporal) while removing per-quadrant noise from rectangular
+  // screens, fixation offsets, and sparse meridian sampling.
   const result: BoundaryPoint[] = new Array(n)
   for (let i = 0; i < n; i++) {
-    result[i] = { angleDeg: points[i].angleDeg, normalizedRadius: meanRadius }
+    const angle = points[i].angleDeg
+    const r1 = points[i].normalizedRadius
+    const r2 = radiusAt(180 - angle)   // L-R mirror
+    const r3 = radiusAt(360 - angle)   // U-D mirror
+    const r4 = radiusAt(180 + angle)   // point reflection
+    result[i] = { angleDeg: angle, normalizedRadius: (r1 + r2 + r3 + r4) / 4 }
   }
   return result
 }
@@ -425,9 +445,9 @@ function getVisionQuality(
 
   const EDGE_WIDTH = 0.06
 
-  // Get boundary radii sorted by stimulus order (V4e first → I2e last)
+  // Get per-angle radii for edge rendering, sorted outer → inner.
   const orderedBounds = boundaries
-    .map(b => ({ orderIdx: b.orderIdx, radius: lookupRadius(b.points, angleDeg) }))
+    .map(b => ({ orderIdx: b.orderIdx, radius: lookupRadius(b.points, angleDeg), meanRadius: b.meanRadius }))
     .sort((a, b) => a.orderIdx - b.orderIdx)
 
   const outermostRadius = Math.max(...orderedBounds.map(b => b.radius))
@@ -435,18 +455,22 @@ function getVisionQuality(
   // ── Normal bypass ──
   if (outermostRadius > 1.05) return 1.0
 
-  // ── Ring scotoma detection (all gaps above threshold) ──
-  // Find every gap between consecutive isopters wider than the threshold —
-  // double-ring patterns (two scotoma bands) need all of them applied, not just
-  // the largest one.
+  // ── Ring scotoma detection — ANGLE-INDEPENDENT ──
+  // Use MEAN radii (averaged across all angles) for gap detection so the
+  // ring-scotoma decision is global: either the field has a ring or it
+  // doesn't. Per-angle radii are still used for the edge transition shape,
+  // but the gap/ring decision no longer depends on which meridian the pixel
+  // sits on. This prevents the X-shaped artifact where screen-limited
+  // peanut fields triggered ring bands at horizontal angles but not
+  // vertical ones.
   const RING_GAP_THRESHOLD = 0.25
   const gaps: { center: number; halfWidth: number }[] = []
   for (let i = 0; i < orderedBounds.length - 1; i++) {
-    const outerR = orderedBounds[i].radius
-    const innerR = orderedBounds[i + 1].radius
-    const gap = outerR - innerR
+    const outerMean = orderedBounds[i].meanRadius
+    const innerMean = orderedBounds[i + 1].meanRadius
+    const gap = outerMean - innerMean
     if (gap > RING_GAP_THRESHOLD) {
-      gaps.push({ center: (outerR + innerR) / 2, halfWidth: gap / 2 })
+      gaps.push({ center: (outerMean + innerMean) / 2, halfWidth: gap / 2 })
     }
   }
 

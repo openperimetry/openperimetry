@@ -4,12 +4,24 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233b82f6' stroke-width='1.5'><circle cx='12' cy='12' r='10'/><circle cx='12' cy='12' r='6'/><circle cx='12' cy='12' r='2'/></svg>" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="description" content="Open-source kinetic visual field self-check — track your visual field over time." />
+    <meta name="description" content="Free visual field self-test — Goldmann kinetic perimetry at home. Track your peripheral vision over time." />
     <meta name="theme-color" content="#08080d" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <!-- Title is replaced by Vite at build time from VITE_APP_NAME; falls back to "OpenPerimetry" when the env var is unset. -->
-    <title>OpenPerimetry — Visual Field Self-Check</title>
+
+    <!-- Vite replaces %VITE_*% in HTML at build time. The deploy workflow
+         sets VITE_APP_NAME / VITE_APP_URL so the production build bakes in
+         "Visual Field Check". Local dev without env vars gets the literals
+         as-is ("%VITE_APP_NAME%" renders as the fallback title via React). -->
+    <title>%VITE_APP_NAME% — Free Visual Field Self-Test</title>
+
+    <!-- Open Graph — WhatsApp, Slack, Twitter etc. scrape these for link previews -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="%VITE_APP_NAME% — Free Visual Field Self-Test" />
+    <meta property="og:description" content="Free visual field self-test — Goldmann kinetic perimetry at home. Track your peripheral vision over time." />
+    <meta property="og:url" content="%VITE_APP_URL%" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="%VITE_APP_NAME% — Free Visual Field Self-Test" />
   </head>
   <body>
     <div id="root"></div>

@@ -9,10 +9,9 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 
-    <!-- Vite replaces %VITE_*% in HTML at build time. The deploy workflow
+    <!-- Vite replaces HTML env placeholders at build time. The deploy workflow
          sets VITE_APP_NAME / VITE_APP_URL so the production build bakes in
-         "Visual Field Check". Local dev without env vars gets the literals
-         as-is ("%VITE_APP_NAME%" renders as the fallback title via React). -->
+         "Visual Field Check". React updates the document title after load. -->
     <title>%VITE_APP_NAME% — Free Visual Field Self-Test</title>
 
     <!-- Open Graph — WhatsApp, Slack, Twitter etc. scrape these for link previews -->

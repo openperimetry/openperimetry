@@ -1,5 +1,7 @@
 import { test, expect } from './fixtures/base'
 
+const homeTitle = 'Visual Field Check — Free visual field self-test'
+
 test.describe('Test Instructions', () => {
   test.beforeEach(async ({ page, mockAPI }) => {
     await mockAPI()
@@ -19,13 +21,13 @@ test.describe('Test Instructions', () => {
     await expect(page.getByRole('heading', { level: 1 })).toContainText(/Right/)
   })
 
-  test('shows stimulus levels', async ({ page }) => {
-    await expect(page.getByText('V4e')).toBeVisible()
-    await expect(page.getByText('III4e')).toBeVisible()
+  test('shows static test options', async ({ page }) => {
+    await expect(page.getByText('100 hexagons', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: /Standard 100 pts/ })).toBeVisible()
   })
 
   test('has cancel button to return home', async ({ page }) => {
     await page.getByRole('button', { name: /Cancel/i }).click()
-    await expect(page).toHaveTitle('Visual Field Check — Free Self-Test for RP')
+    await expect(page).toHaveTitle(homeTitle)
   })
 })

@@ -750,7 +750,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
 
       setTimeout(() => advance(), 300)
     },
-    [advance],
+    [advance, pixelsPerDegree, reactionTimeMs],
   )
 
   // ---------- animation loop ----------
@@ -933,6 +933,10 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
 
     flashFixation('#3b82f6', 150) // blue flash = confirmed
     recordPoint(true, eccRef.current)
+  // flashFixation reads refs/current DOM state and is intentionally not a
+  // dependency; including it would recreate this hot response handler every
+  // render without changing the values it uses.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recordPoint, requeueCurrent, advance])
 
   // ---------- pause / resume ----------

@@ -1,5 +1,7 @@
 import { test, expect } from './fixtures/base'
 
+const homeTitle = 'Visual Field Check — Free visual field self-test'
+
 test.describe('Page Navigation', () => {
   test.beforeEach(async ({ page, mockAPI }) => {
     await mockAPI()
@@ -26,13 +28,13 @@ test.describe('Page Navigation', () => {
 
       // Navigate back
       await page.getByRole('button', { name: /Back|Home/ }).click()
-      await expect(page).toHaveTitle('Visual Field Check — Free Self-Test for RP')
+      await expect(page).toHaveTitle(homeTitle)
       await expect(page.getByRole('heading', { level: 1 })).toContainText('Goldmann')
     })
   }
 
   test('document title updates on page change', async ({ page }) => {
-    await expect(page).toHaveTitle('Visual Field Check — Free Self-Test for RP')
+    await expect(page).toHaveTitle(homeTitle)
     await page.getByRole('navigation').getByRole('button', { name: 'About' }).click()
     await expect(page).toHaveTitle('About — Visual Field Check')
   })

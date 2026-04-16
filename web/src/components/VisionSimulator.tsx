@@ -733,7 +733,11 @@ export function VisionSimulator({ points, eye, maxEccentricity, secondEyePoints,
         secondEyeMaxEccentricity ?? maxEccentricity,
       )
     : []
+  // allBoundaries is intentionally rebuilt from current props so canvas
+  // redraws always use the latest field geometry.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const allBoundaries = [...boundaries, ...secondBoundaries]
+  const activeEffectsKey = [...activeEffects].sort().join(',')
 
   const renderCanvas = useCallback(
     (img: HTMLImageElement, darknessLevel: number, blurLevel: number = 0.5) => {
@@ -1576,7 +1580,7 @@ export function VisionSimulator({ points, eye, maxEccentricity, secondEyePoints,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     // Restart loop when the set of active effects changes (not on intensity changes)
-    [...activeEffects].sort().join(','),
+    activeEffectsKey,
     allBoundaries,
   ])
 

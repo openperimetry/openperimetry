@@ -321,7 +321,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
       if (unseenZonePoints.length > 0 && isInUnseenZone(p.xDeg, p.yDeg, unseenZonePoints)) return false
       return true
     })
-  }, [isInUnseenZone, pixelsPerDegree, fixationXY.x, fixationXY.y])
+  }, [isInUnseenZone, pixelsPerDegree, fixationXY.x])
 
   // ---------- initialize grid for a stimulus level ----------
   const initGrid = useCallback((stimulusKey: StimulusKey) => {
@@ -609,7 +609,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
               hideStimulus()
               recordResult(theVerifyPoint, false)
               flashFixation('#ef4444', 200)
-              presentNext() // eslint-disable-line react-hooks/immutability -- recursive self-call
+              presentNext()
             }
           }, sp.responseMs)
         }, delay)
@@ -717,7 +717,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
         }, sp.responseMs)
       }
     }, delay)
-  }, [showStimulus, showStimulus2, hideStimulus, recordResult, flashFixation, pickDistantPoint, findIsolatedUnseen, goToCleanupOrNextLevel])
+  }, [showStimulus, showStimulus2, hideStimulus, recordResult, flashFixation, pickDistantPoint, findIsolatedUnseen, goToCleanupOrNextLevel, sp.gapMaxMs, sp.gapMinMs, sp.responseMs, sp.stimulusMs])
 
   // ---------- handle response ----------
   const handleResponse = useCallback(() => {
@@ -756,7 +756,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
 
     recordResult(currentPointRef.current, true, elapsed)
     presentNext()
-  }, [flashFixation, hideStimulus, recordResult, presentNext, clearAllTimeouts])
+  }, [flashFixation, hideStimulus, recordResult, presentNext, clearAllTimeouts, sp.responseMs])
 
   // ---------- pause/resume ----------
   const pauseTest = useCallback(() => {
@@ -839,13 +839,15 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     enterFullscreen()
     setPhase('countdown')
     setCountdown(3)
-  }, [initGrid])
+  }, [initGrid, enterFullscreen])
 
   // ---------- cleanup on unmount ----------
   useEffect(() => {
     return () => {
       clearAllTimeouts()
       if (startedTrackedRef.current && !completedTrackedRef.current) {
+        // The abort event needs the latest tested-points ref at unmount.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
         const tested = Array.from(testedPointsRef.current.values())
         trackEvent('test_aborted', getDeviceId(), {
           testType: 'static', eye, phase: phaseRef.current,

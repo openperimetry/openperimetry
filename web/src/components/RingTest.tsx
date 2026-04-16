@@ -382,7 +382,7 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
       autoAdvancingRef.current = true
       setTimeout(() => nextSector(), 400)
     }
-  }, [phase, getMaxEccForSector, nextSector])
+  }, [phase, getMaxEccForSector, nextSector, eye])
 
   // ---- Record boundary event ----
   const recordEvent = useCallback((type: 'disappear' | 'reappear') => {
@@ -570,7 +570,11 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
 
   // Cleanup
   useEffect(() => {
-    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
+    return () => {
+      // The latest RAF id is intentionally read during unmount.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    }
   }, [])
 
   // Redraw on window resize

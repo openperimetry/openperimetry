@@ -29,10 +29,13 @@ test.describe('Calibration Flow', () => {
     const increaseBtn = page.getByRole('button', { name: 'Increase viewing distance' })
     await expect(decreaseBtn).toBeVisible()
     await expect(increaseBtn).toBeVisible()
-    // Check initial distance
-    await expect(page.getByText('50 cm').first()).toBeVisible()
-    await decreaseBtn.click()
-    await expect(page.getByText('45 cm').first()).toBeVisible()
+    // Initial distance is computed from the current screen size; verify the
+    // controls update the displayed value without relying on a fixed monitor.
+    const distanceValue = page.locator('[aria-live="polite"]')
+    const initialDistance = (await distanceValue.textContent()) ?? ''
+    const initialCm = Number(initialDistance.replace(/\D/g, ''))
+    await (initialCm >= 100 ? decreaseBtn : increaseBtn).click()
+    await expect(distanceValue).not.toHaveText(initialDistance)
   })
 
   test('navigates through calibration steps', async ({ page }) => {

@@ -14,6 +14,7 @@ import type { SurveyResponse } from './PostTestSurvey'
 import { ClinicalDisclaimer } from './ClinicalDisclaimer'
 import { STATIC_TEST } from '../constants'
 import { formatEyeLabel } from '../eyeLabels'
+import { HeadGuide } from './HeadGuide'
 
 // ---------- constants ----------
 const DEFAULT_HEXAGONS = 100      // default number of test points per level
@@ -935,15 +936,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
             <p>~{targetHexagons} hexagons cover your visual field at each brightness level. Areas you can't see are excluded in later rounds, so the remaining area gets re-tiled with {targetHexagons} fresh points at higher density. Isolated misses are automatically retested.</p>
           </div>
 
-          <div className="text-xs text-gray-500 bg-gray-900 rounded-lg p-3 text-left space-y-1">
-            <p className="font-medium text-gray-400">Stimulus levels tested:</p>
-            {ISOPTER_ORDER.map(key => (
-              <p key={key} className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: STIMULI[key].color }} />
-                <span>{STIMULI[key].label}</span>
-              </p>
-            ))}
-          </div>
+          <HeadGuide eye={eye} viewingDistanceCm={calibration.viewingDistanceCm} />
 
           {/* Settings */}
           <div className="space-y-3 text-left">

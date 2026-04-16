@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import type { CalibrationData, StoredEye, TestPoint, StimulusKey, TestResult } from '../types'
 import { STIMULI } from '../types'
 import { formatEyeLabel } from '../eyeLabels'
+import { HeadGuide } from './HeadGuide'
 import { VisualFieldMap } from './VisualFieldMap'
 import { calcIsopterAreas } from '../isopterCalc'
 import { Interpretation } from './Interpretation'
@@ -705,6 +706,8 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
               <span className="text-gray-500 text-xs">Go at your own pace</span>
             </div>
           </div>
+
+          <HeadGuide eye={eye} viewingDistanceCm={calibration.viewingDistanceCm} />
 
           {/* Sector precision */}
           <div className="space-y-3">

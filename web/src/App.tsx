@@ -747,19 +747,21 @@ const [showAuth, setShowAuth] = useState(() => {
 
         {/* Quick actions row */}
         <div className="fade-up fade-up-6 flex gap-3">
-          {resultCount > 0 && (
-            <button
-              onClick={() => setPage('history')}
-              className="flex-1 py-3 min-h-[48px] bg-white/[0.03] backdrop-blur-sm hover:bg-white/[0.06] rounded-xl font-medium transition-all border border-white/[0.06] hover:border-white/[0.12] focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base"
-            >
-              <svg className="inline w-4 h-4 mr-1.5 -mt-0.5 text-zinc-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
-                <path d="M12 8v4l3 3" />
-                <circle cx="12" cy="12" r="10" />
-              </svg>
-              Results
+          {/* Always shown — even with no local results, the history page lets
+              users import an .ovfx file or pull in cloud-synced results. */}
+          <button
+            onClick={() => setPage('history')}
+            className="flex-1 py-3 min-h-[48px] bg-white/[0.03] backdrop-blur-sm hover:bg-white/[0.06] rounded-xl font-medium transition-all border border-white/[0.06] hover:border-white/[0.12] focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base"
+          >
+            <svg className="inline w-4 h-4 mr-1.5 -mt-0.5 text-zinc-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+              <path d="M12 8v4l3 3" />
+              <circle cx="12" cy="12" r="10" />
+            </svg>
+            Results
+            {resultCount > 0 && (
               <span className="ml-1.5 text-zinc-500 text-sm">({resultCount})</span>
-            </button>
-          )}
+            )}
+          </button>
           {!user && (
             // Secondary action — deliberately smaller + dimmer than the
             // eye-selection CTAs above so first-time visitors don't mistake
@@ -768,7 +770,7 @@ const [showAuth, setShowAuth] = useState(() => {
             // runs anonymously in local storage.
             <button
               onClick={() => setShowAuth(true)}
-              className={`${resultCount > 0 ? 'flex-1' : 'w-full'} py-2 min-h-[40px] text-xs text-zinc-500 hover:text-zinc-300 bg-transparent hover:bg-white/[0.03] rounded-lg transition-all focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base`}
+              className="flex-1 py-2 min-h-[40px] text-xs text-zinc-500 hover:text-zinc-300 bg-transparent hover:bg-white/[0.03] rounded-lg transition-all focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base"
             >
               <svg className="inline w-3.5 h-3.5 mr-1 -mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
                 <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />

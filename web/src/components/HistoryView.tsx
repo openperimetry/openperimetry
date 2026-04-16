@@ -387,18 +387,31 @@ export function HistoryView({ onBack }: Props) {
             <div className="space-y-1">
               <p className="text-white font-heading font-semibold">No results yet</p>
               <p className="text-zinc-500 text-sm max-w-sm mx-auto">
-                Run your first test from the home screen. Results are saved automatically so you can track changes over time.
+                Run your first test from the home screen, or import existing OVFX files from another device.
               </p>
             </div>
-            <button
-              onClick={onBack}
-              className="inline-flex items-center gap-2 text-sm text-accent hover:text-accent-light transition-colors min-h-[44px] px-3"
-            >
-              Go to home
-              <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                <path d="M5 12h14M12 5l7 7-7 7" />
-              </svg>
-            </button>
+            <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
+              <button
+                onClick={onBack}
+                className="inline-flex items-center gap-2 text-sm text-accent hover:text-accent-light transition-colors min-h-[44px] px-3"
+              >
+                Go to home
+                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                  <path d="M5 12h14M12 5l7 7-7 7" />
+                </svg>
+              </button>
+              <button
+                onClick={() => importInputRef.current?.click()}
+                className="inline-flex items-center gap-2 text-sm text-zinc-300 hover:text-white bg-surface hover:bg-elevated border border-white/[0.06] rounded-lg min-h-[44px] px-4 transition-colors"
+              >
+                <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                  <path d="M12 3v12" />
+                  <path d="m7 10 5 5 5-5" />
+                  <path d="M5 21h14" />
+                </svg>
+                Import OVFX
+              </button>
+            </div>
           </div>
         )}
 

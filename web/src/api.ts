@@ -184,7 +184,7 @@ export interface AdminSessionRecord {
 
 // ── Anonymous events ──
 
-export type EventName = 'test_started' | 'test_completed' | 'test_aborted' | 'page_view' | 'pdf_exported' | 'whatsapp_shared'
+export type EventName = 'test_started' | 'test_completed' | 'test_aborted' | 'page_view' | 'pdf_exported' | 'whatsapp_shared' | 'survey_submitted'
 
 export async function trackEvent(event: EventName, deviceId: string, meta?: Record<string, string>) {
   return request<{ ok: true }>('/api/events', {

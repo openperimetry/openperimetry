@@ -39,7 +39,7 @@ test.describe('Mobile Viewport', () => {
   test('app is usable at mobile viewport', async ({ page }) => {
     // All main elements should be visible and not overflowing
     await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Test left eye (OS)' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Test right eye (OD)' })).toBeVisible()
+    await expect(page.getByRole('radio', { name: 'Left eye (OS)' })).toBeVisible()
+    await expect(page.getByRole('radio', { name: 'Right eye (OD)' })).toBeVisible()
   })
 })

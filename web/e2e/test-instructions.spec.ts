@@ -6,7 +6,8 @@ test.describe('Test Instructions', () => {
     await page.goto('/')
     // Navigate through calibration quickly using static test (skips RT)
     await page.getByRole('tab', { name: 'Static' }).click()
-    await page.getByRole('button', { name: 'Test right eye (OD)' }).click()
+    await page.getByRole('radio', { name: 'Right eye (OD)' }).click()
+    await page.getByRole('button', { name: /^Start test/ }).click()
     await page.getByRole('button', { name: 'Next' }).click()
     await page.getByRole('button', { name: /Confirm/ }).click()
     // Now on Ready screen

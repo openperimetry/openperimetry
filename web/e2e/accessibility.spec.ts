@@ -47,7 +47,8 @@ test.describe('Accessibility', () => {
 
   test('calibration page has no accessibility violations', async ({ page }) => {
     await page.goto('/')
-    await page.getByRole('button', { name: 'Test right eye (OD)' }).click()
+    await page.getByRole('radio', { name: 'Right eye (OD)' }).click()
+    await page.getByRole('button', { name: /^Start test/ }).click()
     const results = await new AxeBuilder({ page }).disableRules(['color-contrast']).analyze()
     expect(results.violations).toEqual([])
   })

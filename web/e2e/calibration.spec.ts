@@ -7,7 +7,8 @@ test.describe('Calibration Flow', () => {
   })
 
   test('clicking eye button navigates to calibration step 1', async ({ page }) => {
-    await page.getByRole('button', { name: 'Test right eye (OD)' }).click()
+    await page.getByRole('radio', { name: 'Right eye (OD)' }).click()
+    await page.getByRole('button', { name: /^Start test/ }).click()
     await expect(page).toHaveTitle('Calibration — Visual Field Check')
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Screen calibration')
     await expect(page.getByText('Step 1 of')).toBeVisible()
@@ -15,13 +16,15 @@ test.describe('Calibration Flow', () => {
   })
 
   test('card width slider has accessible label', async ({ page }) => {
-    await page.getByRole('button', { name: 'Test right eye (OD)' }).click()
+    await page.getByRole('radio', { name: 'Right eye (OD)' }).click()
+    await page.getByRole('button', { name: /^Start test/ }).click()
     const slider = page.getByRole('slider', { name: /Bank card width/ })
     await expect(slider).toBeVisible()
   })
 
   test('distance buttons have accessible labels and work', async ({ page }) => {
-    await page.getByRole('button', { name: 'Test right eye (OD)' }).click()
+    await page.getByRole('radio', { name: 'Right eye (OD)' }).click()
+    await page.getByRole('button', { name: /^Start test/ }).click()
     const decreaseBtn = page.getByRole('button', { name: 'Decrease viewing distance' })
     const increaseBtn = page.getByRole('button', { name: 'Increase viewing distance' })
     await expect(decreaseBtn).toBeVisible()
@@ -33,7 +36,8 @@ test.describe('Calibration Flow', () => {
   })
 
   test('navigates through calibration steps', async ({ page }) => {
-    await page.getByRole('button', { name: 'Test right eye (OD)' }).click()
+    await page.getByRole('radio', { name: 'Right eye (OD)' }).click()
+    await page.getByRole('button', { name: /^Start test/ }).click()
     // Step 1 → Step 2
     await page.getByRole('button', { name: 'Next' }).click()
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Brightness calibration')
@@ -46,7 +50,8 @@ test.describe('Calibration Flow', () => {
   })
 
   test('back button returns to previous step', async ({ page }) => {
-    await page.getByRole('button', { name: 'Test right eye (OD)' }).click()
+    await page.getByRole('radio', { name: 'Right eye (OD)' }).click()
+    await page.getByRole('button', { name: /^Start test/ }).click()
     await page.getByRole('button', { name: 'Next' }).click()
     await expect(page.getByText('Step 2 of')).toBeVisible()
     await page.getByRole('button', { name: 'Back' }).click()
@@ -54,7 +59,8 @@ test.describe('Calibration Flow', () => {
   })
 
   test('extended field toggle has switch role', async ({ page }) => {
-    await page.getByRole('button', { name: 'Test right eye (OD)' }).click()
+    await page.getByRole('radio', { name: 'Right eye (OD)' }).click()
+    await page.getByRole('button', { name: /^Start test/ }).click()
     const toggle = page.getByRole('switch')
     await expect(toggle).toBeVisible()
     await expect(toggle).toHaveAttribute('aria-checked', 'false')
@@ -64,7 +70,8 @@ test.describe('Calibration Flow', () => {
 
   test('static test skips reaction time step', async ({ page }) => {
     await page.getByRole('tab', { name: 'Static' }).click()
-    await page.getByRole('button', { name: 'Test right eye (OD)' }).click()
+    await page.getByRole('radio', { name: 'Right eye (OD)' }).click()
+    await page.getByRole('button', { name: /^Start test/ }).click()
     await page.getByRole('button', { name: 'Next' }).click()
     // Should be brightness
     await expect(page.getByText('Step 2 of')).toBeVisible()

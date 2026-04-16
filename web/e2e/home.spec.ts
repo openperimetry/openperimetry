@@ -12,10 +12,14 @@ test.describe('Home Page', () => {
     await expect(page.getByText('Kinetic perimetry self-check')).toBeVisible()
   })
 
-  test('shows three eye selection buttons with proper labels', async ({ page }) => {
-    await expect(page.getByRole('button', { name: 'Test left eye (OS)' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Test both eyes (OU)' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Test right eye (OD)' })).toBeVisible()
+  test('shows three eye selection radios with proper labels', async ({ page }) => {
+    await expect(page.getByRole('radio', { name: 'Left eye (OS)' })).toBeVisible()
+    await expect(page.getByRole('radio', { name: 'Both eyes (OU)' })).toBeVisible()
+    await expect(page.getByRole('radio', { name: 'Right eye (OD)' })).toBeVisible()
+  })
+
+  test('shows the primary Start test button', async ({ page }) => {
+    await expect(page.getByRole('button', { name: /^Start test/ })).toBeVisible()
   })
 
   test('has test mode tablist with Goldmann selected by default', async ({ page }) => {

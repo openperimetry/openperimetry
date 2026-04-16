@@ -47,7 +47,21 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
 
   // Screen calibration
   const [cardWidthPx, setCardWidthPx] = useState(320)
-  const [distanceCm, setDistanceCm] = useState(mobileMode ? 5 : 50)
+  // Default viewing distance derived from screen width + initial card
+  // calibration so the farther screen edge subtends ~40° from fixation
+  // (or 25° in phone mode). Users can still override with the +/− buttons
+  // or the "use suggested" link below; this just picks a good starting
+  // value instead of the old hardcoded 50 cm which was wrong for small
+  // laptops and short for 27" monitors.
+  const [distanceCm, setDistanceCm] = useState<number>(() => {
+    if (mobileMode) return 5
+    const defaultPxPerMm = 320 / CREDIT_CARD_WIDTH_MM
+    const screenWidthPx = typeof screen !== 'undefined' ? screen.width : (typeof window !== 'undefined' ? window.innerWidth : 1440)
+    const screenWidthCm = screenWidthPx / defaultPxPerMm / 10
+    const targetAngleDeg = 40
+    const raw = (screenWidthCm / 2) / Math.tan((targetAngleDeg * Math.PI) / 180)
+    return Math.max(20, Math.min(100, Math.round(raw / 5) * 5))
+  })
 
   // Brightness calibration
   const [brightness, setBrightness] = useState(0.5)
@@ -332,7 +346,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
 
           <div className="space-y-2">
             <label className="text-sm text-zinc-300 block">
-              Viewing distance — sit at arm's length (~50 cm)
+              Viewing distance
             </label>
             <div className="flex items-center gap-3">
               <button
@@ -347,6 +361,42 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
                 aria-label="Increase viewing distance"
               >+</button>
             </div>
+            {/* Suggested distance — computed from screen width + card
+                calibration so the edges of the monitor subtend a clinically
+                useful angle (target: ~40° from fixation to the farther
+                screen edge, ~25° for phone mode). The formula is
+                distance = halfScreenWidth_cm / tan(targetAngle). Rounded
+                to the nearest 5 cm. Offered as a suggestion with a
+                one-tap apply button rather than forced, so advanced users
+                can still choose their own distance. */}
+            {(() => {
+              const screenWidthPx = typeof screen !== 'undefined' ? screen.width : window.innerWidth
+              const screenWidthCm = pxPerMm > 0 ? screenWidthPx / pxPerMm / 10 : 0
+              const targetAngleDeg = mobileMode ? 25 : 40
+              const rawSuggested = (screenWidthCm / 2) / Math.tan((targetAngleDeg * Math.PI) / 180)
+              const suggested = Math.max(20, Math.min(100, Math.round(rawSuggested / 5) * 5))
+              if (screenWidthCm < 5) return null  // card not yet calibrated
+              const isMatch = Math.abs(suggested - distanceCm) <= 2
+              return (
+                <div className="text-[11px] text-zinc-500 flex items-center gap-2">
+                  <span>
+                    Suggested: <span className="text-zinc-300 font-mono">{suggested} cm</span>{' '}
+                    <span className="text-zinc-600">
+                      (so the screen edge reaches ~{targetAngleDeg}° from fixation)
+                    </span>
+                  </span>
+                  {!isMatch && (
+                    <button
+                      type="button"
+                      onClick={() => setDistanceCm(suggested)}
+                      className="text-accent hover:text-accent-light underline decoration-dotted"
+                    >
+                      use
+                    </button>
+                  )}
+                </div>
+              )
+            })()}
           </div>
 
           {/* Live field coverage diagram — updates with distance & card size */}
@@ -468,31 +518,36 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
                   T {fTemporal}° · N {fNasal}° · S {fUp}° · I {fDown}°
                 </p>
 
-                {/* Extended field toggle */}
-                <button
-                  onClick={() => setExtendedField(v => !v)}
-                  role="switch"
-                  aria-checked={extendedField}
-                  className={`w-full text-left px-4 py-3 rounded-xl border transition-colors ${
-                    extendedField
-                      ? 'bg-green-600/10 border-green-500/50'
-                      : 'bg-surface border-white/[0.06] hover:border-white/[0.12]'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="font-medium text-xs text-zinc-300">Extended field mode</p>
-                      <p className="text-xs text-zinc-500 mt-0.5">
-                        2 extra passes with shifted fixation for more vertical coverage (~2 min extra)
-                      </p>
+                {/* Extended field toggle — Goldmann only. Ring and
+                    Static tests don't implement the extra extended-field
+                    passes, so the option is hidden for those test types
+                    to avoid offering a setting that would have no effect. */}
+                {testMode === 'goldmann' && (
+                  <button
+                    onClick={() => setExtendedField(v => !v)}
+                    role="switch"
+                    aria-checked={extendedField}
+                    className={`w-full text-left px-4 py-3 rounded-xl border transition-colors ${
+                      extendedField
+                        ? 'bg-green-600/10 border-green-500/50'
+                        : 'bg-surface border-white/[0.06] hover:border-white/[0.12]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="font-medium text-xs text-zinc-300">Extended field mode</p>
+                        <p className="text-xs text-zinc-500 mt-0.5">
+                          2 extra passes with shifted fixation for more vertical coverage (~2 min extra)
+                        </p>
+                      </div>
+                      <div className={`w-9 h-5 rounded-full flex items-center px-0.5 transition-colors flex-shrink-0 ml-2 ${
+                        extendedField ? 'bg-green-600 justify-end' : 'bg-zinc-700 justify-start'
+                      }`}>
+                        <div className="w-4 h-4 rounded-full bg-white" />
+                      </div>
                     </div>
-                    <div className={`w-9 h-5 rounded-full flex items-center px-0.5 transition-colors flex-shrink-0 ml-2 ${
-                      extendedField ? 'bg-green-600 justify-end' : 'bg-zinc-700 justify-start'
-                    }`}>
-                      <div className="w-4 h-4 rounded-full bg-white" />
-                    </div>
-                  </div>
-                </button>
+                  </button>
+                )}
               </div>
             )
           })()}

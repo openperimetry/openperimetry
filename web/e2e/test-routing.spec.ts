@@ -2,7 +2,7 @@ import type { Page } from '@playwright/test'
 import { test, expect } from './fixtures/base'
 
 type TestMode = 'goldmann' | 'ring' | 'static'
-type EyeChoice = 'Test left eye (OS)' | 'Test right eye (OD)' | 'Test both eyes (OU)'
+type EyeChoice = 'Left eye (OS)' | 'Right eye (OD)' | 'Both eyes (OU)'
 
 // Heading shown on each test's instruction screen (binocular always starts with right eye).
 const HEADINGS: Record<TestMode, RegExp> = {
@@ -45,7 +45,10 @@ async function completeCalibration(page: Page, mode: TestMode) {
 
 async function startFlow(page: Page, mode: TestMode, eye: EyeChoice) {
   await selectTestMode(page, mode)
-  await page.getByRole('button', { name: eye }).click()
+  // Eye buttons are radios now; pick one and then click the prominent
+  // "Start test" CTA below the selectors.
+  await page.getByRole('radio', { name: eye }).click()
+  await page.getByRole('button', { name: /^Start test/ }).click()
   await completeCalibration(page, mode)
 }
 
@@ -58,17 +61,17 @@ test.describe('Test routing — eye × test type', () => {
   // Ring + Static are fast (no RT step)
   for (const mode of ['ring', 'static'] as const) {
     test(`${mode} × right eye → ${mode} test screen`, async ({ page }) => {
-      await startFlow(page, mode, 'Test right eye (OD)')
+      await startFlow(page, mode, 'Right eye (OD)')
       await expect(page.getByRole('heading', { level: 1 })).toContainText(HEADINGS[mode])
     })
 
     test(`${mode} × left eye → ${mode} test screen`, async ({ page }) => {
-      await startFlow(page, mode, 'Test left eye (OS)')
+      await startFlow(page, mode, 'Left eye (OS)')
       await expect(page.getByRole('heading', { level: 1 })).toContainText(HEADINGS[mode])
     })
 
     test(`${mode} × both eyes → ${mode} test screen (right eye first)`, async ({ page }) => {
-      await startFlow(page, mode, 'Test both eyes (OU)')
+      await startFlow(page, mode, 'Both eyes (OU)')
       const heading = page.getByRole('heading', { level: 1 })
       await expect(heading).toContainText(HEADINGS[mode])
       // Binocular flow always begins with the right eye
@@ -81,21 +84,21 @@ test.describe('Test routing — eye × test type', () => {
   // Goldmann variants — slower because of reaction-time calibration
   test('goldmann × right eye → goldmann test screen', async ({ page }) => {
     test.slow()
-    await startFlow(page, 'goldmann', 'Test right eye (OD)')
+    await startFlow(page, 'goldmann', 'Right eye (OD)')
     await expect(page.getByRole('heading', { level: 1 })).toContainText(HEADINGS.goldmann)
     await expect(page.getByRole('heading', { level: 1 })).toContainText(/Right/)
   })
 
   test('goldmann × left eye → goldmann test screen', async ({ page }) => {
     test.slow()
-    await startFlow(page, 'goldmann', 'Test left eye (OS)')
+    await startFlow(page, 'goldmann', 'Left eye (OS)')
     await expect(page.getByRole('heading', { level: 1 })).toContainText(HEADINGS.goldmann)
     await expect(page.getByRole('heading', { level: 1 })).toContainText(/Left/)
   })
 
   test('goldmann × both eyes → goldmann test screen (right eye first)', async ({ page }) => {
     test.slow()
-    await startFlow(page, 'goldmann', 'Test both eyes (OU)')
+    await startFlow(page, 'goldmann', 'Both eyes (OU)')
     await expect(page.getByRole('heading', { level: 1 })).toContainText(HEADINGS.goldmann)
     await expect(page.getByRole('heading', { level: 1 })).toContainText(/Right/)
   })

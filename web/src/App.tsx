@@ -514,14 +514,15 @@ const [showAuth, setShowAuth] = useState(() => {
         </svg>
       </div>
 
-      {/* ── Top-right GitHub link ── */}
+      {/* ── Top-right GitHub link — absolute positioned so it scrolls
+            away with the page content rather than hovering on every screen. */}
       {HAS_GITHUB_LINK && (
         <a
           href={GITHUB_URL}
           target="_blank"
           rel="noopener"
           aria-label="View source on GitHub"
-          className="fixed top-4 right-4 z-20 text-zinc-600 hover:text-zinc-300 transition-colors"
+          className="absolute top-4 right-4 z-20 text-zinc-600 hover:text-zinc-300 transition-colors"
         >
           <svg viewBox="0 0 24 24" width={24} height={24} fill="currentColor" aria-hidden="true">
             <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
@@ -556,14 +557,29 @@ const [showAuth, setShowAuth] = useState(() => {
           </span>
         </p>
 
-        {/* ── Eye selection ── */}
+        {/* ── Eye selection (radio) ──
+            The eye buttons are SELECTORS now, not immediate-action CTAs.
+            A previous version made each eye button start the test directly,
+            but first-time users (incl. the author's wife) didn't understand
+            that tapping an eye would begin a test — they looked for a
+            "Start" button. Now the flow is: pick eye → pick test type →
+            press the prominent Start Test button below. */}
         <div className="fade-up fade-up-3 space-y-3">
-          <p className="text-zinc-500 text-[11px] font-medium uppercase tracking-[0.2em]" id="eye-selection-label">Select eye</p>
-          <div className="grid grid-cols-[1fr_1.15fr_1fr] gap-2.5" role="group" aria-labelledby="eye-selection-label">
+          <p className="text-zinc-400 text-[11px] font-medium uppercase tracking-[0.2em] inline-flex items-center gap-2 bg-base/60 backdrop-blur-sm px-3 py-1 rounded-full" id="eye-selection-label">
+            <span className="w-4 h-4 rounded-full bg-accent/20 text-accent text-[10px] flex items-center justify-center font-bold">1</span>
+            Select eye
+          </p>
+          <div className="grid grid-cols-[1fr_1.15fr_1fr] gap-2.5" role="radiogroup" aria-labelledby="eye-selection-label">
             <button
-              onClick={() => startTest('left')}
-              aria-label="Test left eye (OS)"
-              className="group relative py-5 min-h-[88px] bg-white/[0.03] backdrop-blur-sm rounded-2xl font-medium transition-all duration-300 border border-white/[0.06] hover:border-accent/30 hover:bg-white/[0.06] focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base hover:scale-[1.03] hover:shadow-[0_4px_24px_rgba(200,144,42,0.08)]"
+              onClick={() => setEye('left')}
+              role="radio"
+              aria-checked={eye === 'left'}
+              aria-label="Left eye (OS)"
+              className={`group relative py-5 min-h-[88px] backdrop-blur-sm rounded-2xl font-medium transition-all duration-300 border focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base ${
+                eye === 'left'
+                  ? 'bg-accent/15 border-accent/60 shadow-[0_0_24px_rgba(200,144,42,0.15)]'
+                  : 'bg-white/[0.03] border-white/[0.06] hover:border-accent/30 hover:bg-white/[0.06]'
+              }`}
             >
               <svg viewBox="0 0 32 32" className="w-8 h-8 mx-auto mb-2 text-zinc-500 group-hover:text-accent transition-colors duration-300" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
                 <ellipse cx="16" cy="16" rx="13" ry="8" />
@@ -575,9 +591,15 @@ const [showAuth, setShowAuth] = useState(() => {
             </button>
 
             <button
-              onClick={() => startTest('both')}
-              aria-label="Test both eyes (OU)"
-              className="group relative py-5 min-h-[88px] bg-white/[0.04] backdrop-blur-sm rounded-2xl font-medium transition-all duration-300 border border-accent/15 hover:border-accent/40 hover:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base hover:scale-[1.03] shadow-[0_0_24px_rgba(200,144,42,0.04)] hover:shadow-[0_4px_32px_rgba(200,144,42,0.12)]"
+              onClick={() => setEye('both')}
+              role="radio"
+              aria-checked={eye === 'both'}
+              aria-label="Both eyes (OU)"
+              className={`group relative py-5 min-h-[88px] backdrop-blur-sm rounded-2xl font-medium transition-all duration-300 border focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base ${
+                eye === 'both'
+                  ? 'bg-accent/15 border-accent/60 shadow-[0_0_24px_rgba(200,144,42,0.15)]'
+                  : 'bg-white/[0.04] border-accent/15 hover:border-accent/40 hover:bg-white/[0.07] shadow-[0_0_24px_rgba(200,144,42,0.04)]'
+              }`}
             >
               <svg viewBox="0 0 40 32" className="w-10 h-8 mx-auto mb-2 text-zinc-500 group-hover:text-accent transition-colors duration-300" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
                 <ellipse cx="13" cy="16" rx="10" ry="7" />
@@ -592,9 +614,15 @@ const [showAuth, setShowAuth] = useState(() => {
             </button>
 
             <button
-              onClick={() => startTest('right')}
-              aria-label="Test right eye (OD)"
-              className="group relative py-5 min-h-[88px] bg-white/[0.03] backdrop-blur-sm rounded-2xl font-medium transition-all duration-300 border border-white/[0.06] hover:border-accent/30 hover:bg-white/[0.06] focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base hover:scale-[1.03] hover:shadow-[0_4px_24px_rgba(200,144,42,0.08)]"
+              onClick={() => setEye('right')}
+              role="radio"
+              aria-checked={eye === 'right'}
+              aria-label="Right eye (OD)"
+              className={`group relative py-5 min-h-[88px] backdrop-blur-sm rounded-2xl font-medium transition-all duration-300 border focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base ${
+                eye === 'right'
+                  ? 'bg-accent/15 border-accent/60 shadow-[0_0_24px_rgba(200,144,42,0.15)]'
+                  : 'bg-white/[0.03] border-white/[0.06] hover:border-accent/30 hover:bg-white/[0.06]'
+              }`}
             >
               <svg viewBox="0 0 32 32" className="w-8 h-8 mx-auto mb-2 text-zinc-500 group-hover:text-accent transition-colors duration-300" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
                 <ellipse cx="16" cy="16" rx="13" ry="8" />
@@ -609,7 +637,10 @@ const [showAuth, setShowAuth] = useState(() => {
 
         {/* ── Test mode + speed toggle ── */}
         <div className="fade-up fade-up-4 space-y-3">
-          <p className="text-zinc-500 text-[11px] font-medium uppercase tracking-[0.2em]">Test type</p>
+          <p className="text-zinc-400 text-[11px] font-medium uppercase tracking-[0.2em] inline-flex items-center gap-2 bg-base/60 backdrop-blur-sm px-3 py-1 rounded-full">
+            <span className="w-4 h-4 rounded-full bg-accent/20 text-accent text-[10px] flex items-center justify-center font-bold">2</span>
+            Select test type
+          </p>
           <div className="flex justify-center gap-2" role="tablist" aria-label="Test mode">
             {(['goldmann', 'ring', 'static'] as const).map(mode => (
               <button
@@ -648,6 +679,24 @@ const [showAuth, setShowAuth] = useState(() => {
               <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
             </svg>
             {speedMode === 'fast' ? 'Fast mode — ~5 min' : 'Normal speed — ~15 min'}
+          </button>
+        </div>
+
+        {/* ── Start test CTA ──
+            The primary action button. Eye selection + test type + speed
+            are configured above; this button actually launches the flow.
+            Labelled explicitly so first-time visitors don't have to infer
+            that tapping an eye starts a test. */}
+        <div className="fade-up fade-up-5">
+          <button
+            onClick={() => startTest(eye)}
+            className="w-full py-4 min-h-[56px] rounded-2xl text-base font-heading font-bold text-white bg-accent hover:bg-accent-light transition-all duration-300 shadow-[0_4px_24px_rgba(200,144,42,0.25)] hover:shadow-[0_6px_32px_rgba(200,144,42,0.4)] hover:scale-[1.02] focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base"
+            aria-label={`Start ${testMode} test on ${eye === 'both' ? 'both eyes' : eye + ' eye'}`}
+          >
+            Start test
+            <svg className="inline w-4 h-4 ml-2 -mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+              <path d="M5 12h14M13 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
           </button>
         </div>
 
@@ -703,15 +752,20 @@ const [showAuth, setShowAuth] = useState(() => {
             </button>
           )}
           {!user && (
+            // Secondary action — deliberately smaller + dimmer than the
+            // eye-selection CTAs above so first-time visitors don't mistake
+            // "Sign in" for the main entry point to the test. Sign-in is
+            // only needed to save results to the cloud; the test itself
+            // runs anonymously in local storage.
             <button
               onClick={() => setShowAuth(true)}
-              className={`${resultCount > 0 ? 'flex-1' : 'w-full'} py-3 min-h-[48px] text-sm text-zinc-300 hover:text-white bg-white/[0.02] backdrop-blur-sm hover:bg-white/[0.05] rounded-xl transition-all border border-white/[0.06] hover:border-white/[0.12] focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base`}
+              className={`${resultCount > 0 ? 'flex-1' : 'w-full'} py-2 min-h-[40px] text-xs text-zinc-500 hover:text-zinc-300 bg-transparent hover:bg-white/[0.03] rounded-lg transition-all focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base`}
             >
-              <svg className="inline w-4 h-4 mr-1.5 -mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+              <svg className="inline w-3.5 h-3.5 mr-1 -mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
                 <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
                 <circle cx="12" cy="7" r="4" />
               </svg>
-              Sign in
+              Sign in <span className="text-zinc-600">— optional, to save results</span>
             </button>
           )}
         </div>

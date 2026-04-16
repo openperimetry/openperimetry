@@ -50,6 +50,7 @@ ALLOW=(
   web/tsconfig.node.json
   web/vite.config.ts
   web/eslint.config.js
+  web/playwright.config.ts
   web/index.html
   web/Dockerfile
   web/.env.example

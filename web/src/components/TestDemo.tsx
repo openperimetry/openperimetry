@@ -10,7 +10,7 @@ import { VisualFieldMap } from './VisualFieldMap'
 import { calcIsopterAreas } from '../isopterCalc'
 import { Interpretation } from './Interpretation'
 import { VisionSimulator } from './VisionSimulator'
-import { exportResultPDF } from '../pdfExport'
+import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { STIMULI, ISOPTER_ORDER } from '../types'
 import type { TestResult } from '../types'
 
@@ -129,10 +129,10 @@ function ScenarioCard({ scenario, mapSize }: { scenario: ReturnType<typeof getAl
                 calibration: scenario.calibration,
                 testType: 'goldmann',
               }
-              exportResultPDF(result, {
+              exportTrackedResultPDF(result, {
                 isDemo: true,
                 visionSimImage,
-              })
+              }, 'demo')
             }}
             className="w-full py-2.5 btn-primary rounded-xl text-sm font-medium text-white"
           >

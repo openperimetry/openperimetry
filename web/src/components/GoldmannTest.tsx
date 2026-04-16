@@ -7,7 +7,7 @@ import { Interpretation } from './Interpretation'
 import { VisionSimulator } from './VisionSimulator'
 import { saveResult, saveSurvey, hasSurveyForResult, getDeviceId } from '../storage'
 import { trackEvent } from '../api'
-import { exportResultPDF } from '../pdfExport'
+import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { ScenarioOverlay } from './ScenarioOverlay'
 import { PostTestSurvey } from './PostTestSurvey'
 import type { SurveyResponse } from './PostTestSurvey'
@@ -498,6 +498,11 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // Tracking-event lifecycle (start fires on first stimulus, not button click)
   const startedTrackedRef = useRef(false)
   const completedTrackedRef = useRef(false)
+  const testStartedAtRef = useRef<number | null>(null)
+  const getTestDurationSeconds = useCallback(() => {
+    const startedAt = testStartedAtRef.current
+    return startedAt == null ? undefined : Math.max(0, Math.round((Date.now() - startedAt) / 1000))
+  }, [])
 
   // ---------- build initial phase blocks ----------
   useEffect(() => {
@@ -893,6 +898,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       setPhase('moving')
       if (!startedTrackedRef.current) {
         startedTrackedRef.current = true
+        testStartedAtRef.current = Date.now()
         trackEvent('test_started', getDeviceId(), { testType: 'goldmann', eye, speedMode }).catch(() => {})
       }
       rafRef.current = requestAnimationFrame(animate)
@@ -1065,27 +1071,31 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       cancelAnimationFrame(rafRef.current)
       if (startedTrackedRef.current && !completedTrackedRef.current) {
         const consolidated = consolidatePoints(resultsRef.current)
+        const durationSeconds = getTestDurationSeconds()
         trackEvent('test_aborted', getDeviceId(), {
           testType: 'goldmann', eye, phase: phaseRef.current,
           points: String(consolidated.length),
           detected: String(consolidated.filter(p => p.detected).length),
+          ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
         }).catch(() => {})
       }
     }
-  }, [eye])
+  }, [eye, getTestDurationSeconds])
 
   // Fire test_completed when results screen is reached
   useEffect(() => {
     if (phase === 'results' && startedTrackedRef.current && !completedTrackedRef.current) {
       completedTrackedRef.current = true
       const consolidated = consolidatePoints(results)
+      const durationSeconds = getTestDurationSeconds()
       trackEvent('test_completed', getDeviceId(), {
         testType: 'goldmann', eye,
         points: String(consolidated.length),
         detected: String(consolidated.filter(p => p.detected).length),
+        ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
       }).catch(() => {})
     }
-  }, [phase, eye, results])
+  }, [phase, eye, results, getTestDurationSeconds])
 
   // ---------- save ----------
   const handleSave = () => {
@@ -1098,6 +1108,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       isopterAreas: calcIsopterAreas(consolidated),
       calibration,
       testType: 'goldmann',
+      durationSeconds: getTestDurationSeconds(),
     }
     saveResult(result)
     setSavedId(result.id)
@@ -1576,11 +1587,12 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
                   eye,
                   date: new Date().toISOString(),
                   points: consolidated,
-                  isopterAreas: areas,
-                  calibration,
-                  testType: 'goldmann',
-                }
-                exportResultPDF(result)
+	                  isopterAreas: areas,
+	                  calibration,
+	                  testType: 'goldmann',
+	                  durationSeconds: getTestDurationSeconds(),
+	                }
+                exportTrackedResultPDF(result)
               }}
               className="flex-1 py-3 btn-primary rounded-xl font-medium text-white"
             >

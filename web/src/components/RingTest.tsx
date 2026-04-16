@@ -8,7 +8,7 @@ import { calcIsopterAreas } from '../isopterCalc'
 import { Interpretation } from './Interpretation'
 import { saveResult, saveSurvey, hasSurveyForResult, getDeviceId } from '../storage'
 import { trackEvent } from '../api'
-import { exportResultPDF } from '../pdfExport'
+import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { ScenarioOverlay } from './ScenarioOverlay'
 import { VisionSimulator } from './VisionSimulator'
 import { BackButton } from './AccessibleNav'
@@ -98,29 +98,38 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
   // Tracking-event lifecycle (start fires on first arc movement, not button click)
   const startedTrackedRef = useRef(false)
   const completedTrackedRef = useRef(false)
+  const testStartedAtRef = useRef<number | null>(null)
+  const getTestDurationSeconds = useCallback(() => {
+    const startedAt = testStartedAtRef.current
+    return startedAt == null ? undefined : Math.max(0, Math.round((Date.now() - startedAt) / 1000))
+  }, [])
   const phaseRef = useRef<Phase>('instructions')
   useEffect(() => { phaseRef.current = phase }, [phase])
 
   useEffect(() => {
     if (phase === 'results' && startedTrackedRef.current && !completedTrackedRef.current) {
       completedTrackedRef.current = true
+      const durationSeconds = getTestDurationSeconds()
       trackEvent('test_completed', getDeviceId(), {
         testType: 'ring', eye,
         events: String(eventsRef.current.length),
+        ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
       }).catch(() => {})
     }
-  }, [phase, eye])
+  }, [phase, eye, getTestDurationSeconds])
 
   useEffect(() => {
     return () => {
       if (startedTrackedRef.current && !completedTrackedRef.current) {
+        const durationSeconds = getTestDurationSeconds()
         trackEvent('test_aborted', getDeviceId(), {
           testType: 'ring', eye, phase: phaseRef.current,
           events: String(eventsRef.current.length),
+          ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
         }).catch(() => {})
       }
     }
-  }, [eye])
+  }, [eye, getTestDurationSeconds])
 
   const pxPerDeg = calibration.pixelsPerDegree
   const fixOffsetX = calibration.fixationOffsetPx
@@ -371,6 +380,7 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
     }
     if (!startedTrackedRef.current) {
       startedTrackedRef.current = true
+      testStartedAtRef.current = Date.now()
       trackEvent('test_started', getDeviceId(), { testType: 'ring', eye }).catch(() => {})
     }
     const maxReach = getMaxEccForSector(sectorIdxRef.current)
@@ -970,11 +980,12 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
     const areas = calcIsopterAreas(pts)
     const mapSize = Math.min(500, typeof window !== 'undefined' ? window.innerWidth - 48 : 500)
 
-    if (!savedId && pts.length > 0) {
-      const result: TestResult = {
-        id: crypto.randomUUID(), eye, date: new Date().toISOString(),
-        points: pts, isopterAreas: areas, calibration, testType: 'ring',
-      }
+	    if (!savedId && pts.length > 0) {
+	      const result: TestResult = {
+	        id: crypto.randomUUID(), eye, date: new Date().toISOString(),
+	        points: pts, isopterAreas: areas, calibration, testType: 'ring',
+	        durationSeconds: getTestDurationSeconds(),
+	      }
       saveResult(result)
       setSavedId(result.id)
     }
@@ -1073,12 +1084,13 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
                   id: savedId,
                   eye,
                   date: new Date().toISOString(),
-                  points: pts,
-                  isopterAreas: areas,
-                  calibration,
-                  testType: 'ring',
-                }
-                exportResultPDF(result)
+	                  points: pts,
+	                  isopterAreas: areas,
+	                  calibration,
+	                  testType: 'ring',
+	                  durationSeconds: getTestDurationSeconds(),
+	                }
+                exportTrackedResultPDF(result)
               }}
               className="flex-1 py-3 btn-primary rounded-xl font-medium text-white"
             >

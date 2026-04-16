@@ -6,7 +6,7 @@ import { calcIsopterAreas } from '../isopterCalc'
 import { Interpretation } from './Interpretation'
 import { VisionSimulator } from './VisionSimulator'
 import { saveResult } from '../storage'
-import { exportResultPDF } from '../pdfExport'
+import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { ScenarioOverlay } from './ScenarioOverlay'
 import { formatEyeLabel } from '../eyeLabels'
 import { ClinicalDisclaimer } from './ClinicalDisclaimer'
@@ -305,11 +305,11 @@ export function BinocularResults({
                 isopterAreas: combinedAreas,
                 calibration,
               }
-              exportResultPDF(result, {
+              exportTrackedResultPDF(result, {
                 binocular: true,
                 rightEyePoints: rightPoints,
                 leftEyePoints: leftPoints,
-              })
+              }, 'binocular_results')
             }}
             className="flex-1 py-3 btn-primary rounded-xl font-medium text-white"
           >

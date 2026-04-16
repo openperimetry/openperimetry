@@ -55,6 +55,8 @@ export interface TestResult {
   isopterAreas: Partial<Record<StimulusKey, number>>
   calibration: CalibrationData
   testType?: TestType
+  /** Elapsed time from first presented stimulus/interaction to results. */
+  durationSeconds?: number
   /** Links two single-eye TestResults from the same binocular session. */
   binocularGroup?: string
 }

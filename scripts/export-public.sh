@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 # scripts/export-public.sh — export a clean copy of the private repo to
-# the public openperimetry/openperimetry repo with a fresh single-commit
-# history.
+# the public openperimetry/openperimetry repo.
 #
 # Usage:
-#   ./scripts/export-public.sh [TARGET_DIR]
+#   ./scripts/export-public.sh -m "Describe the public update" [TARGET_DIR]
 #
-# TARGET_DIR defaults to ../openperimetry. The script:
+# TARGET_DIR defaults to $PUBLIC_REPO_DIR when set, otherwise to the
+# checked-out public repo at ../../openperimetry/openperimetry. The script:
 #   1. Copies allowed files from the current repo into TARGET_DIR.
 #   2. Removes anything not on the allowlist.
-#   3. Initialises a fresh git repo (or reuses one) and creates a single
-#      "Initial commit" on main.
+#   3. Initialises a fresh git repo on first export, otherwise commits onto
+#      the existing public history with the provided commit message.
 #
 # After running, cd into TARGET_DIR and push:
-#   cd ../openperimetry
+#   cd ../../openperimetry/openperimetry
 #   git remote add origin https://github.com/openperimetry/openperimetry.git
-#   git push -u origin main --force
+#   git push -u origin main
 #
 # IMPORTANT: always run from the repo root (where this script lives under scripts/).
 
@@ -23,9 +23,62 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-TARGET="${1:-$REPO_ROOT/../openperimetry}"
+DEFAULT_TARGET="$REPO_ROOT/../../openperimetry/openperimetry"
+TARGET="${PUBLIC_REPO_DIR:-$DEFAULT_TARGET}"
+COMMIT_MESSAGE="${PUBLIC_COMMIT_MESSAGE:-}"
 
-echo "==> Exporting from $REPO_ROOT → $TARGET"
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./scripts/export-public.sh -m "Commit message" [TARGET_DIR]
+
+Options:
+  -m, --message MESSAGE   Commit message for this public export.
+  -h, --help              Show this help.
+
+TARGET_DIR defaults to $PUBLIC_REPO_DIR when set, otherwise to
+../../openperimetry/openperimetry.
+USAGE
+}
+
+target_set=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -m|--message)
+      shift
+      if [ "$#" -eq 0 ]; then
+        echo "ERROR: missing value for --message" >&2
+        usage >&2
+        exit 2
+      fi
+      COMMIT_MESSAGE="$1"
+      ;;
+    --message=*)
+      COMMIT_MESSAGE="${1#*=}"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "ERROR: unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      if [ "$target_set" -eq 1 ]; then
+        echo "ERROR: target directory was provided more than once" >&2
+        usage >&2
+        exit 2
+      fi
+      TARGET="$1"
+      target_set=1
+      ;;
+  esac
+  shift
+done
+
+echo "==> Exporting from $REPO_ROOT to $TARGET"
 
 # ── Allowlist ────────────────────────────────────────────────────────
 # Only these paths are copied. Everything else (infra/, .github/workflows
@@ -55,6 +108,7 @@ ALLOW=(
   web/Dockerfile
   web/.env.example
   web/public/
+  web/docs/
   web/src/
   web/e2e/
 
@@ -122,36 +176,61 @@ rm -f "$TARGET/api/.env" "$TARGET/web/.env" "$TARGET/web/.env.local"
 rm -rf "$TARGET/api/data/"
 rm -rf "$TARGET/web/node_modules" "$TARGET/api/node_modules"
 
-# ── Verify no tiktak / personal references leaked ────────────────────
+# ── Verify no private references leaked ───────────────────────────────
 
 echo ""
 echo "==> Scanning for private references..."
-LEAKS=$(grep -rIl 'tiktak\|tiktakme\|daniel\.tom@tiktak' "$TARGET" 2>/dev/null || true)
+PRIVATE_TERMS=(
+  'tik''tak'
+  'tik''takme'
+  'daniel\.tom@tik''tak'
+  'visualfield''check'
+)
+LEAK_PATTERN=$(IFS='|'; echo "${PRIVATE_TERMS[*]}")
+LEAKS=$(grep -RIlE --exclude-dir='.git' --exclude-dir='node_modules' --exclude-dir='dist' "$LEAK_PATTERN" "$TARGET" 2>/dev/null || true)
 if [ -n "$LEAKS" ]; then
-  echo "  WARNING: found private references in:"
+  echo "  ERROR: found private references in:"
   echo "$LEAKS" | sed 's/^/    /'
-  echo "  Review these files before pushing."
+  echo "  Remove or public-safe those references before pushing."
+  exit 1
 else
   echo "  Clean — no private references found."
 fi
 
-# ── Git init + single commit ─────────────────────────────────────────
+# ── Git init + commit ─────────────────────────────────────────────────
 
 cd "$TARGET"
+is_initial_export=0
 if [ ! -d .git ]; then
   git init -b main
+  is_initial_export=1
+elif ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+  is_initial_export=1
 fi
 
-git add -A
-git commit -m "Initial commit — OpenPerimetry visual field self-test
+if [ -z "$COMMIT_MESSAGE" ]; then
+  if [ "$is_initial_export" -eq 1 ]; then
+    COMMIT_MESSAGE="Initial commit — OpenPerimetry visual field self-test
 
 Apache-2.0 licensed. See README.md for setup instructions.
 
-Squashed from the private development repository with fresh history."
+Exported from the private development repository with fresh history."
+  else
+    echo "ERROR: provide a commit message with -m/--message or PUBLIC_COMMIT_MESSAGE." >&2
+    exit 2
+  fi
+fi
+
+git add -A
+if git diff --cached --quiet; then
+  echo "==> No exported changes to commit."
+else
+  git commit -m "$COMMIT_MESSAGE"
+fi
 
 echo ""
 echo "==> Done. Target: $TARGET"
 echo "    To push:"
 echo "      cd $TARGET"
 echo "      git remote add origin https://github.com/openperimetry/openperimetry.git"
-echo "      git push -u origin main --force"
+echo "      git push -u origin main"

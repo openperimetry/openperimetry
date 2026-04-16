@@ -16,8 +16,9 @@ import { AdminPage } from './components/AdminPage'
 import { AuthModal } from './components/AuthModal'
 import { ClinicalDisclaimer } from './components/ClinicalDisclaimer'
 import { useAuth } from './AuthContext'
-import { getResults } from './storage'
+import { getDeviceId, getResults } from './storage'
 import { APP_NAME, APP_DOMAIN, APP_TAGLINE, TITLE_SUFFIX, HAS_ABOUT_PAGE, GITHUB_URL, HAS_GITHUB_LINK, whatsappShareUrl } from './branding'
+import { trackEvent } from './api'
 
 type Page = 'home' | 'calibration' | 'test' | 'ring-test' | 'static-test' | 'binocular-switch' | 'binocular-test-left' | 'binocular-results' | 'history' | 'demo' | 'science' | 'methods' | 'about' | 'contact' | 'privacy' | 'admin'
 type TestMode = 'goldmann' | 'ring' | 'static'
@@ -825,6 +826,9 @@ const [showAuth, setShowAuth] = useState(() => {
           <div className="flex justify-center gap-3 pt-2">
             <a
               href={whatsappShareUrl()}
+              onClick={() => {
+                trackEvent('whatsapp_shared', getDeviceId(), { source: 'home_footer' }).catch(() => {})
+              }}
               target="_blank"
               rel="noopener"
               className="inline-flex items-center gap-1.5 text-zinc-500 hover:text-green-400 text-xs transition-colors min-h-[44px] px-1"

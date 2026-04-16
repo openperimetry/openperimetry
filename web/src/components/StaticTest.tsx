@@ -7,7 +7,7 @@ import { Interpretation } from './Interpretation'
 import { VisionSimulator } from './VisionSimulator'
 import { saveResult, saveSurvey, hasSurveyForResult, getDeviceId } from '../storage'
 import { trackEvent } from '../api'
-import { exportResultPDF } from '../pdfExport'
+import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { ScenarioOverlay } from './ScenarioOverlay'
 import { PostTestSurvey } from './PostTestSurvey'
 import type { SurveyResponse } from './PostTestSurvey'
@@ -253,6 +253,11 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   // Tracking-event lifecycle (start fires on first stimulus, not button click)
   const startedTrackedRef = useRef(false)
   const completedTrackedRef = useRef(false)
+  const testStartedAtRef = useRef<number | null>(null)
+  const getTestDurationSeconds = useCallback(() => {
+    const startedAt = testStartedAtRef.current
+    return startedAt == null ? undefined : Math.max(0, Math.round((Date.now() - startedAt) / 1000))
+  }, [])
 
   // Update phaseRef when phase changes
   useEffect(() => {
@@ -824,6 +829,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
       phaseRef.current = 'testing'
       if (!startedTrackedRef.current) {
         startedTrackedRef.current = true
+        testStartedAtRef.current = Date.now()
         trackEvent('test_started', getDeviceId(), { testType: 'static', eye }).catch(() => {})
       }
       setTimeout(() => presentNext(), 500)
@@ -846,29 +852,33 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     return () => {
       clearAllTimeouts()
       if (startedTrackedRef.current && !completedTrackedRef.current) {
-        // The abort event needs the latest tested-points ref at unmount.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-        const tested = Array.from(testedPointsRef.current.values())
-        trackEvent('test_aborted', getDeviceId(), {
-          testType: 'static', eye, phase: phaseRef.current,
-          points: String(tested.length),
-          detected: String(tested.filter(p => p.status === 'seen').length),
-        }).catch(() => {})
-      }
-    }
-  }, [clearAllTimeouts, eye])
+	        // The abort event needs the latest tested-points ref at unmount.
+	        // eslint-disable-next-line react-hooks/exhaustive-deps
+	        const tested = Array.from(testedPointsRef.current.values())
+	        const durationSeconds = getTestDurationSeconds()
+	        trackEvent('test_aborted', getDeviceId(), {
+	          testType: 'static', eye, phase: phaseRef.current,
+	          points: String(tested.length),
+	          detected: String(tested.filter(p => p.status === 'seen').length),
+	          ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
+	        }).catch(() => {})
+	      }
+	    }
+	  }, [clearAllTimeouts, eye, getTestDurationSeconds])
 
   // Fire test_completed when results screen is reached
-  useEffect(() => {
-    if (phase === 'results' && startedTrackedRef.current && !completedTrackedRef.current) {
-      completedTrackedRef.current = true
-      trackEvent('test_completed', getDeviceId(), {
-        testType: 'static', eye,
-        points: String(results.length),
-        detected: String(results.filter(p => p.detected).length),
-      }).catch(() => {})
-    }
-  }, [phase, eye, results])
+	  useEffect(() => {
+	    if (phase === 'results' && startedTrackedRef.current && !completedTrackedRef.current) {
+	      completedTrackedRef.current = true
+	      const durationSeconds = getTestDurationSeconds()
+	      trackEvent('test_completed', getDeviceId(), {
+	        testType: 'static', eye,
+	        points: String(results.length),
+	        detected: String(results.filter(p => p.detected).length),
+	        ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
+	      }).catch(() => {})
+	    }
+	  }, [phase, eye, results, getTestDurationSeconds])
 
   // ---------- wrap onDone ----------
   const handleDone = () => {
@@ -883,10 +893,11 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
       eye,
       date: new Date().toISOString(),
       points: results,
-      isopterAreas: calcIsopterAreas(results),
-      calibration,
-      testType: 'static',
-    }
+	      isopterAreas: calcIsopterAreas(results),
+	      calibration,
+	      testType: 'static',
+	      durationSeconds: getTestDurationSeconds(),
+	    }
     saveResult(result)
     setSavedId(result.id)
   }
@@ -1308,11 +1319,12 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
                   eye,
                   date: new Date().toISOString(),
                   points: results,
-                  isopterAreas: areas,
-                  calibration,
-                  testType: 'static',
-                }
-                exportResultPDF(result)
+	                  isopterAreas: areas,
+	                  calibration,
+	                  testType: 'static',
+	                  durationSeconds: getTestDurationSeconds(),
+	                }
+                exportTrackedResultPDF(result)
               }}
               className="flex-1 py-3 btn-primary rounded-xl font-medium text-white"
             >

@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import type { TestResult } from '../types'
 import { STIMULI, ISOPTER_ORDER } from '../types'
-import { getResults, deleteResult, saveResult } from '../storage'
+import { getResults, deleteResult, saveResult, saveSurvey, hasSurveyForResult } from '../storage'
 import { VisualFieldMap } from './VisualFieldMap'
 import { Interpretation } from './Interpretation'
 import { VisionSimulator } from './VisionSimulator'
-import { exportResultPDF } from '../pdfExport'
+import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { downloadOvfx, parseOvfxFile, OvfxImportError } from '../ovfx'
 import { useAuth } from '../AuthContext'
 import { formatEyeLabel } from '../eyeLabels'
@@ -13,6 +13,8 @@ import * as api from '../api'
 import { BackButton } from './AccessibleNav'
 import { ClinicalDisclaimer } from './ClinicalDisclaimer'
 import { ScenarioOverlay } from './ScenarioOverlay'
+import { PostTestSurvey } from './PostTestSurvey'
+import type { SurveyResponse } from './PostTestSurvey'
 
 /** Shape markers for each isopter so color isn't the only differentiator */
 const ISOPTER_SHAPES: Record<string, string> = {
@@ -36,6 +38,8 @@ export function HistoryView({ onBack }: Props) {
   const [syncedIds, setSyncedIds] = useState<Set<string>>(new Set())
   const [importMessage, setImportMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
   const [showOvfxHelp, setShowOvfxHelp] = useState(false)
+  const [surveyOpenForId, setSurveyOpenForId] = useState<string | null>(null)
+  const [surveyDoneIds, setSurveyDoneIds] = useState<Set<string>>(new Set())
   const importInputRef = useRef<HTMLInputElement>(null)
   const { user } = useAuth()
 
@@ -83,6 +87,14 @@ export function HistoryView({ onBack }: Props) {
     setConfirmDeleteId(null)
     // Also delete from server if logged in
     if (user) api.deleteVFResult(id).catch(() => {})
+  }
+
+  const resultHasSurvey = (id: string) => surveyDoneIds.has(id) || hasSurveyForResult(id)
+
+  const handleSurveySubmit = (resultId: string, response: SurveyResponse) => {
+    saveSurvey(resultId, response)
+    setSurveyDoneIds(prev => new Set(prev).add(resultId))
+    setSurveyOpenForId(null)
   }
 
   // Group results by binocularGroup so a paired binocular session shows up as
@@ -177,11 +189,11 @@ export function HistoryView({ onBack }: Props) {
             <p>Total points: {selected.points.length} ({selected.points.filter(p => p.detected).length} detected)</p>
           </div>
           <ClinicalDisclaimer variant="results" />
-          <div className="flex gap-3">
-            <button
-              onClick={() => exportResultPDF(selected)}
-              className="flex-1 py-2.5 btn-primary rounded-xl text-sm font-medium text-white"
-            >
+	          <div className="flex gap-3">
+	            <button
+	              onClick={() => exportTrackedResultPDF(selected, undefined, 'history_detail')}
+	              className="flex-1 py-2.5 btn-primary rounded-xl text-sm font-medium text-white"
+	            >
               Export PDF
             </button>
             <button
@@ -196,10 +208,26 @@ export function HistoryView({ onBack }: Props) {
               className="py-2.5 px-4 bg-surface hover:bg-elevated rounded-xl text-sm text-red-400 hover:text-red-300 transition-colors border border-white/[0.06]"
             >
               Delete
-            </button>
-          </div>
+	            </button>
+	          </div>
 
-          {/* Delete confirmation dialog */}
+	          {resultHasSurvey(selected.id) ? (
+	            <p className="text-center text-teal text-xs">Feedback saved for this result.</p>
+	          ) : surveyOpenForId === selected.id ? (
+	            <PostTestSurvey
+	              onSubmit={(response: SurveyResponse) => handleSurveySubmit(selected.id, response)}
+	              onSkip={() => setSurveyOpenForId(null)}
+	            />
+	          ) : (
+	            <button
+	              onClick={() => setSurveyOpenForId(selected.id)}
+	              className="w-full py-2.5 bg-surface hover:bg-elevated rounded-xl text-sm font-medium text-zinc-200 transition-colors border border-white/[0.06]"
+	            >
+	              Add feedback for this result
+	            </button>
+	          )}
+
+	          {/* Delete confirmation dialog */}
           {confirmDeleteId && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="presentation">
               <div
@@ -397,23 +425,28 @@ export function HistoryView({ onBack }: Props) {
           <ResultsList
             binocularGroups={binocularGroups}
             singleResults={[...rightEyeResults, ...leftEyeResults]}
-            onSelect={setSelected}
-            onExportPDF={entry => {
-              if (entry.kind === 'single') {
-                exportResultPDF(entry.result)
-                return
-              }
+	            onSelect={setSelected}
+	            onSurvey={result => {
+	              setSelected(result)
+	              if (!resultHasSurvey(result.id)) setSurveyOpenForId(result.id)
+	            }}
+	            onExportPDF={entry => {
+	              if (entry.kind === 'single') {
+	                exportTrackedResultPDF(entry.result, undefined, 'history_list')
+	                return
+	              }
               // Binocular pair — render as combined OU report.
               const anchor = entry.right ?? entry.left
               if (!anchor) return
               const rightPoints = entry.right?.points ?? []
               const leftPoints = entry.left?.points ?? []
               const combined = [...rightPoints, ...leftPoints]
-              exportResultPDF(
-                { ...anchor, points: combined },
-                { binocular: true, rightEyePoints: rightPoints, leftEyePoints: leftPoints },
-              )
-            }}
+	              exportTrackedResultPDF(
+	                { ...anchor, points: combined },
+	                { binocular: true, rightEyePoints: rightPoints, leftEyePoints: leftPoints },
+	                'history_list',
+	              )
+	            }}
             onExportOvfx={entry => {
               if (entry.kind === 'single') {
                 downloadOvfx(entry.result)
@@ -425,9 +458,10 @@ export function HistoryView({ onBack }: Props) {
               if (entry.right) downloadOvfx(entry.right)
               if (entry.left) downloadOvfx(entry.left)
             }}
-            syncedIds={syncedIds}
-            showSync={!!user}
-          />
+	            syncedIds={syncedIds}
+	            showSync={!!user}
+	            hasSurvey={resultHasSurvey}
+	          />
         )}
       </main>
     </div>
@@ -461,20 +495,24 @@ function SyncIndicator({ synced }: { synced: boolean }) {
 function ResultsList({
   binocularGroups,
   singleResults,
-  onSelect,
-  onExportPDF,
-  onExportOvfx,
-  syncedIds,
-  showSync,
-}: {
-  binocularGroups: { groupId: string; right?: TestResult; left?: TestResult; date: string }[]
-  singleResults: TestResult[]
-  onSelect: (r: TestResult) => void
-  onExportPDF: (entry: ListEntry) => void
-  onExportOvfx: (entry: ListEntry) => void
-  syncedIds: Set<string>
-  showSync: boolean
-}) {
+	  onSelect,
+	  onSurvey,
+	  onExportPDF,
+	  onExportOvfx,
+	  syncedIds,
+	  showSync,
+	  hasSurvey,
+	}: {
+	  binocularGroups: { groupId: string; right?: TestResult; left?: TestResult; date: string }[]
+	  singleResults: TestResult[]
+	  onSelect: (r: TestResult) => void
+	  onSurvey: (r: TestResult) => void
+	  onExportPDF: (entry: ListEntry) => void
+	  onExportOvfx: (entry: ListEntry) => void
+	  syncedIds: Set<string>
+	  showSync: boolean
+	  hasSurvey: (id: string) => boolean
+	}) {
   // Merge into a single chronological list. Binocular pairs are one entry with
   // two sub-buttons; single-eye results are one entry with one button.
   const entries: ListEntry[] = [
@@ -509,10 +547,12 @@ function ResultsList({
           const eyeBadgeLabel: 'OD' | 'OS' | 'OU' = entry.kind === 'single'
             ? formatEyeLabel(entry.result.eye)
             : 'OU'
-          const keyId = entry.kind === 'single' ? `single-${entry.result.id}` : `pair-${entry.groupId || i}`
-          const anyR = entry.kind === 'single' ? entry.result : (entry.right ?? entry.left)
+	          const keyId = entry.kind === 'single' ? `single-${entry.result.id}` : `pair-${entry.groupId || i}`
+	          const anyR = entry.kind === 'single' ? entry.result : (entry.right ?? entry.left)
+	          const surveyTarget = entry.kind === 'single' ? entry.result : (entry.right ?? entry.left)
+	          const surveySaved = surveyTarget ? hasSurvey(surveyTarget.id) : false
 
-          return (
+	          return (
             <div
               key={keyId}
               className="px-4 py-3 bg-surface rounded-2xl border border-white/[0.06] space-y-2"
@@ -526,9 +566,26 @@ function ResultsList({
                 {testTypeBadge(testType)}
                 {entry.kind === 'single' && anyR && (
                   <span className="text-zinc-500 text-xs ml-2">{anyR.points.length} pts</span>
-                )}
-                <div className="ml-auto flex items-center gap-1">
-                  <button
+	                )}
+	                <div className="ml-auto flex items-center gap-1">
+	                  {surveyTarget && (
+	                    <button
+	                      onClick={e => { e.stopPropagation(); onSurvey(surveyTarget) }}
+	                      aria-label={surveySaved ? 'Feedback saved' : 'Add feedback'}
+	                      title={surveySaved ? 'Feedback saved' : 'Add feedback'}
+	                      className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${
+	                        surveySaved
+	                          ? 'text-teal hover:bg-white/[0.06]'
+	                          : 'text-zinc-500 hover:text-white hover:bg-white/[0.06]'
+	                      }`}
+	                    >
+	                      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={1.6} aria-hidden="true">
+	                        <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v8z" />
+	                        {surveySaved && <path d="m8 11 2.2 2.2L15.5 8" />}
+	                      </svg>
+	                    </button>
+	                  )}
+	                  <button
                     onClick={e => { e.stopPropagation(); onExportPDF(entry) }}
                     aria-label="Export as PDF"
                     title="Export as PDF"

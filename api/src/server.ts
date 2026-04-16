@@ -522,7 +522,7 @@ app.get('/api/admin/surveys', requireAuth, requireAdmin, async (_req, res) => {
 // ── Anonymous usage events ──
 
 const eventSchema = z.object({
-  event: z.enum(['test_started', 'test_completed', 'test_aborted', 'page_view']),
+  event: z.enum(['test_started', 'test_completed', 'test_aborted', 'page_view', 'pdf_exported', 'whatsapp_shared']),
   deviceId: z.string().uuid(),
   meta: z.record(z.string(), z.string()).optional(),
 })

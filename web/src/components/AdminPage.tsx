@@ -51,6 +51,14 @@ function labelOf(map: Record<string, string>, value: string | null): string {
   return map[value] ?? value
 }
 
+function formatDuration(seconds: number | null): string {
+  if (seconds == null) return '—'
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  return `${minutes}m ${remainder.toString().padStart(2, '0')}s`
+}
+
 export function AdminPage({ onBack }: Props) {
   const [tab, setTab] = useState<Tab>('events')
   const [stats, setStats] = useState<AdminStats | null>(null)
@@ -60,6 +68,8 @@ export function AdminPage({ onBack }: Props) {
   const [surveys, setSurveys] = useState<AdminSurveyRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const pdfExportCount = events.filter(e => e.event === 'pdf_exported').length
+  const whatsappShareCount = events.filter(e => e.event === 'whatsapp_shared').length
 
   useEffect(() => {
     Promise.all([getAdminStats(), getAdminEvents(), getAdminSessions(), getAdminVFResults(), getAdminSurveys()])
@@ -85,11 +95,13 @@ export function AdminPage({ onBack }: Props) {
         {/* Stats */}
         {stats && (
           <>
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-7 gap-3">
               <StatCard label="Users" value={stats.totalUsers} />
               <StatCard label="Sessions" value={stats.activeSessions} />
               <StatCard label="VF synced" value={stats.totalVFResults} />
               <StatCard label="Surveys" value={stats.totalSurveys} />
+              <StatCard label="PDF exports" value={pdfExportCount} />
+              <StatCard label="WhatsApp" value={whatsappShareCount} />
               <StatCard label="VF total" value={stats.totalVFResults + stats.totalVFResultsByDevice} sub={`${stats.totalVFResultsByDevice} anon`} />
             </div>
 
@@ -170,14 +182,16 @@ export function AdminPage({ onBack }: Props) {
                         </span>
                       </td>
                       <td className="px-3 py-2.5">
-                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                          e.event === 'test_completed' ? 'bg-green-600/20 text-green-400'
-                          : e.event === 'test_started' ? 'bg-blue-600/20 text-blue-400'
-                          : e.event === 'test_aborted' ? 'bg-amber-600/20 text-amber-400'
-                          : 'bg-gray-700/50 text-gray-300'
-                        }`}>
-                          {e.event.replace('_', ' ')}
-                        </span>
+	                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+	                          e.event === 'test_completed' ? 'bg-green-600/20 text-green-400'
+	                          : e.event === 'test_started' ? 'bg-blue-600/20 text-blue-400'
+	                          : e.event === 'test_aborted' ? 'bg-amber-600/20 text-amber-400'
+	                          : e.event === 'pdf_exported' ? 'bg-violet-600/20 text-violet-400'
+	                          : e.event === 'whatsapp_shared' ? 'bg-emerald-600/20 text-emerald-400'
+	                          : 'bg-gray-700/50 text-gray-300'
+	                        }`}>
+	                          {e.event.replaceAll('_', ' ')}
+	                        </span>
                       </td>
                       <td className="px-3 py-2.5 text-gray-400 text-xs">
                         {Object.entries(e.meta).map(([k, v]) => (
@@ -250,9 +264,10 @@ export function AdminPage({ onBack }: Props) {
                   <tr>
                     <th className="px-3 py-3">Date</th>
                     <th className="px-3 py-3">Eye</th>
-                    <th className="px-3 py-3">Test Type</th>
-                    <th className="px-3 py-3">Points</th>
-                    <th className="px-3 py-3">User ID</th>
+	                    <th className="px-3 py-3">Test Type</th>
+	                    <th className="px-3 py-3">Points</th>
+	                    <th className="px-3 py-3">Duration</th>
+	                    <th className="px-3 py-3">User ID</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800/30">
@@ -272,11 +287,12 @@ export function AdminPage({ onBack }: Props) {
                         </span>
                       </td>
                       <td className="px-3 py-2.5 text-gray-400">{labelOf(TEST_TYPE_LABELS, r.testType)}</td>
-                      <td className="px-3 py-2.5 text-gray-400 font-mono text-xs">
-                        <span className="text-green-400">{r.detectedPoints}</span>
-                        <span className="text-gray-600">/{r.totalPoints}</span>
-                      </td>
-                      <td className="px-3 py-2.5 text-gray-600 font-mono text-xs">{r.userId.slice(0, 8)}</td>
+	                      <td className="px-3 py-2.5 text-gray-400 font-mono text-xs">
+	                        <span className="text-green-400">{r.detectedPoints}</span>
+	                        <span className="text-gray-600">/{r.totalPoints}</span>
+	                      </td>
+	                      <td className="px-3 py-2.5 text-gray-400 font-mono text-xs">{formatDuration(r.durationSeconds)}</td>
+	                      <td className="px-3 py-2.5 text-gray-600 font-mono text-xs">{r.userId.slice(0, 8)}</td>
                     </tr>
                   ))}
                 </tbody>

@@ -481,7 +481,7 @@ function drawWrappedText(doc: jsPDF, text: string, x: number, y: number, maxW: n
 
 // ── Main export function ──
 
-export async function exportResultPDF(result: TestResult, options?: {
+export type PDFExportOptions = {
   isDemo?: boolean
   visionSimImage?: string
   /** Render as a binocular report with per-eye radar maps. Required when
@@ -490,7 +490,9 @@ export async function exportResultPDF(result: TestResult, options?: {
   /** Per-eye points for binocular tests — enables per-eye radar maps */
   rightEyePoints?: TestPoint[]
   leftEyePoints?: TestPoint[]
-}): Promise<void> {
+}
+
+export async function exportResultPDF(result: TestResult, options?: PDFExportOptions): Promise<void> {
   const isDemo = options?.isDemo ?? false
   const visionSimImage = options?.visionSimImage
   const isBinocular = options?.binocular ?? false

@@ -4,7 +4,7 @@ A free, open-source visual field self-test. Run Goldmann-style kinetic perimetry
 
 **Not a medical device.** Always consult your ophthalmologist for diagnosis and treatment. See the in-app [clinical disclaimer](web/src/components/ClinicalDisclaimer.tsx) for the full statement.
 
-A hosted instance is available at [visualfieldcheck.com](https://visualfieldcheck.com).
+Hosted-instance operators can configure their own public URL and branding.
 
 ## What it does
 

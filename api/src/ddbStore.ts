@@ -729,6 +729,7 @@ export type AdminVFResultRecord = {
   testType: string | null
   totalPoints: number
   detectedPoints: number
+  durationSeconds: number | null
 }
 
 export async function listAllVFResults(): Promise<AdminVFResultRecord[]> {
@@ -748,9 +749,12 @@ export async function listAllVFResults(): Promise<AdminVFResultRecord[]> {
       let testType: string | null = null
       let totalPoints = 0
       let detectedPoints = 0
+      let durationSeconds: number | null = null
       try {
         const data = JSON.parse(String(item.data ?? '{}'))
         testType = data.testType ?? null
+        const parsedDuration = Number(data.durationSeconds)
+        durationSeconds = Number.isFinite(parsedDuration) ? Math.max(0, Math.round(parsedDuration)) : null
         if (Array.isArray(data.points)) {
           totalPoints = data.points.length
           detectedPoints = data.points.filter((p: { detected?: boolean }) => p.detected).length
@@ -765,6 +769,7 @@ export async function listAllVFResults(): Promise<AdminVFResultRecord[]> {
         testType,
         totalPoints,
         detectedPoints,
+        durationSeconds,
       })
     }
 
@@ -840,7 +845,7 @@ export async function listAllSurveys(): Promise<AdminSurveyRecord[]> {
 
 // ── Anonymous usage events ──
 
-export type EventType = 'test_started' | 'test_completed' | 'test_aborted' | 'page_view'
+export type EventType = 'test_started' | 'test_completed' | 'test_aborted' | 'page_view' | 'pdf_exported' | 'whatsapp_shared'
 
 export async function trackEvent(deviceId: string, event: EventType, meta?: Record<string, string>): Promise<void> {
   const now = new Date()

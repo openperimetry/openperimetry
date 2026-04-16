@@ -170,6 +170,7 @@ export interface AdminVFResultRecord {
   testType: string | null
   totalPoints: number
   detectedPoints: number
+  durationSeconds: number | null
 }
 
 export interface AdminSessionRecord {
@@ -183,7 +184,9 @@ export interface AdminSessionRecord {
 
 // ── Anonymous events ──
 
-export async function trackEvent(event: 'test_started' | 'test_completed' | 'test_aborted' | 'page_view', deviceId: string, meta?: Record<string, string>) {
+export type EventName = 'test_started' | 'test_completed' | 'test_aborted' | 'page_view' | 'pdf_exported' | 'whatsapp_shared'
+
+export async function trackEvent(event: EventName, deviceId: string, meta?: Record<string, string>) {
   return request<{ ok: true }>('/api/events', {
     method: 'POST',
     body: JSON.stringify({ event, deviceId, meta }),

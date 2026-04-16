@@ -437,21 +437,24 @@ export async function listAllVFResults(): Promise<AdminVFResultRecord[]> {
     'SELECT id, user_id, eye, date, data FROM vf_results ORDER BY date DESC'
   ).all() as Array<{ id: string; user_id: string; eye: string; date: string; data: string }>
 
-  return rows.map(r => {
-    let testType: string | null = null
-    let totalPoints = 0
-    let detectedPoints = 0
-    try {
-      const data = JSON.parse(r.data)
-      testType = data.testType ?? null
-      if (Array.isArray(data.points)) {
-        totalPoints = data.points.length
-        detectedPoints = data.points.filter((p: { detected?: boolean }) => p.detected).length
-      }
-    } catch { /* skip */ }
-    return { id: r.id, userId: r.user_id, eye: r.eye, date: r.date, testType, totalPoints, detectedPoints }
-  })
-}
+	  return rows.map(r => {
+	    let testType: string | null = null
+	    let totalPoints = 0
+	    let detectedPoints = 0
+	    let durationSeconds: number | null = null
+	    try {
+	      const data = JSON.parse(r.data)
+	      testType = data.testType ?? null
+	      const parsedDuration = Number(data.durationSeconds)
+	      durationSeconds = Number.isFinite(parsedDuration) ? Math.max(0, Math.round(parsedDuration)) : null
+	      if (Array.isArray(data.points)) {
+	        totalPoints = data.points.length
+	        detectedPoints = data.points.filter((p: { detected?: boolean }) => p.detected).length
+	      }
+	    } catch { /* skip */ }
+	    return { id: r.id, userId: r.user_id, eye: r.eye, date: r.date, testType, totalPoints, detectedPoints, durationSeconds }
+	  })
+	}
 
 export async function listAllSurveys(): Promise<AdminSurveyRecord[]> {
   const rows = getDb().prepare(

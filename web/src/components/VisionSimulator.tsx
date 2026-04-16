@@ -55,6 +55,14 @@ interface IsopterBoundary {
    *  a screen-shape peanut doesn't trigger ring bands at some angles but
    *  not others. */
   meanRadius: number
+  /** Pre-rescale mean radius. Used by the ring-scotoma detector to gate
+   *  on "is the far periphery preserved?" — ring scotoma is clinically
+   *  defined by preserved peripheral vision with a mid-peripheral blind
+   *  band. Tunnel constriction (e.g. Moderate RP with outer V4e at ~24°)
+   *  should not emit ring artefacts even when inner-isopter ratios look
+   *  ring-like, because there's no preserved periphery to form the
+   *  outside of a ring. */
+  preRescaleMeanRadius: number
 }
 
 /**
@@ -153,7 +161,13 @@ function buildTaggedBoundaries(
     // VisualFieldMap preserves the original directional geometry.
     const finalBoundary = circularizeBoundary(smooth)
     const meanR = finalBoundary.reduce((s, p) => s + p.normalizedRadius, 0) / finalBoundary.length
-    boundaries.push({ stimulusKey: key, orderIdx: idx, points: finalBoundary, meanRadius: meanR })
+    boundaries.push({
+      stimulusKey: key,
+      orderIdx: idx,
+      points: finalBoundary,
+      meanRadius: meanR,
+      preRescaleMeanRadius: meanR,
+    })
   }
 
   // Enforce the nesting invariant: at every angle, a dimmer isopter must not
@@ -182,7 +196,12 @@ function buildTaggedBoundaries(
         return { ...p, normalizedRadius: Math.min(p.normalizedRadius, cap) }
       })
       const clampedMean = clamped.reduce((s, p) => s + p.normalizedRadius, 0) / clamped.length
-      boundaries[bi] = { ...boundaries[bi], points: clamped, meanRadius: clampedMean }
+      boundaries[bi] = {
+        ...boundaries[bi],
+        points: clamped,
+        meanRadius: clampedMean,
+        preRescaleMeanRadius: clampedMean,
+      }
       // Update running minimum for the next inner isopter.
       for (let i = 0; i < refLength; i++) {
         const refIdx = n === refLength ? i : Math.round((i / refLength) * n) % n
@@ -193,25 +212,49 @@ function buildTaggedBoundaries(
     }
   }
 
-  // Rescale so the outermost isopter fills most of the simulator image.
-  // Without this, radii are normalised against maxEccentricityDeg (the
-  // longest edge distance from fixation — e.g. 80° on a wide monitor), so
-  // a user whose entire field sits inside 30° sees their entire pattern
-  // squashed into the inner ~37% of the simulated image. The scotoma ring
-  // is then visually tiny and doesn't reflect the clinical severity. Fix:
-  // stretch all boundaries so the outermost mean radius reaches OUTER_FRAC
-  // of the simulator edge. Internal ratios (and therefore gap detection)
-  // are preserved; only the overall scale shifts so the user can actually
-  // see their ring scotoma.
+  // Conditional outermost-isopter rescale — only applied when a ring
+  // scotoma is actually present.
   //
-  // Normal bypass: if the outermost radius is already ≥ 0.90 the user's
-  // field reaches the screen edge and any further stretch would push it
-  // off the image — `getVisionQuality`'s >1.05 bypass already shows a
-  // clean image in that case, so leave it alone.
-  const OUTER_FRAC = 0.92
-  if (boundaries.length > 0) {
+  // The rescale exists to make small ring scotoma bands visually
+  // meaningful: without it, a user whose entire field sits inside 30°
+  // on an 80° max-ecc screen sees the whole pattern squashed into the
+  // inner ~37% of the simulator image and the scotoma band becomes
+  // invisible. But if we also applied it to pure tunnel patterns
+  // (Severe/Very Severe RP with V4e at 14°), the tiny tunnel gets
+  // stretched to fill 92% of the image and the simulation looks
+  // dramatically less severe than reality. And for asymmetric
+  // concentric loss, the rescale pushed the long-axis radius past the
+  // outermost > 1.05 "normal bypass" threshold, making large parts of
+  // the image render as preserved vision when they shouldn't.
+  //
+  // So: pre-compute whether any boundary pair satisfies the ring
+  // conditions (same logic as getVisionQuality) and rescale only when
+  // at least one ring will render. Tunnels render at their actual
+  // proportions, rings render at a visible scale.
+  if (boundaries.length >= 2) {
+    const OUTER_FRAC = 0.92
+    const RING_RATIO_THRESHOLD = 0.65
+    const RING_ABS_GAP_THRESHOLD = 0.18
+    const PERIPHERY_PRESERVED_THRESHOLD = 0.35
+
     const outerMean = boundaries[0].meanRadius
-    if (outerMean > 0.001 && outerMean < 0.90) {
+    const peripheryPreserved = outerMean >= PERIPHERY_PRESERVED_THRESHOLD
+    let hasRing = false
+    if (peripheryPreserved) {
+      for (let i = 0; i < boundaries.length - 1; i++) {
+        const oMean = boundaries[i].meanRadius
+        const iMean = boundaries[i + 1].meanRadius
+        if (oMean < 0.01) continue
+        const ratio = iMean / oMean
+        const absGap = boundaries[i].preRescaleMeanRadius - boundaries[i + 1].preRescaleMeanRadius
+        if (ratio < RING_RATIO_THRESHOLD && absGap > RING_ABS_GAP_THRESHOLD) {
+          hasRing = true
+          break
+        }
+      }
+    }
+
+    if (hasRing && outerMean > 0.001 && outerMean < 0.90) {
       const scale = OUTER_FRAC / outerMean
       for (let bi = 0; bi < boundaries.length; bi++) {
         boundaries[bi] = {
@@ -447,7 +490,12 @@ function getVisionQuality(
 
   // Get per-angle radii for edge rendering, sorted outer → inner.
   const orderedBounds = boundaries
-    .map(b => ({ orderIdx: b.orderIdx, radius: lookupRadius(b.points, angleDeg), meanRadius: b.meanRadius }))
+    .map(b => ({
+      orderIdx: b.orderIdx,
+      radius: lookupRadius(b.points, angleDeg),
+      meanRadius: b.meanRadius,
+      preRescaleMean: b.preRescaleMeanRadius,
+    }))
     .sort((a, b) => a.orderIdx - b.orderIdx)
 
   const outermostRadius = Math.max(...orderedBounds.map(b => b.radius))
@@ -455,22 +503,64 @@ function getVisionQuality(
   // ── Normal bypass ──
   if (outermostRadius > 1.05) return 1.0
 
-  // ── Ring scotoma detection — ANGLE-INDEPENDENT ──
-  // Use MEAN radii (averaged across all angles) for gap detection so the
-  // ring-scotoma decision is global: either the field has a ring or it
-  // doesn't. Per-angle radii are still used for the edge transition shape,
-  // but the gap/ring decision no longer depends on which meridian the pixel
-  // sits on. This prevents the X-shaped artifact where screen-limited
-  // peanut fields triggered ring bands at horizontal angles but not
-  // vertical ones.
-  const RING_GAP_THRESHOLD = 0.25
+  // ── Ring scotoma detection — ANGLE-INDEPENDENT + SCALE-INVARIANT + GATED ──
+  //
+  // Ring scotoma is clinically defined as a mid-peripheral blind band with
+  // PRESERVED FAR PERIPHERY. Three checks must pass for the simulator to
+  // emit a ring band between consecutive isopters:
+  //
+  //   1. Angle-independent — computed from mean radii (averaged across all
+  //      angles) so a screen-limited peanut field doesn't trigger rings on
+  //      some meridians but not others.
+  //   2. Scale-invariant — uses inner/outer RATIO, not absolute gap. The
+  //      outermost-isopter rescale multiplies all radii to fill the image,
+  //      which would inflate any absolute-gap threshold.
+  //   3. Periphery-preserved — gated on the OUTER isopter's pre-rescale
+  //      mean radius (≥ 0.25 normalized = ~17° for maxEcc=70°). Without
+  //      this, plain tunnel constrictions where BOTH outer and inner
+  //      isopters are tiny (e.g. Moderate RP with V4e ~24°) would emit
+  //      ring artefacts even though the clinical picture is "everything
+  //      shrinks together", not "mid-peripheral band of loss".
+  //
+  // Ratio threshold 0.65 = inner radius < 65% of outer (~58% area drop),
+  // which matches detectRingScotomaPattern in Interpretation.tsx (> 60%
+  // area drop ⇒ ring) and catches both tight inner rings and looser outer
+  // rings in double-ring scenarios.
+  //
+  // The periphery-preserved gate checks the OVERALL outermost isopter
+  // (V4e, orderedBounds[0]) rather than the outer-of-each-gap, because
+  // an inner ring band in a double-ring scenario has a small outer-of-gap
+  // (e.g. I4e at 20°) but the overall field is still peripherally
+  // preserved by V4e (at ~45°). Gating per-gap would spuriously block the
+  // inner ring.
+  // A gap must satisfy TWO conditions to be a ring:
+  //   - ratio < 0.65   (the inner is substantially smaller than the outer)
+  //   - pre-rescale absolute gap > 0.18 in normalized units
+  //     (the blind band is clinically wide, not just a proportional drop)
+  //
+  // This pair correctly distinguishes Asymmetric RP (ratio 0.62, abs gap
+  // 0.14 ⇒ not a ring, just concentric loss) from Double-Ring Scotoma's
+  // outer band (ratio 0.63, abs gap 0.28 ⇒ genuine ring). In ratio space
+  // alone they're indistinguishable.
+  const RING_RATIO_THRESHOLD = 0.65
+  const RING_ABS_GAP_THRESHOLD = 0.18
+  const PERIPHERY_PRESERVED_THRESHOLD = 0.35
+  const peripheryPreserved =
+    orderedBounds.length > 0 && orderedBounds[0].preRescaleMean >= PERIPHERY_PRESERVED_THRESHOLD
+
   const gaps: { center: number; halfWidth: number }[] = []
-  for (let i = 0; i < orderedBounds.length - 1; i++) {
-    const outerMean = orderedBounds[i].meanRadius
-    const innerMean = orderedBounds[i + 1].meanRadius
-    const gap = outerMean - innerMean
-    if (gap > RING_GAP_THRESHOLD) {
-      gaps.push({ center: (outerMean + innerMean) / 2, halfWidth: gap / 2 })
+  if (peripheryPreserved) {
+    for (let i = 0; i < orderedBounds.length - 1; i++) {
+      const outerMean = orderedBounds[i].meanRadius
+      const innerMean = orderedBounds[i + 1].meanRadius
+      const outerPreRescale = orderedBounds[i].preRescaleMean
+      const innerPreRescale = orderedBounds[i + 1].preRescaleMean
+      if (outerMean < 0.01) continue
+      const ratio = innerMean / outerMean
+      const absGap = outerPreRescale - innerPreRescale
+      if (ratio < RING_RATIO_THRESHOLD && absGap > RING_ABS_GAP_THRESHOLD) {
+        gaps.push({ center: (outerMean + innerMean) / 2, halfWidth: (outerMean - innerMean) / 2 })
+      }
     }
   }
 

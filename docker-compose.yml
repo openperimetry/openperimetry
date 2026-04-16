@@ -1,0 +1,44 @@
+# docker-compose.yml — local-dev stack for OpenPerimetry.
+#
+# Brings up the sqlite-backed API and the nginx-served frontend on
+# http://localhost:5173 and http://localhost:8787. No AWS credentials
+# required.
+#
+#   docker compose up --build
+#
+# The `data` named volume persists the SQLite database between
+# `compose down` / `up` cycles.
+
+services:
+  api:
+    build: ./api
+    container_name: openperimetry-api
+    environment:
+      NODE_ENV: production
+      PORT: 8787
+      STORAGE_BACKEND: sqlite
+      EMAIL_BACKEND: console
+      SQLITE_DB_PATH: /app/data/local.sqlite
+      FRONTEND_ORIGIN: http://localhost:5173
+      FRONTEND_PUBLIC_URL: http://localhost:5173
+      AUTH_COOKIE_SECURE: "false"
+    volumes:
+      - data:/app/data
+    ports:
+      - "8787:8787"
+
+  web:
+    build:
+      context: ./web
+      args:
+        VITE_API_URL: http://localhost:8787
+        VITE_APP_NAME: OpenPerimetry
+        VITE_APP_URL: http://localhost:5173
+    container_name: openperimetry-web
+    depends_on:
+      - api
+    ports:
+      - "5173:80"
+
+volumes:
+  data:

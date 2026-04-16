@@ -1,0 +1,231 @@
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=Outfit:wght@300;400;500;600;700&display=swap');
+@import 'tailwindcss';
+
+/* ── Design tokens ── */
+@theme {
+  --color-base: #08080d;
+  --color-surface: #111118;
+  --color-elevated: #1a1a22;
+  --color-overlay: #222230;
+  --color-accent: #c8902a;
+  --color-accent-light: #dba540;
+  --color-teal: #2dd4bf;
+  --font-family-heading: 'Syne', system-ui, sans-serif;
+  --font-family-body: 'Outfit', system-ui, sans-serif;
+}
+
+:root {
+  font-family: var(--font-family-body);
+  font-size: 16px;
+  font-kerning: normal;
+  color-scheme: dark;
+}
+
+/* Paint the whole page dark — including iOS safe areas (notch, home indicator)
+   so the body gradient never fades into white at the edges. */
+html {
+  background: var(--color-base);
+  min-height: 100%;
+}
+
+body {
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: radial-gradient(ellipse at 50% 40%, #0c0c14, var(--color-base) 60%);
+  background-attachment: fixed;
+  color: #ededf0;
+  /* Ensure body extends into iOS safe areas so the dark gradient covers edge-to-edge. */
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* Prevent overscroll during test — and make the overscroll area dark instead of white */
+html, body {
+  overscroll-behavior: none;
+  background-color: var(--color-base);
+}
+
+/* Respect reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Screen-reader only utility */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* ── Buttons ── */
+.btn-primary {
+  background: linear-gradient(135deg, var(--color-accent) 0%, #a57420 100%);
+  box-shadow: 0 1px 3px rgba(200, 144, 42, 0.2), 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: all 0.2s ease;
+}
+.btn-primary:hover {
+  background: linear-gradient(135deg, var(--color-accent-light) 0%, var(--color-accent) 100%);
+  box-shadow: 0 4px 20px rgba(200, 144, 42, 0.25), 0 2px 4px rgba(0, 0, 0, 0.3);
+  transform: translateY(-1px);
+}
+.btn-primary:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 3px rgba(200, 144, 42, 0.2), 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+.btn-primary:disabled {
+  background: linear-gradient(135deg, #6b5a2a 0%, #504420 100%);
+  opacity: 0.5;
+  box-shadow: none;
+  transform: none;
+}
+
+/* ── Page background (backward compat for test components) ── */
+.bg-page {
+  background: var(--color-base);
+}
+
+/* ── iOS safe area utilities ── */
+.safe-pad-y {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.safe-pad-x {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+.safe-pad {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+.safe-pad-t { padding-top: env(safe-area-inset-top); }
+.safe-pad-b { padding-bottom: env(safe-area-inset-bottom); }
+
+/* ── Animations ── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-page-in {
+  animation: fadeIn 0.35s ease-out;
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes ringPulse {
+  0% { transform: scale(0.95); opacity: 1; }
+  100% { transform: scale(2); opacity: 0; }
+}
+
+@keyframes ringBreathe {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.02); }
+}
+
+/* Staggered reveal utilities */
+.fade-up {
+  opacity: 0;
+  animation: fadeInUp 0.55s ease-out forwards;
+}
+.fade-up-1 { animation-delay: 0s; }
+.fade-up-2 { animation-delay: 0.06s; }
+.fade-up-3 { animation-delay: 0.12s; }
+.fade-up-4 { animation-delay: 0.18s; }
+.fade-up-5 { animation-delay: 0.24s; }
+.fade-up-6 { animation-delay: 0.3s; }
+.fade-up-7 { animation-delay: 0.36s; }
+.fade-up-8 { animation-delay: 0.42s; }
+
+/* Demo animation for instruction screen */
+@keyframes slideIn {
+  0% { right: -8px; opacity: 0; }
+  10% { opacity: 1; }
+  80% { right: 48%; opacity: 1; }
+  90% { opacity: 0; }
+  100% { right: 50%; opacity: 0; }
+}
+
+/* ── Grain texture overlay ── */
+.grain::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  opacity: 0.018;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 256px 256px;
+  pointer-events: none;
+  z-index: 9999;
+  mix-blend-mode: overlay;
+}
+
+/* ── Radial background glow ── */
+.bg-radial-glow {
+  background: radial-gradient(circle, rgba(200, 144, 42, 0.07) 0%, rgba(200, 144, 42, 0.02) 40%, transparent 65%);
+}
+
+/* ── Perimetry chart ── */
+.chart-breathe {
+  animation: chartBreathe 10s ease-in-out infinite;
+}
+@keyframes chartBreathe {
+  0%, 100% { transform: scale(1); filter: drop-shadow(0 0 20px rgba(200, 144, 42, 0.03)); }
+  50% { transform: scale(1.012); filter: drop-shadow(0 0 40px rgba(200, 144, 42, 0.06)); }
+}
+
+.hero-chart-enter {
+  opacity: 0;
+  transform: scale(0.92);
+  animation: heroChartEnter 1s ease-out 0.1s forwards;
+}
+@keyframes heroChartEnter {
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* ── Glow effects ── */
+.glow-card {
+  transition: all 0.3s ease;
+}
+.glow-card:hover {
+  box-shadow: 0 0 0 1px rgba(200, 144, 42, 0.12),
+              0 8px 32px rgba(200, 144, 42, 0.06);
+}
+
+/* ── Custom scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.16); }
+
+/* ── Form inputs ── */
+.input-field {
+  background: var(--color-surface);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 0.65rem 0.85rem;
+  color: #ededf0;
+  font-size: 0.875rem;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  width: 100%;
+}
+.input-field::placeholder { color: #4a4a58; }
+.input-field:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(200, 144, 42, 0.1);
+}

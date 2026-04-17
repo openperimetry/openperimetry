@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { TestPoint, Eye, StimulusKey, CalibrationData } from '../types'
 import { STIMULI, ISOPTER_ORDER } from '../types'
-import { computeSmoothedBoundary, clampBoundary } from '../isopterCalc'
+import { polarToXY, smoothClosedPath, computeIsopters } from '../isopterRender'
 import { formatEyeLabelForResult } from '../eyeLabels'
 import { VerifyOverlay } from './VerifyOverlay'
 
@@ -19,85 +19,10 @@ interface Props {
 
 const CHART_PADDING = 40
 
-function polarToXY(
-  eccDeg: number,
-  meridianDeg: number,
-  center: number,
-  scale: number,
-): [number, number] {
-  const r = eccDeg * scale
-  const theta = (meridianDeg * Math.PI) / 180
-  return [center + r * Math.cos(theta), center - r * Math.sin(theta)]
-}
-
-/** Catmull-Rom smooth closed path */
-function smoothClosedPath(pts: [number, number][]): string {
-  const n = pts.length
-  if (n < 3) return ''
-
-  let d = `M ${pts[0][0]} ${pts[0][1]}`
-  for (let i = 0; i < n; i++) {
-    const p0 = pts[(i - 1 + n) % n]
-    const p1 = pts[i]
-    const p2 = pts[(i + 1) % n]
-    const p3 = pts[(i + 2) % n]
-
-    const cp1x = p1[0] + (p2[0] - p0[0]) / 6
-    const cp1y = p1[1] + (p2[1] - p0[1]) / 6
-    const cp2x = p2[0] - (p3[0] - p1[0]) / 6
-    const cp2y = p2[1] - (p3[1] - p1[1]) / 6
-
-    d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2[0]} ${p2[1]}`
-  }
-  return d + ' Z'
-}
-
-// Boundary binning + smoothing live in ../isopterCalc.ts so VerifyOverlay
-// and the PDF export can share the exact same contour generation.
-
-interface SmoothedIsopter {
-  key: StimulusKey
-  isopterIdx: number
-  svgPts: [number, number][]
-  isScattered: boolean
-}
-
-/** Pre-compute smoothed isopter boundaries with clamping (dimmer ≤ brighter) */
-function computeIsopters(
-  grouped: Partial<Record<StimulusKey, TestPoint[]>>,
-  center: number,
-  scale: number,
-): SmoothedIsopter[] {
-  const results: SmoothedIsopter[] = []
-  let prevBoundary: { meridianDeg: number; eccentricityDeg: number }[] | null = null
-
-  for (let isopterIdx = 0; isopterIdx < ISOPTER_ORDER.length; isopterIdx++) {
-    const key = ISOPTER_ORDER[isopterIdx]
-    const pts = grouped[key]
-    if (!pts) continue
-
-    const allDetected = pts.filter(p => p.detected)
-    let smoothed = computeSmoothedBoundary(allDetected)
-    if (smoothed.length < 3) continue
-    const isScattered = allDetected.length > 20
-
-    // Clamp to not exceed the brighter level's boundary. Uses meridian-aware
-    // sampling (not index equality) so mismatched bin counts between levels
-    // don't silently skip the clamp.
-    if (prevBoundary) {
-      smoothed = clampBoundary(smoothed, prevBoundary)
-    }
-    prevBoundary = smoothed
-
-    const svgPts = smoothed.map(
-      p => polarToXY(p.eccentricityDeg, p.meridianDeg, center, scale) as [number, number],
-    )
-
-    results.push({ key, isopterIdx, svgPts, isScattered })
-  }
-
-  return results
-}
+// Boundary binning + smoothing live in ../isopterCalc.ts; pixel-space
+// isopter rendering (polar projection, Catmull-Rom path, per-level
+// clamp) lives in ../isopterRender.ts so VerifyOverlay and the PDF
+// export share the exact same contour generation as this component.
 
 export function VisualFieldMap({
   points,

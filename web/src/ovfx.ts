@@ -1,4 +1,4 @@
-// OVFX (Open Visual Field eXchange) v0.3.0 import/export.
+// OVFX (Open Visual Field eXchange) v0.4.0 import/export.
 // Spec: https://github.com/openperimetry/ovfx-spec
 
 import type { CalibrationData, StimulusKey, StoredEye, TestPoint, TestResult, TestType } from './types'
@@ -6,9 +6,9 @@ import { ISOPTER_ORDER, STIMULI } from './types'
 import { formatEyeLabel } from './eyeLabels'
 import { APP_NAME, APP_URL, APP_VERSION } from './branding'
 
-export const OVFX_VERSION = '0.3.0'
+export const OVFX_VERSION = '0.4.0'
 
-// ── OVFX v0.3.0 type definitions (minimal — mirrors the schema) ─────────────
+// ── OVFX v0.4.0 type definitions (minimal — mirrors the schema) ─────────────
 
 type OvfxEye = 'left' | 'right' | 'both'
 type OvfxTestKind = 'kinetic' | 'static' | 'ring'
@@ -53,6 +53,7 @@ interface OvfxPoint {
   responseTimeMs?: number
   sectorIdx?: number
   repeat?: boolean
+  catchTrial?: boolean
 }
 
 interface OvfxReliability {
@@ -91,6 +92,12 @@ export interface OvfxDocument {
   stimuli: OvfxStimulus[]
   points: OvfxPoint[]
   reliability?: OvfxReliability
+  reliabilityIndices?: {
+    catchTrialsPresented: number
+    catchTrialsFalsePositive: number
+    falsePositiveIsiPresses: number
+    truePositiveResponses: number
+  }
   isopters?: OvfxIsopter[]
   software?: OvfxSoftware
 }
@@ -150,18 +157,25 @@ function toOvfxPoint(p: TestPoint): OvfxPoint {
   if (p.rawEccentricityDeg != null && p.rawEccentricityDeg !== p.eccentricityDeg) {
     out.rawEccentricityDeg = p.rawEccentricityDeg
   }
+  if (p.catchTrial === true) {
+    out.catchTrial = true
+  }
   return out
 }
 
 function fromOvfxPoint(p: OvfxPoint): TestPoint {
   const key = p.stimulusKey as StimulusKey
-  return {
+  const out: TestPoint = {
     meridianDeg: p.meridianDeg,
     eccentricityDeg: p.eccentricityDeg,
     rawEccentricityDeg: p.rawEccentricityDeg ?? p.eccentricityDeg,
     detected: p.detected,
     stimulus: key,
   }
+  if (p.catchTrial === true) {
+    out.catchTrial = true
+  }
+  return out
 }
 
 // ── Export ──────────────────────────────────────────────────────────────────
@@ -205,6 +219,11 @@ export function exportToOvfx(result: TestResult): OvfxDocument {
       version: APP_VERSION,
       url: APP_URL,
     },
+  }
+
+  // Reliability indices passthrough — emit when present on the result.
+  if (result.reliabilityIndices != null) {
+    doc.reliabilityIndices = { ...result.reliabilityIndices }
   }
 
   // Precomputed isopter areas are informative — include them when we have
@@ -254,8 +273,9 @@ function parseMajorMinor(version: string): [number, number] {
 }
 
 /** Convert a single OVFX document to an iemdr TestResult. Supports OVFX 0.1.x,
- *  0.2.x, and 0.3.x — the schema evolutions only affect the calibration block,
- *  so the iemdr-facing shape is identical across versions. */
+ *  0.2.x, 0.3.x, and 0.4.x — the schema evolutions only affect the calibration
+ *  block or add optional fields, so the iemdr-facing shape is compatible across
+ *  all supported minor versions. */
 export function importFromOvfx(doc: OvfxDocument): TestResult {
   if (!doc || typeof doc !== 'object' || !('ovfxVersion' in doc)) {
     throw new OvfxImportError('Not an OVFX document (missing ovfxVersion)')
@@ -264,9 +284,9 @@ export function importFromOvfx(doc: OvfxDocument): TestResult {
   if (major !== 0) {
     throw new OvfxImportError(`Unsupported OVFX major version ${major}.x`)
   }
-  if (minor > 3) {
+  if (minor > 4) {
     throw new OvfxImportError(
-      `OVFX ${doc.ovfxVersion} is newer than this app supports (0.3.x). Update the app or edit the file to a supported version.`,
+      `OVFX ${doc.ovfxVersion} is newer than this app supports (0.4.x). Update the app or edit the file to a supported version.`,
     )
   }
 
@@ -332,6 +352,7 @@ export function importFromOvfx(doc: OvfxDocument): TestResult {
     calibration,
     testType,
     ...(doc.test.binocularGroup ? { binocularGroup: doc.test.binocularGroup } : {}),
+    ...(doc.reliabilityIndices != null ? { reliabilityIndices: { ...doc.reliabilityIndices } } : {}),
   }
 }
 

@@ -15,6 +15,8 @@ import { BackButton } from './AccessibleNav'
 import { PostTestSurvey } from './PostTestSurvey'
 import type { SurveyResponse } from './PostTestSurvey'
 import { ClinicalDisclaimer } from './ClinicalDisclaimer'
+import { degToPx } from '../geometry'
+import { stimulusDisplayColor } from '../stimulusDisplay'
 
 /**
  * "Ring Test" — user-controlled expanding arc scotoma boundary mapper.
@@ -131,7 +133,6 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
     }
   }, [eye, getTestDurationSeconds])
 
-  const pxPerDeg = calibration.pixelsPerDegree
   const fixOffsetX = calibration.fixationOffsetPx
   const maxEcc = calibration.maxEccentricityDeg
 
@@ -171,8 +172,8 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
 
     const stimDef = STIMULI[level.key]
     // Ensure minimum visible thickness (at least 3px outer radius)
-    const rInner = Math.max(0, (ecc - level.thicknessDeg / 2)) * pxPerDeg
-    const rOuter = Math.max(rInner + 3, (ecc + level.thicknessDeg / 2) * pxPerDeg)
+    const rInner = degToPx(Math.max(0, ecc - level.thicknessDeg / 2), calibration)
+    const rOuter = Math.max(rInner + 3, degToPx(ecc + level.thicknessDeg / 2, calibration))
 
     const sWidth = 360 / numSectorsRef.current
     const sectorCenterDeg = sector * sWidth
@@ -180,14 +181,13 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
     const startAngle = -(sectorCenterDeg + halfArc) * Math.PI / 180
     const endAngle = -(sectorCenterDeg - halfArc) * Math.PI / 180
 
-    // Draw the arc — use stimulus color for visibility during test
+    // Draw the arc — always white (achromatic presentation); intensity controlled by globalAlpha
     ctx.beginPath()
     ctx.arc(fixX, fixY, rOuter, startAngle, endAngle, false)
     ctx.arc(fixX, fixY, rInner, endAngle, startAngle, true)
     ctx.closePath()
 
-    const brightness = Math.round(255 * stimDef.intensityFrac)
-    ctx.fillStyle = `rgb(${brightness}, ${brightness}, ${brightness})`
+    ctx.fillStyle = stimulusDisplayColor(level.key)
     ctx.globalAlpha = Math.max(0.25, stimDef.intensityFrac)
     ctx.fill()
     ctx.globalAlpha = 1
@@ -200,7 +200,7 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
       const sCenterDeg = s * sWidth
       const lineAngle = -sCenterDeg * Math.PI / 180
       const isActive = s === sector
-      const lineLen = maxEcc * pxPerDeg * (isActive ? 0.6 : 0.3)
+      const lineLen = degToPx(maxEcc, calibration) * (isActive ? 0.6 : 0.3)
       ctx.strokeStyle = isActive ? '#4ade80' : '#1a1a2e'
       ctx.lineWidth = isActive ? 1.5 : 0.5
       // Scale active guide opacity with stimulus intensity to avoid distortion
@@ -218,7 +218,7 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
       ev => ev.stimulus === stim && ev.sectorIdx === sector,
     )
     for (const ev of sectorEvents) {
-      const markR = ev.eccentricityDeg * pxPerDeg
+      const markR = degToPx(ev.eccentricityDeg, calibration)
       const markAngle = -sectorCenterDeg * Math.PI / 180
       const mx = fixX + Math.cos(markAngle) * markR
       const my = fixY + Math.sin(markAngle) * markR
@@ -252,7 +252,7 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
     ctx.font = '11px monospace'
     ctx.textAlign = 'right'
     ctx.fillText(`${ecc.toFixed(1)}°`, fixX - 16, fixY - 16)
-  }, [fixX, fixY, pxPerDeg, maxEcc])
+  }, [fixX, fixY, calibration, maxEcc])
 
   // ---- Redraw on eccentricity change ----
   useEffect(() => {
@@ -367,8 +367,8 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
     if (sinA < -0.01) maxDist = Math.min(maxDist, -fy / sinA)
 
     // Convert pixels to degrees, add small margin so arc just touches edge
-    return Math.max(5, maxDist / pxPerDeg - 0.5)
-  }, [fixOffsetX, pxPerDeg, fixY])
+    return Math.max(5, maxDist / calibration.pixelsPerDegree - 0.5)
+  }, [fixOffsetX, calibration, fixY])
 
   // ---- Expand/contract ring ----
   const adjustEcc = useCallback((delta: number) => {
@@ -805,7 +805,7 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
               if (dx < -0.001) t = Math.min(t, (-halfW - fx) / dx)
               if (dy > 0.001) t = Math.min(t, (halfH - fyOffset) / dy)
               if (dy < -0.001) t = Math.min(t, (-halfH - fyOffset) / dy)
-              const eccDeg = t / pxPerDeg
+              const eccDeg = t / calibration.pixelsPerDegree
               const r = Math.min(eccDeg * dScale, 135)
               return { deg: eccDeg, pt: `${150 + r * Math.cos(rad)},${150 - r * Math.sin(rad)}` }
             })

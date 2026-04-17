@@ -96,3 +96,25 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and pull requests are welcome.
 ## Related projects
 
 - [OVFX spec](https://github.com/openperimetry/ovfx-spec) — the open data interchange format for visual field results used by this project
+
+## Related tools and where this project stands
+
+Browser-based and consumer visual-field self-tests are a small but growing space. The table below positions OpenPerimetry against the tools most often cited alongside it:
+
+| Tool | Platform | Test type | Threshold model | Open source | Validation |
+|---|---|---|---|---|---|
+| [HFA (Humphrey)](https://www.zeiss.com/meditec/en/products/ophthalmology/humphrey-field-analyzer-3.html) | Clinical perimeter | 24-2 / 30-2 / 10-2 SITA | Bayesian (SITA) | No | Clinical gold standard |
+| [Specvis Desktop](https://github.com/piotrdzwiniel/Specvis-Desktop) | Windows / macOS / Linux (JRE 8) | Static, 48/96 pts | Staircase (length 9/13/17) | Yes (BSD) | [PLoS ONE 2017](https://pmc.ncbi.nlm.nih.gov/articles/PMC5640235/) vs Medmont M700 |
+| [Peristat Online](http://www.perimetry.org/) | Web — any monitor | Static suprathreshold, 4 levels | Suprathreshold only | No | 80–86% sens, 94–97% spec vs HFA |
+| [Visual Fields Easy](https://apps.apple.com/app/visual-fields-easy/id719415275) | iPad | Static suprathreshold, 96 pts | Single-level suprathreshold | No | Inadequate for one-time home screen (2022 UK study) |
+| **OpenPerimetry** (this project) | Web — any browser | **Goldmann kinetic + static + ring-scotoma** | Fixed Goldmann isopter intensities | Yes (Apache 2.0) | **Not yet validated against a clinical perimeter.** |
+
+**What this tool is good for:** tracking your own field over time (especially kinetic isopters in retinitis pigmentosa, scotoma boundary changes, or gross binocular coverage), getting a sense of whether anything looks unusual, and sharing a PDF with an eye care professional.
+
+**What it is not:** a substitute for Humphrey, Octopus, or Medmont perimetry; a glaucoma-screening tool; a diagnostic device. If results suggest a defect, follow up with an ophthalmologist for a clinical test on a calibrated perimeter.
+
+**Distinctives vs the others in the list:**
+- Only tool offering Goldmann-style **kinetic isopters** (V4e / III4e / III2e / I4e / I2e) in the browser.
+- Only tool with an explicit **ring-scotoma tracing test**.
+- Zero install: runs on any modern browser on any monitor.
+- Ships Reliability Indices (Fixation Accuracy and False-Positive Response Rate) per the Specvis / HFA convention, with reference ranges from [Dzwiniel et al., PLoS ONE 2017](https://pmc.ncbi.nlm.nih.gov/articles/PMC5640235/).

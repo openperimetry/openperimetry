@@ -183,6 +183,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
       fixationOffsetPx,
       screenWidthPx: typeof screen !== 'undefined' ? screen.width : window.innerWidth,
       screenHeightPx: typeof screen !== 'undefined' ? screen.height : window.innerHeight,
+      sphericityCorrection: true,
     }, extendedField)
   }
 

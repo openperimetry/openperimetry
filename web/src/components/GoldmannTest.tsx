@@ -14,6 +14,14 @@ import type { SurveyResponse } from './PostTestSurvey'
 import { ClinicalDisclaimer } from './ClinicalDisclaimer'
 import { HeadGuide } from './HeadGuide'
 import { GOLDMANN } from '../constants'
+import { degToPx } from '../geometry'
+import { stimulusDisplayColor } from '../stimulusDisplay'
+import { blindspotLocation } from '../blindspot'
+import {
+  CATCH_TRIAL_EVERY_N,
+  FIXATION_LOSS_ALERT_MS,
+  FIXATION_LOSS_ALERT_MESSAGE,
+} from '../testDefaults'
 
 // ---------- constants ----------
 const BASE_MERIDIANS = Array.from({ length: 12 }, (_, i) => i * 30)
@@ -481,6 +489,25 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   const currentRampStartRef = useRef(0)
   const currentSlowSpeedRef = useRef<number>(sp.slow)
 
+  // Catch-trial + reliability-index tracking. Every Nth real-task start the
+  // loop flashes a static V4e stimulus at the anatomical blindspot — a
+  // correctly-fixating patient cannot see it, so detection is a fixation-loss
+  // signal. fpIsiPresses counts keypresses/taps during inter-stimulus gaps
+  // (no stimulus on screen), which combined with catch-trial false positives
+  // produces the False-Positive Response Rate (FPRR). truePositives counts
+  // confirmed real-stimulus detections and forms the FPRR denominator with
+  // the false-positive counts. See testDefaults.ts + Dzwiniel et al. 2017.
+  const catchTrialRef = useRef<Array<{ detected: boolean }>>([])
+  const isCatchTrialRef = useRef(false)
+  const resumingFromCatchRef = useRef(false)
+  const presentCountRef = useRef(0)
+  const truePositivesRef = useRef(0)
+  const fpIsiPressesRef = useRef(0)
+  const isiActiveRef = useRef(false)
+  const catchStimulusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const catchResponseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [showFixationLossAlert, setShowFixationLossAlert] = useState(false)
+
   const { pixelsPerDegree, maxEccentricityDeg, brightnessFloor, reactionTimeMs } = calibration
   const isMobileTest = calibration.viewingDistanceCm <= 15
   const fixDotSize = isMobileTest ? 'w-[2px] h-[2px]' : 'w-3 h-3'
@@ -788,18 +815,19 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
 
       if (stimulusRef.current) {
         const rad = (currentMeridianRef.current * Math.PI) / 180
-        const r = eccRef.current * pixelsPerDegree
+        const r = degToPx(eccRef.current, calibration)
         // Offset from fixation point (which may not be screen center in extended mode)
         const fx = fixationRef.current.x
         const fy = fixationRef.current.y
         const x = fx + r * Math.cos(rad)
         const y = fy + -r * Math.sin(rad)
         const stim = STIMULI[currentStimulusRef.current]
-        const sizePx = Math.max(4, Math.round(stim.sizeDeg * pixelsPerDegree))
+        const sizePx = Math.max(4, Math.round(degToPx(stim.sizeDeg, calibration)))
         const half = sizePx / 2
         stimulusRef.current.style.width = `${sizePx}px`
         stimulusRef.current.style.height = `${sizePx}px`
         stimulusRef.current.style.transform = `translate(${-half + x}px, ${-half + y}px)`
+        stimulusRef.current.style.backgroundColor = stimulusDisplayColor(currentStimulusRef.current)
         stimulusRef.current.style.opacity = String(
           stimulusOpacity(stim.intensityFrac, brightnessFloor),
         )
@@ -810,8 +838,76 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     [pixelsPerDegree, brightnessFloor, recordPoint],
   )
 
+  // ---------- present blindspot catch trial ----------
+  //
+  // Flash a stationary V4e stimulus at the anatomical blindspot. A patient
+  // who's fixating correctly cannot see it; a button press = fixation loss.
+  // Runs ~every CATCH_TRIAL_EVERY_N real-task starts. Kinetic test context:
+  // we reuse the same stimulus DOM element but skip the raf animation loop,
+  // so handleResponse's `phaseRef.current !== 'moving'` guard still works via
+  // the temporary phase = 'moving' set here, and the isCatchTrialRef flag
+  // routes the response into catch-trial bookkeeping instead of recordPoint.
+  function presentCatchTrial() {
+    const bs = blindspotLocation(eye)
+    const bsRad = (bs.meridianDeg * Math.PI) / 180
+    const xDeg = bs.eccentricityDeg * Math.cos(bsRad)
+    const yDeg = bs.eccentricityDeg * Math.sin(bsRad)
+    const xPx = fixationRef.current.x + degToPx(xDeg, calibration)
+    const yPx = fixationRef.current.y - degToPx(yDeg, calibration)
+
+    const stim = STIMULI.V4e
+    const sizePx = Math.max(4, Math.round(degToPx(stim.sizeDeg, calibration)))
+    const half = sizePx / 2
+
+    isCatchTrialRef.current = true
+    respondedRef.current = false
+    isiActiveRef.current = false
+    phaseRef.current = 'moving'
+    setPhase('moving')
+    movingStartRef.current = performance.now()
+
+    if (stimulusRef.current) {
+      stimulusRef.current.style.width = `${sizePx}px`
+      stimulusRef.current.style.height = `${sizePx}px`
+      stimulusRef.current.style.backgroundColor = stimulusDisplayColor('V4e')
+      stimulusRef.current.style.transform = `translate(${-half + xPx}px, ${-half + yPx}px)`
+      stimulusRef.current.style.opacity = String(
+        stimulusOpacity(stim.intensityFrac, brightnessFloor),
+      )
+    }
+
+    // Static flash: 500ms visible, 1500ms total response window.
+    catchStimulusTimeoutRef.current = setTimeout(() => {
+      if (stimulusRef.current) stimulusRef.current.style.opacity = '0'
+    }, 500)
+    catchResponseTimeoutRef.current = setTimeout(() => {
+      if (!isCatchTrialRef.current || respondedRef.current) return
+      // No response = patient correctly ignored the blindspot stimulus.
+      catchTrialRef.current.push({ detected: false })
+      isCatchTrialRef.current = false
+      resumingFromCatchRef.current = true
+      startCurrentTask()
+    }, 1500)
+  }
+
   // ---------- start current task ----------
   function startCurrentTask() {
+    // Catch-trial injection. Count real-task starts (not catch trials) and
+    // every CATCH_TRIAL_EVERY_N presentations flash a blindspot probe first.
+    // resumingFromCatchRef guards the recursive call from presentCatchTrial's
+    // resolve path so we don't loop catch-trial → catch-trial → ...
+    if (!resumingFromCatchRef.current) {
+      presentCountRef.current += 1
+      if (
+        presentCountRef.current > 0
+        && presentCountRef.current % CATCH_TRIAL_EVERY_N === 0
+      ) {
+        presentCatchTrial()
+        return
+      }
+    }
+    resumingFromCatchRef.current = false
+
     const task = getCurrentTask()
     if (!task) {
       advance()
@@ -889,12 +985,14 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     }
 
     setPhase('wait')
+    isiActiveRef.current = true
 
     const delay = sp.preDelayMin + Math.random() * (sp.preDelayMax - sp.preDelayMin)
     setTimeout(() => {
       if (respondedRef.current) return
       phaseRef.current = 'moving'
       movingStartRef.current = performance.now()
+      isiActiveRef.current = false
       setPhase('moving')
       if (!startedTrackedRef.current) {
         startedTrackedRef.current = true
@@ -925,6 +1023,24 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     if (phaseRef.current !== 'moving' || respondedRef.current) return
     respondedRef.current = true
 
+    // Catch-trial response: patient pressed while the blindspot probe was
+    // on screen → fixation loss. Record, show alert, resume the real task
+    // that was pre-empted by the catch trial.
+    if (isCatchTrialRef.current) {
+      if (catchStimulusTimeoutRef.current) clearTimeout(catchStimulusTimeoutRef.current)
+      if (catchResponseTimeoutRef.current) clearTimeout(catchResponseTimeoutRef.current)
+      if (stimulusRef.current) stimulusRef.current.style.opacity = '0'
+      catchTrialRef.current.push({ detected: true })
+      isCatchTrialRef.current = false
+      if (FIXATION_LOSS_ALERT_MS > 0) {
+        setShowFixationLossAlert(true)
+        window.setTimeout(() => setShowFixationLossAlert(false), FIXATION_LOSS_ALERT_MS)
+      }
+      resumingFromCatchRef.current = true
+      startCurrentTask()
+      return
+    }
+
     const elapsed = performance.now() - movingStartRef.current
 
     if (elapsed < MIN_RESPONSE_MS) {
@@ -938,12 +1054,24 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     }
 
     flashFixation('#3b82f6', 150) // blue flash = confirmed
+    truePositivesRef.current += 1
     recordPoint(true, eccRef.current)
   // flashFixation reads refs/current DOM state and is intentionally not a
   // dependency; including it would recreate this hot response handler every
   // render without changing the values it uses.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recordPoint, requeueCurrent, advance])
+
+  // ---------- pointer handler (wraps handleResponse with ISI false-positive gate) ----------
+  const handlePointerDown = useCallback(() => {
+    // Tap during the inter-stimulus gap (wait phase, no stimulus on screen) is
+    // a false-positive press — feeds FPRR. Mirrors the keyboard handler.
+    if (isiActiveRef.current && !isCatchTrialRef.current) {
+      fpIsiPressesRef.current += 1
+      return
+    }
+    handleResponse()
+  }, [handleResponse])
 
   // ---------- pause / resume ----------
   const pauseResumeRef = useRef<Phase>('wait') // phase to resume to
@@ -988,6 +1116,12 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
           // Continue from interstitial → countdown → start
           startCountdown()
         } else {
+          // Keypress during the inter-stimulus gap (wait phase, no stimulus
+          // on screen) is a false-positive press — feeds FPRR.
+          if (isiActiveRef.current && !isCatchTrialRef.current) {
+            fpIsiPressesRef.current += 1
+            return
+          }
           handleResponse()
         }
       }
@@ -1003,6 +1137,14 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     blockIdxRef.current = 0
     taskIdxRef.current = 0
     setCurrentBlockIdx(0)
+    // Reset catch-trial and reliability counters for a fresh test run
+    catchTrialRef.current = []
+    truePositivesRef.current = 0
+    presentCountRef.current = 0
+    fpIsiPressesRef.current = 0
+    isCatchTrialRef.current = false
+    resumingFromCatchRef.current = false
+    isiActiveRef.current = false
     setPhase('interstitial')
   }
 
@@ -1100,6 +1242,13 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // ---------- save ----------
   const handleSave = () => {
     const consolidated = consolidatePoints(results)
+    const catchTrials = catchTrialRef.current
+    const reliabilityIndices = {
+      catchTrialsPresented: catchTrials.length,
+      catchTrialsFalsePositive: catchTrials.filter(c => c.detected).length,
+      falsePositiveIsiPresses: fpIsiPressesRef.current,
+      truePositiveResponses: truePositivesRef.current,
+    }
     const result: TestResult = {
       id: crypto.randomUUID(),
       eye,
@@ -1109,6 +1258,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       calibration,
       testType: 'goldmann',
       durationSeconds: getTestDurationSeconds(),
+      reliabilityIndices,
     }
     saveResult(result)
     setSavedId(result.id)
@@ -1150,7 +1300,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   }
 
   // ---------- stimulus size for demo ----------
-  const demoSizePx = Math.max(6, Math.round(0.43 * pixelsPerDegree))
+  const demoSizePx = Math.max(6, Math.round(degToPx(0.43, calibration)))
   const demoHalf = demoSizePx / 2
 
   // ==================== RENDER ====================
@@ -1377,23 +1527,22 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
 
         {/* Head silhouette — sized from calibration so proportions match real life */}
         {(() => {
-          const ppd = pixelsPerDegree
           // Real human proportions at viewing distance as visual angles:
           // Head width ~15cm at 50cm ≈ 17°, head height ~23cm ≈ 26°
           // Eye width ~2.5cm ≈ 2.9°, inter-eye distance ~6.2cm ≈ 7.1°
           // Neck width ~10cm ≈ 11.4°, shoulder span ~40cm ≈ 38.7°
-          const headW = 17 * ppd
-          const headH = 26 * ppd
-          const eyeW = 2.9 * ppd / 2  // rx
-          const eyeH = 1.8 * ppd / 2  // ry
-          const eyeSpacing = 7.1 * ppd / 2 // distance from center to each eye
-          const neckW = 5.5 * ppd
-          const neckH = 5 * ppd
-          const shoulderSpan = 19 * ppd // half shoulder width
-          const earW = 1.5 * ppd / 2
-          const earH = 3.2 * ppd / 2
-          const svgW = headW + 14 * ppd // extra for ears + shoulders
-          const svgH = headH + 22 * ppd // head + neck + shoulders
+          const headW = degToPx(17, calibration)
+          const headH = degToPx(26, calibration)
+          const eyeW = degToPx(2.9, calibration) / 2  // rx
+          const eyeH = degToPx(1.8, calibration) / 2  // ry
+          const eyeSpacing = degToPx(7.1, calibration) / 2 // distance from center to each eye
+          const neckW = degToPx(5.5, calibration)
+          const neckH = degToPx(5, calibration)
+          const shoulderSpan = degToPx(19, calibration) // half shoulder width
+          const earW = degToPx(1.5, calibration) / 2
+          const earH = degToPx(3.2, calibration) / 2
+          const svgW = headW + degToPx(14, calibration) // extra for ears + shoulders
+          const svgH = headH + degToPx(22, calibration) // head + neck + shoulders
           const cx = svgW / 2
           // Eyes at 40% from top of head
           const eyeY = headH * 0.46
@@ -1444,19 +1593,22 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
                 </>
               )}
               {/* Nose */}
-              <path d={`M ${cx} ${eyeY + eyeH * 1.5} L ${cx - ppd * 0.8} ${noseY} Q ${cx} ${noseY + ppd * 0.5} ${cx + ppd * 0.8} ${noseY} Z`} fill="none" stroke="#94a3b8" strokeWidth={1.2} />
+              <path d={`M ${cx} ${eyeY + eyeH * 1.5} L ${cx - degToPx(0.8, calibration)} ${noseY} Q ${cx} ${noseY + degToPx(0.5, calibration)} ${cx + degToPx(0.8, calibration)} ${noseY} Z`} fill="none" stroke="#94a3b8" strokeWidth={1.2} />
               {/* Mouth */}
-              <path d={`M ${cx - ppd * 2} ${mouthY} Q ${cx} ${mouthY + ppd * 1.2} ${cx + ppd * 2} ${mouthY}`} fill="none" stroke="#94a3b8" strokeWidth={1.2} />
+              <path d={`M ${cx - degToPx(2, calibration)} ${mouthY} Q ${cx} ${mouthY + degToPx(1.2, calibration)} ${cx + degToPx(2, calibration)} ${mouthY}`} fill="none" stroke="#94a3b8" strokeWidth={1.2} />
               {/* Neck */}
-              <rect x={cx - neckW} y={neckTop} width={neckW * 2} height={neckH} rx={ppd} fill="none" stroke="#94a3b8" strokeWidth={2} />
+              <rect x={cx - neckW} y={neckTop} width={neckW * 2} height={neckH} rx={degToPx(1, calibration)} fill="none" stroke="#94a3b8" strokeWidth={2} />
               {/* Shoulders */}
-              <path d={`M ${cx - neckW} ${shoulderY} Q ${cx - shoulderSpan * 0.7} ${shoulderY + ppd} ${cx - shoulderSpan} ${shoulderY + ppd * 5}`} fill="none" stroke="#94a3b8" strokeWidth={2} />
-              <path d={`M ${cx + neckW} ${shoulderY} Q ${cx + shoulderSpan * 0.7} ${shoulderY + ppd} ${cx + shoulderSpan} ${shoulderY + ppd * 5}`} fill="none" stroke="#94a3b8" strokeWidth={2} />
+              <path d={`M ${cx - neckW} ${shoulderY} Q ${cx - shoulderSpan * 0.7} ${shoulderY + degToPx(1, calibration)} ${cx - shoulderSpan} ${shoulderY + degToPx(5, calibration)}`} fill="none" stroke="#94a3b8" strokeWidth={2} />
+              <path d={`M ${cx + neckW} ${shoulderY} Q ${cx + shoulderSpan * 0.7} ${shoulderY + degToPx(1, calibration)} ${cx + shoulderSpan} ${shoulderY + degToPx(5, calibration)}`} fill="none" stroke="#94a3b8" strokeWidth={2} />
             </svg>
           )
         })()}
 
-        {/* Phase info near fixation point */}
+        {/* Phase info near fixation point. Inline styles (not Tailwind classes)
+            so the solid dark background renders consistently regardless of
+            Tailwind JIT / cache state — and no backdrop-blur, which Safari
+            washes out with a light saturation. */}
         <div
           className="absolute text-center pointer-events-none"
           style={{
@@ -1466,15 +1618,20 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
             marginLeft: fx,
             marginTop: -30 + fy,
             maxWidth: 280,
+            backgroundColor: 'rgba(8, 8, 13, 0.95)',
+            color: '#ededf0',
+            borderRadius: 12,
+            padding: '12px 20px',
+            border: '1px solid rgba(255, 255, 255, 0.08)',
           }}
         >
-          <p className="text-xs text-gray-500 mb-1">
+          <p style={{ fontSize: 11, color: '#a1a1aa', marginBottom: 4 }}>
             {currentBlockIdx + 1}/{blocks.length} — {completedTasks}/{totalTasks} pts
           </p>
-          <h2 className="text-sm font-semibold text-white" aria-live="polite">{block?.label}</h2>
-          <p className="text-gray-400 text-xs mt-1">{block?.description}</p>
-          <p className="text-gray-500 text-xs mt-3">
-            Press <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-xs">Space</kbd> or tap
+          <h2 style={{ fontSize: 14, fontWeight: 500, color: '#ffffff' }} aria-live="polite">{block?.label}</h2>
+          <p style={{ color: '#d4d4d8', fontSize: 12, marginTop: 4 }}>{block?.description}</p>
+          <p style={{ color: '#a1a1aa', fontSize: 11, marginTop: 12 }}>
+            Press <kbd style={{ padding: '2px 6px', background: '#27272a', color: '#e4e4e7', borderRadius: 4, fontSize: 11 }}>Space</kbd> or tap
           </p>
         </div>
       </div>
@@ -1532,7 +1689,18 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
             })}
           </div>
           <ClinicalDisclaimer variant="results" />
-          <Interpretation points={standardPoints} areas={areas} maxEccentricityDeg={maxEccentricityDeg} calibration={calibration} />
+          <Interpretation
+            points={standardPoints}
+            areas={areas}
+            maxEccentricityDeg={maxEccentricityDeg}
+            calibration={calibration}
+            reliabilityIndices={{
+              catchTrialsPresented: catchTrialRef.current.length,
+              catchTrialsFalsePositive: catchTrialRef.current.filter(c => c.detected).length,
+              falsePositiveIsiPresses: fpIsiPressesRef.current,
+              truePositiveResponses: truePositivesRef.current,
+            }}
+          />
           <ScenarioOverlay userPoints={standardPoints} userAreas={areas} maxEccentricity={maxEccentricityDeg} />
           {/* Vision sim — collapsible, gets ALL points including extended */}
           {!showVisionSim ? (
@@ -1614,7 +1782,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   return (
     <div
       className="min-h-screen bg-gray-950 select-none cursor-none relative overflow-hidden"
-      onPointerDown={handleResponse}
+      onPointerDown={handlePointerDown}
       role="application"
       aria-label="Visual field test in progress — press Space or tap when you see the stimulus"
     >
@@ -1678,6 +1846,17 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       />
 
       {/* Removed bottom HUD — it was distracting near the fixation point */}
+
+      {/* Fixation-loss alert: fires when patient responds to a blindspot catch trial */}
+      {showFixationLossAlert && (
+        <div
+          className="absolute top-[60%] left-1/2 -translate-x-1/2 px-6 py-3 bg-orange-600 text-white rounded-lg font-semibold text-lg shadow-xl pointer-events-none z-30"
+          role="alert"
+          aria-live="polite"
+        >
+          {FIXATION_LOSS_ALERT_MESSAGE}
+        </div>
+      )}
     </div>
   )
 }

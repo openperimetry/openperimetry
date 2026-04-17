@@ -2,10 +2,14 @@ import jsPDF from 'jspdf'
 import type { TestResult, TestPoint, StimulusKey } from './types'
 import { STIMULI, ISOPTER_ORDER } from './types'
 import { getAllScenarios } from './testFixtures'
-import { calcIsopterAreas, clampBoundary } from './isopterCalc'
+import { calcIsopterAreas } from './isopterCalc'
 import { classifyFieldLoss, type FieldSeverity } from './clinicalClassifications'
 import { eyeLabelForFilename } from './eyeLabels'
 import { APP_NAME, APP_DOMAIN, PDF_HEADER_TAGLINE } from './branding'
+import { computeReliability } from './reliabilityScore'
+import { computeReliabilityIndices } from './reliabilityIndices'
+import { RELIABILITY_REFERENCE_RANGES } from './testDefaults'
+import { polarToXY, smoothClosedPath, computeIsopters } from './isopterRender'
 
 // ── Classification logic (matches Interpretation.tsx) ──
 
@@ -161,201 +165,10 @@ function detectAnomalies(points: TestPoint[], areas: Partial<Record<StimulusKey,
   return anomalies
 }
 
-// ── Reliability score (full version from Interpretation.tsx) ──
-
-interface ReliabilityResult {
-  score: number
-  label: string
-  factors: { name: string; penalty: number; detail: string }[]
-}
-
-function computeReliability(points: TestPoint[], areas: Partial<Record<StimulusKey, number>>): ReliabilityResult {
-  let score = 100
-  const factors: ReliabilityResult['factors'] = []
-
-  let mildReversals = 0
-  let majorReversals = 0
-  for (let i = 0; i < ISOPTER_ORDER.length - 1; i++) {
-    const outerArea = areas[ISOPTER_ORDER[i]]
-    const innerArea = areas[ISOPTER_ORDER[i + 1]]
-    if (outerArea == null || innerArea == null) continue
-    if (innerArea > outerArea * 2.0) majorReversals++
-    else if (innerArea > outerArea * 1.10) mildReversals++
-  }
-  if (majorReversals > 0) {
-    const penalty = majorReversals * 12
-    score -= penalty
-    factors.push({ name: 'Isopter ordering', penalty, detail: `${majorReversals} isopter pair(s) dramatically reversed` })
-  }
-  if (mildReversals > 0) {
-    const penalty = mildReversals * 3
-    score -= penalty
-    factors.push({ name: 'Isopter overlap', penalty, detail: `${mildReversals} adjacent pair(s) overlap slightly` })
-  }
-
-  const cvs: number[] = []
-  for (const stim of ISOPTER_ORDER) {
-    const detected = points.filter(p => p.stimulus === stim && p.detected)
-    if (detected.length < 4) continue
-    const eccs = detected.map(p => p.eccentricityDeg)
-    const mean = eccs.reduce((s, v) => s + v, 0) / eccs.length
-    if (mean < 2) continue
-    const variance = eccs.reduce((s, v) => s + (v - mean) ** 2, 0) / eccs.length
-    cvs.push(Math.sqrt(variance) / mean)
-  }
-  if (cvs.length > 0) {
-    const avgCv = cvs.reduce((s, v) => s + v, 0) / cvs.length
-    if (avgCv > 0.30) {
-      const penalty = Math.min(25, Math.round((avgCv - 0.30) * 100))
-      score -= penalty
-      factors.push({ name: 'Shape regularity', penalty, detail: `Average boundary irregularity ${(avgCv * 100).toFixed(0)}%` })
-    }
-  }
-
-  const totalDetected = points.filter(p => p.detected).length
-  if (totalDetected < 30) {
-    const penalty = Math.min(20, Math.round((30 - totalDetected) * 1.5))
-    score -= penalty
-    factors.push({ name: 'Data points', penalty, detail: `Only ${totalDetected} detected points` })
-  }
-
-  const uniqueMeridians = new Set(points.filter(p => p.detected).map(p => p.meridianDeg))
-  if (uniqueMeridians.size < 8) {
-    const penalty = Math.min(15, (8 - uniqueMeridians.size) * 3)
-    score -= penalty
-    factors.push({ name: 'Meridian coverage', penalty, detail: `Points span only ${uniqueMeridians.size} meridians` })
-  }
-
-  const totalPoints = points.length
-  const overallRate = totalPoints > 0 ? totalDetected / totalPoints : 1
-  if (overallRate < 0.40) {
-    const penalty = Math.min(15, Math.round((0.40 - overallRate) * 50))
-    score -= penalty
-    factors.push({ name: 'Detection rate', penalty, detail: `Overall detection rate ${(overallRate * 100).toFixed(0)}%` })
-  }
-
-  const meridianStimPairs = new Map<string, number>()
-  for (const p of points) {
-    const key = `${p.stimulus}-${p.meridianDeg}-${p.detected}`
-    meridianStimPairs.set(key, (meridianStimPairs.get(key) ?? 0) + 1)
-  }
-  const multiReadings = [...meridianStimPairs.values()].filter(c => c > 1).length
-  const retestRatio = meridianStimPairs.size > 0 ? multiReadings / meridianStimPairs.size : 0
-  if (retestRatio > 0.30) {
-    const penalty = Math.min(10, Math.round((retestRatio - 0.30) * 30))
-    score -= penalty
-    factors.push({ name: 'Retest rate', penalty, detail: `${(retestRatio * 100).toFixed(0)}% of positions needed re-testing` })
-  }
-
-  score = Math.max(0, Math.min(100, score))
-  const label = score >= 85 ? 'High' : score >= 65 ? 'Moderate' : score >= 40 ? 'Low' : 'Very low'
-
-  return { score, label, factors }
-}
-
-// ── Render radar as SVG image (reuses VisualFieldMap logic) ──
-
-function polarToXY(eccDeg: number, meridianDeg: number, center: number, scale: number): [number, number] {
-  const r = eccDeg * scale
-  const theta = (meridianDeg * Math.PI) / 180
-  return [center + r * Math.cos(theta), center - r * Math.sin(theta)]
-}
-
-function smoothClosedPath(pts: [number, number][]): string {
-  const n = pts.length
-  if (n < 3) return ''
-  let d = `M ${pts[0][0]} ${pts[0][1]}`
-  for (let i = 0; i < n; i++) {
-    const p0 = pts[(i - 1 + n) % n]
-    const p1 = pts[i]
-    const p2 = pts[(i + 1) % n]
-    const p3 = pts[(i + 2) % n]
-    const cp1x = p1[0] + (p2[0] - p0[0]) / 6
-    const cp1y = p1[1] + (p2[1] - p0[1]) / 6
-    const cp2x = p2[0] - (p3[0] - p1[0]) / 6
-    const cp2y = p2[1] - (p3[1] - p1[1]) / 6
-    d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2[0]} ${p2[1]}`
-  }
-  return d + ' Z'
-}
-
-function binBoundaryPoints(allDetected: TestPoint[], binSizeDeg: number = 5): { meridianDeg: number; eccentricityDeg: number }[] {
-  if (allDetected.length < 3) return []
-  const numBins = Math.round(360 / binSizeDeg)
-  const bins: (number | null)[] = new Array(numBins).fill(null)
-  for (const p of allDetected) {
-    const bin = Math.round(p.meridianDeg / binSizeDeg) % numBins
-    if (bins[bin] === null || p.eccentricityDeg > bins[bin]!) bins[bin] = p.eccentricityDeg
-  }
-  // Interpolate gaps
-  for (let pass = 0; pass < 3; pass++) {
-    for (let i = 0; i < numBins; i++) {
-      if (bins[i] !== null) continue
-      let prev: number | null = null, next: number | null = null
-      for (let d = 1; d <= numBins / 2; d++) {
-        if (prev === null && bins[(i - d + numBins) % numBins] !== null) prev = bins[(i - d + numBins) % numBins]
-        if (next === null && bins[(i + d) % numBins] !== null) next = bins[(i + d) % numBins]
-        if (prev !== null && next !== null) break
-      }
-      if (prev !== null && next !== null) bins[i] = (prev + next) / 2
-    }
-  }
-  return bins.map((ecc, i) => ({ meridianDeg: i * binSizeDeg, eccentricityDeg: ecc ?? 0 })).filter(p => p.eccentricityDeg > 0)
-}
-
-function computeIsoptersSVG(
-  grouped: Partial<Record<StimulusKey, TestPoint[]>>,
-  center: number,
-  scale: number,
-): { key: StimulusKey; isopterIdx: number; svgPts: [number, number][]; isScattered: boolean }[] {
-  const results: { key: StimulusKey; isopterIdx: number; svgPts: [number, number][]; isScattered: boolean }[] = []
-  let prevBoundary: { meridianDeg: number; eccentricityDeg: number }[] | null = null
-
-  for (let isopterIdx = 0; isopterIdx < ISOPTER_ORDER.length; isopterIdx++) {
-    const key = ISOPTER_ORDER[isopterIdx]
-    const pts = grouped[key]
-    if (!pts) continue
-    const allDetected = pts.filter(p => p.detected)
-    if (allDetected.length < 3) continue
-    const isScattered = allDetected.length > 20
-    const binSize = isScattered ? 5 : (allDetected.length <= 12 ? 30 : 15)
-    let boundary = binBoundaryPoints(allDetected, binSize)
-    if (boundary.length < 3) continue
-    // Clamp the current (dimmer) boundary to not exceed the previous
-    // (brighter) one. Uses meridian-aware sampling instead of index equality
-    // so a 15°-binned inner isopter correctly nests inside a 30°-binned
-    // outer one.
-    if (prevBoundary) {
-      boundary = clampBoundary(boundary, prevBoundary)
-    }
-    const smoothWeight = 0.22
-    const selfWeight = 1 - 2 * smoothWeight
-    let smoothed = [...boundary]
-    smoothed = smoothed.map((p, i) => {
-      const n = smoothed.length
-      const prev = smoothed[(i - 1 + n) % n]
-      const next = smoothed[(i + 1) % n]
-      const neighborAvg = (prev.eccentricityDeg + next.eccentricityDeg) / 2
-      const diff = Math.abs(p.eccentricityDeg - neighborAvg)
-      const threshold = Math.max(2, neighborAvg * 0.3)
-      if (diff > threshold) return { ...p, eccentricityDeg: neighborAvg * 0.65 + p.eccentricityDeg * 0.35 }
-      return p
-    })
-    const numPasses = isScattered ? 3 : (boundary.length <= 24 ? 3 : 1)
-    for (let pass = 0; pass < numPasses; pass++) {
-      smoothed = smoothed.map((p, i) => {
-        const n = smoothed.length
-        const prev = smoothed[(i - 1 + n) % n]
-        const next = smoothed[(i + 1) % n]
-        return { ...p, eccentricityDeg: prev.eccentricityDeg * smoothWeight + p.eccentricityDeg * selfWeight + next.eccentricityDeg * smoothWeight }
-      })
-    }
-    prevBoundary = smoothed
-    const svgPts = smoothed.map(p => polarToXY(p.eccentricityDeg, p.meridianDeg, center, scale) as [number, number])
-    results.push({ key, isopterIdx, svgPts, isScattered })
-  }
-  return results
-}
+// Reliability scoring + isopter rendering are now shared with the in-app
+// renderer via ./reliabilityScore and ./isopterRender so the PDF and the
+// on-screen results page can never disagree about the score or contour
+// shape for a given test.
 
 /** Build SVG string matching VisualFieldMap and render to data URL */
 async function renderRadarImage(result: TestResult, sizePx: number): Promise<string> {
@@ -409,7 +222,7 @@ async function renderRadarImage(result: TestResult, sizePx: number): Promise<str
   const strokeWidths = [2, 1.8, 1.5, 1.5, 1.3]
   const fillOpacities = [0.10, 0.08, 0.06, 0.05, 0.04]
 
-  for (const { key, isopterIdx, svgPts, isScattered } of computeIsoptersSVG(grouped, center, scale)) {
+  for (const { key, isopterIdx, svgPts, isScattered } of computeIsopters(grouped, center, scale)) {
     const color = STIMULI[key].color
     const path = smoothClosedPath(svgPts)
     svg += `<path d="${path}" fill="${color}" fill-opacity="${fillOpacities[isopterIdx]}" stroke="none"/>`
@@ -554,6 +367,26 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
     ['Total test points:', `${result.points.length}`],
     ['Detected points:', `${result.points.filter(p => p.detected).length}`],
   ]
+
+  const reliabilityIdx = computeReliabilityIndices(result)
+  if (reliabilityIdx.fa) {
+    const faRange = RELIABILITY_REFERENCE_RANGES.faPercent
+    info.push([
+      'Fixation accuracy (FA):',
+      `${reliabilityIdx.fa.correct}/${reliabilityIdx.fa.presented} (${reliabilityIdx.fa.percent.toFixed(0)}% — ${reliabilityIdx.fa.bandLabel}; normal ${faRange.min}–${faRange.max}%)`,
+    ])
+    if (reliabilityIdx.fprr) {
+      const fprrRange = RELIABILITY_REFERENCE_RANGES.fprrPercent
+      info.push([
+        'False-positive response rate (FPRR):',
+        `${reliabilityIdx.fprr.percent.toFixed(1)}% (${reliabilityIdx.fprr.bandLabel}; normal ${fprrRange.min}–${fprrRange.max}%)`,
+      ])
+    }
+    info.push([
+      '',
+      `Reliability-index reference ranges from ${RELIABILITY_REFERENCE_RANGES.citation}.`,
+    ])
+  }
 
   for (const [label, value] of info) {
     doc.setTextColor(100, 100, 100)
@@ -714,6 +547,7 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
   // Page 1 footer
   doc.setFontSize(7)
   doc.setTextColor(160, 160, 160)
+  doc.text(`Methodology and definitions: ${APP_DOMAIN}/methods`, margin, pageH - 14)
   doc.text(`Report generated: ${new Date().toLocaleString('en-GB')}  |  ${APP_DOMAIN}  |  Page 1 of 2`, margin, pageH - 10)
 
   // ═══════════════════════════════════════
@@ -969,6 +803,7 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
   doc.setFont('helvetica', 'normal')
   doc.setFontSize(7)
   doc.setTextColor(160, 160, 160)
+  doc.text(`Methodology and definitions: ${APP_DOMAIN}/methods`, margin, pageH - 14)
   doc.text(`Report generated: ${new Date().toLocaleString('en-GB')}  |  ${APP_DOMAIN}  |  Page 2 of 2`, margin, pageH - 10)
 
   // Save

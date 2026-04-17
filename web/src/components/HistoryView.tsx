@@ -175,7 +175,7 @@ export function HistoryView({ onBack }: Props) {
               )
             })}
           </div>
-          <Interpretation points={standardPoints} areas={selected.isopterAreas} maxEccentricityDeg={selected.calibration.maxEccentricityDeg} calibration={selected.calibration} />
+          <Interpretation points={standardPoints} areas={selected.isopterAreas} maxEccentricityDeg={selected.calibration.maxEccentricityDeg} calibration={selected.calibration} reliabilityIndices={selected.reliabilityIndices} />
           <ScenarioOverlay userPoints={standardPoints} userAreas={selected.isopterAreas} maxEccentricity={maxEcc} />
           {/* Vision sim gets ALL points including extended for wider coverage */}
           <VisionSimulator
@@ -662,6 +662,41 @@ function ResultsList({
                   </div>
                 )}
               </div>
+              {[leftResult, rightResult].map((result, ri) => result?.reliabilityIndices && result.reliabilityIndices.catchTrialsPresented > 0 && (() => {
+                const {
+                  catchTrialsPresented,
+                  catchTrialsFalsePositive,
+                  falsePositiveIsiPresses,
+                  truePositiveResponses,
+                } = result.reliabilityIndices!
+                const faCorrect = catchTrialsPresented - catchTrialsFalsePositive
+                const faPct = (faCorrect / catchTrialsPresented) * 100
+                const fprrN = catchTrialsFalsePositive + falsePositiveIsiPresses
+                const fprrD = fprrN + truePositiveResponses
+                const fprrPct = fprrD > 0 ? (fprrN / fprrD) * 100 : 0
+                return (
+                  <div key={ri} className="space-y-0.5">
+                    <div
+                      className="text-sm text-zinc-400"
+                      title="Fixation Accuracy — % of blindspot catch trials correctly ignored. Normal 79–99% (Dzwiniel 2017)."
+                    >
+                      <span className="font-medium">FA: </span>
+                      {faPct.toFixed(0)}% ({faCorrect}/{catchTrialsPresented})
+                      <span className="text-zinc-500"> · normal 79–99%</span>
+                    </div>
+                    {fprrD > 0 && (
+                      <div
+                        className="text-sm text-zinc-400"
+                        title="False-Positive Response Rate — % of key presses when no stimulus was shown. Normal 0.3–2.3% (Dzwiniel 2017)."
+                      >
+                        <span className="font-medium">FPRR: </span>
+                        {fprrPct.toFixed(1)}%
+                        <span className="text-zinc-500"> · normal 0.3–2.3%</span>
+                      </div>
+                    )}
+                  </div>
+                )
+              })())}
             </div>
           )
         })}

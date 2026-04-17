@@ -71,6 +71,15 @@ test.describe('Calibration Flow', () => {
     await expect(toggle).toHaveAttribute('aria-checked', 'true')
   })
 
+  test('sphericity correction toggle is visible and togglable', async ({ page }) => {
+    await page.getByRole('radio', { name: 'Right eye (OD)' }).click()
+    await page.getByRole('button', { name: /^Start test/ }).click()
+    const checkbox = page.getByLabel(/Sphericity correction/i)
+    await expect(checkbox).toBeVisible()
+    await checkbox.check()
+    await expect(checkbox).toBeChecked()
+  })
+
   test('static test skips reaction time step', async ({ page }) => {
     await page.getByRole('tab', { name: 'Static' }).click()
     await page.getByRole('radio', { name: 'Right eye (OD)' }).click()

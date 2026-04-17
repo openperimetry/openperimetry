@@ -65,9 +65,14 @@ const [showAuth, setShowAuth] = useState(() => {
   })
   const { user, logout, syncResults } = useAuth()
 
-  // Update document title on page change
+  // Update document title on page change and send a virtual pageview to
+  // Umami. This is a client-rendered SPA so the URL never changes on
+  // navigation — without this the auto-tracker only records a single '/'
+  // pageview per session.
   useEffect(() => {
     document.title = PAGE_TITLES[page]
+    const umami = (window as unknown as { umami?: { track: (fn: (props: Record<string, unknown>) => Record<string, unknown>) => void } }).umami
+    umami?.track(props => ({ ...props, url: `/${page}`, title: PAGE_TITLES[page] }))
   }, [page])
 
   // Inject Umami analytics script

@@ -80,4 +80,45 @@ test.describe('History Page', () => {
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Results')
     await expect(page.getByText('No results yet')).toBeVisible()
   })
+
+  test('shows FA and FPRR rows when reliabilityIndices is present', async ({ page, seedResults }) => {
+    // Static test result with both FA and FPRR metrics.
+    // FA = (10 - 1) / 10 = 90%
+    // FPRR = (1 + 2) / (1 + 2 + 87) = 3/90 = 3.33%
+    await seedResults([
+      createTestResult({
+        eye: 'right',
+        testType: 'static',
+        reliabilityIndices: {
+          catchTrialsPresented: 10,
+          catchTrialsFalsePositive: 1,
+          falsePositiveIsiPresses: 2,
+          truePositiveResponses: 87,
+        },
+      }),
+    ])
+    await page.goto('/')
+    await page.getByRole('button', { name: /Results/ }).click()
+    await expect(page.getByText(/FA:\s*90%/)).toBeVisible()
+    await expect(page.getByText(/normal\s+79.99%/)).toBeVisible()
+    await expect(page.getByText(/FPRR:\s*3\.3%/)).toBeVisible()
+    await expect(page.getByText(/normal\s+0\.3.2\.3%/)).toBeVisible()
+  })
+
+  test('handles results missing reliabilityIndices (backward compat)', async ({ page, seedResults }) => {
+    // Pre-2026-04 result without reliabilityIndices — must render without crashing.
+    await seedResults([
+      createTestResult({
+        eye: 'right',
+        testType: 'static',
+        // reliabilityIndices intentionally omitted
+      }),
+    ])
+    await page.goto('/')
+    await page.getByRole('button', { name: /Results/ }).click()
+    // Page renders without the FA/FPRR rows.
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText('Results')
+    await expect(page.getByText(/FA:/)).toHaveCount(0)
+    await expect(page.getByText(/FPRR:/)).toHaveCount(0)
+  })
 })

@@ -1,5 +1,14 @@
 import { BackButton } from './AccessibleNav'
 import { APP_NAME } from '../branding'
+import { STIMULI, ISOPTER_ORDER } from '../types'
+import {
+  CATCH_TRIAL_EVERY_N,
+  FIXATION_LOSS_ALERT_MS,
+  FIXATION_LOSS_ALERT_MESSAGE,
+  SPEED_PRESETS,
+  RELIABILITY_REFERENCE_RANGES,
+} from '../testDefaults'
+import { blindspotLocation } from '../blindspot'
 
 interface Props {
   onBack: () => void
@@ -9,6 +18,49 @@ interface Row {
   param: string
   value: string
   meaning: string
+}
+
+// Build stimulus rows dynamically from the STIMULI source — guarantees the
+// page cannot drift from the code.
+const STIMULI_MEANINGS: Record<string, string> = {
+  'V4e':   'Largest, brightest stimulus. Maps the outermost isopter.',
+  'III4e': 'Medium size, full brightness. Standard reference isopter for severity classification.',
+  'III2e': 'Same size as III4e at ~1 log unit dimmer. Probes mid-peripheral sensitivity.',
+  'I4e':   'Small bright stimulus. Detects small acuity-limited islands.',
+  'I2e':   'Smallest dim stimulus. Maps the central island in advanced loss.',
+}
+function buildStimuliRows(): Row[] {
+  return ISOPTER_ORDER.map((key) => {
+    const def = STIMULI[key]
+    const intensity = def.intensityFrac === 1 ? 'full' : def.intensityFrac.toFixed(2)
+    return {
+      param: def.label,
+      value: `${def.sizeDeg}° · ${intensity}`,
+      meaning: STIMULI_MEANINGS[key] ?? '',
+    }
+  })
+}
+
+// Build static-test timing rows dynamically from SPEED_PRESETS.
+function buildSpeedPresetRows(): Row[] {
+  const p = SPEED_PRESETS
+  return [
+    {
+      param: 'Stimulus on (relaxed/normal/fast)',
+      value: `${p.relaxed.stimulusMs} / ${p.normal.stimulusMs} / ${p.fast.stimulusMs} ms`,
+      meaning: 'How long each dot is shown.',
+    },
+    {
+      param: 'Response window (relaxed/normal/fast)',
+      value: `${p.relaxed.responseMs} / ${p.normal.responseMs} / ${p.fast.responseMs} ms`,
+      meaning: 'Time after stimulus offset still counted as a hit.',
+    },
+    {
+      param: 'Inter-stimulus gap (relaxed/normal/fast)',
+      value: `${p.relaxed.gapMinMs}–${p.relaxed.gapMaxMs} / ${p.normal.gapMinMs}–${p.normal.gapMaxMs} / ${p.fast.gapMinMs}–${p.fast.gapMaxMs} ms`,
+      meaning: 'Random pause before the next dot (jittered to prevent anticipation).',
+    },
+  ]
 }
 
 function ParamTable({ rows }: { rows: Row[] }) {
@@ -46,13 +98,7 @@ function Section({ title, intro, children }: { title: string; intro?: string; ch
   )
 }
 
-const STIMULI_ROWS: Row[] = [
-  { param: 'V4e',   value: '1.73° · full', meaning: 'Largest, brightest stimulus. Maps the outermost isopter.' },
-  { param: 'III4e', value: '0.43° · full', meaning: 'Medium size, full brightness. Standard reference isopter for severity classification.' },
-  { param: 'III2e', value: '0.43° · 0.10', meaning: 'Same size as III4e at ~1 log unit dimmer. Probes mid-peripheral sensitivity.' },
-  { param: 'I4e',   value: '0.11° · full', meaning: 'Small bright stimulus. Detects small acuity-limited islands.' },
-  { param: 'I2e',   value: '0.11° · 0.10', meaning: 'Smallest dim stimulus. Maps the central island in advanced loss.' },
-]
+const STIMULI_ROWS: Row[] = buildStimuliRows()
 
 const GOLDMANN_SPEED_ROWS: Row[] = [
   { param: 'Stimulus speed (normal)',     value: '3°/s',          meaning: 'Main outer-to-inner sweep velocity in normal mode.' },
@@ -94,9 +140,7 @@ const STATIC_ROWS: Row[] = [
   { param: 'III2e field',              value: '85%',       meaning: 'Slightly reduced peripheral coverage for dim medium.' },
   { param: 'I4e field',                value: '75%',       meaning: 'Small bright stays away from the dead far periphery.' },
   { param: 'I2e field',                value: '65%',       meaning: 'Smallest dim restricted to where it has any chance of being seen.' },
-  { param: 'Stimulus on (relaxed/normal/fast)', value: '600 / 500 / 400 ms', meaning: 'How long each dot is shown.' },
-  { param: 'Response window',          value: '1800 / 1400 / 1000 ms', meaning: 'Time after stimulus offset still counted as a hit.' },
-  { param: 'Inter-stimulus gap',       value: '500–900 / 350–650 / 250–450 ms', meaning: 'Random pause before the next dot.' },
+  ...buildSpeedPresetRows(),
   { param: 'Burst stagger',            value: '150 ms',    meaning: 'Spacing between dots in a multi-dot burst.' },
   { param: 'Min response time',        value: '150 ms',    meaning: 'False-start threshold.' },
 ]
@@ -266,13 +310,140 @@ export function MethodsPage({ onBack }: Props) {
         </Section>
 
         <Section
-          title="Reliability score"
-          intro="Every result carries a 0–100 reliability score. It starts at 100 and accumulates penalties from the checks below. The score band controls the colour shown next to your result."
+          title="Reliability score (isopter-based)"
+          intro="Every kinetic result carries a 0–100 reliability score. It starts at 100 and accumulates penalties from the checks below. The score band controls the colour shown next to your result. This is separate from Fixation Accuracy and False-Positive Response Rate below — those are per-trial fixation metrics adopted from Specvis."
         >
           <h3 className="text-sm font-medium text-zinc-300">Penalty components</h3>
           <ParamTable rows={RELIABILITY_ROWS} />
           <h3 className="text-sm font-medium text-zinc-300 pt-2">Score bands</h3>
           <ParamTable rows={RELIABILITY_BAND_ROWS} />
+        </Section>
+
+        <Section
+          title="Fixation monitoring (catch trials)"
+          intro="During the static test, a blindspot catch trial is injected periodically. A bright V4e stimulus is flashed at the anatomical blindspot; a patient fixating correctly will NOT see it. Any 'seen' response is a fixation-loss signal. The values below are dynamically imported from the application source — they cannot drift from the code."
+        >
+          <ParamTable
+            rows={(() => {
+              const bs = blindspotLocation('right')
+              return [
+                {
+                  param: 'Catch-trial cadence',
+                  value: `every ${CATCH_TRIAL_EVERY_N} presentations`,
+                  meaning: `Default per Dzwiniel et al. 2017 (Specvis's monitorFixationEveryXStimuli).`,
+                },
+                {
+                  param: 'Blindspot location (right eye)',
+                  value: `${bs.eccentricityDeg.toFixed(1)}° at meridian ${bs.meridianDeg.toFixed(1)}°`,
+                  meaning: `Temporal side, ~1.5° below horizontal. Left eye is mirrored.`,
+                },
+                {
+                  param: 'Catch-trial stimulus',
+                  value: `V4e (${STIMULI['V4e'].sizeDeg}° · full intensity)`,
+                  meaning: `Brightest available — any reported detection is an unambiguous fixation-loss signal, not a sensitivity-edge artifact.`,
+                },
+                {
+                  param: 'Fixation-loss alert',
+                  value: FIXATION_LOSS_ALERT_MS === 0
+                    ? 'disabled'
+                    : `"${FIXATION_LOSS_ALERT_MESSAGE}" shown for ${FIXATION_LOSS_ALERT_MS} ms`,
+                  meaning: 'Immediate on-screen feedback when a catch trial is incorrectly detected. Does not pause the test.',
+                },
+              ]
+            })()}
+          />
+          <p className="text-xs text-zinc-500 italic pt-1">
+            These values are tuneable in an upcoming Advanced Settings release.
+          </p>
+        </Section>
+
+        <Section
+          title="Reliability indices (FA and FPRR)"
+          intro="Two per-trial reliability metrics adopted from Dzwiniel et al., PLoS ONE 2017 (Specvis-Desktop). Both are computed at display time from the stored raw counts on each TestResult. Reference ranges are from the paper's healthy control cohort (n=21, aged 22–28)."
+        >
+          <ParamTable
+            rows={[
+              {
+                param: 'Fixation Accuracy (FA)',
+                value: `${RELIABILITY_REFERENCE_RANGES.faPercent.min}–${RELIABILITY_REFERENCE_RANGES.faPercent.max}% normal`,
+                meaning: `(catchTrialsPresented − catchTrialsFalsePositive) / catchTrialsPresented × 100. Percentage of blindspot catch trials correctly ignored.`,
+              },
+              {
+                param: 'False-Positive Response Rate (FPRR)',
+                value: `${RELIABILITY_REFERENCE_RANGES.fprrPercent.min}–${RELIABILITY_REFERENCE_RANGES.fprrPercent.max}% normal`,
+                meaning: `(catchFP + isiFP) / (catchFP + isiFP + truePositives) × 100. Percentage of key presses when no stimulus was shown (catch-trial + gap-window presses combined).`,
+              },
+            ]}
+          />
+          <p className="text-xs text-zinc-500 pt-1">Reference: {RELIABILITY_REFERENCE_RANGES.citation}.</p>
+        </Section>
+
+        <Section
+          title="Sphericity correction"
+          intro="Optional per-calibration. When enabled, degrees-to-pixels conversion uses d = D·tan(θ) instead of the small-angle linear approximation θ·ppd. The two models agree to within 1% inside 5° of fixation but diverge substantially at the edge of the extended (~80°) field. Default is off so results recorded before April 2026 remain bitwise reproducible."
+        >
+          <ParamTable
+            rows={[
+              { param: 'Formula (off, default)', value: 'd_px = θ · pixelsPerDegree',            meaning: 'Linear small-angle approximation. Good within ~20° of fixation.' },
+              { param: 'Formula (on)',           value: 'd_px = D · tan(θ) · pixelsPerCm',       meaning: 'True flat-screen projection. Recommended when extended field is enabled.' },
+              { param: 'Magnitude of correction at 30°', value: '~10% larger than linear',       meaning: 'Peripheral stimuli appear further from fixation on screen than the linear model predicts.' },
+              { param: 'Magnitude of correction at 60°', value: '~65% larger than linear',       meaning: 'Large — linear model systematically under-projects the far periphery.' },
+            ]}
+          />
+        </Section>
+
+        <Section
+          title="Related tools and where this project stands"
+          intro="Browser-based and consumer visual-field self-tests are a small but growing space. The table below positions this project honestly against the tools most often cited alongside it."
+        >
+          <div className="overflow-x-auto rounded-xl border border-white/[0.06]">
+            <table className="w-full text-sm">
+              <thead className="bg-white/[0.03] text-zinc-400 text-xs uppercase tracking-wider">
+                <tr>
+                  <th className="text-left font-medium px-4 py-2">Tool</th>
+                  <th className="text-left font-medium px-4 py-2">Platform</th>
+                  <th className="text-left font-medium px-4 py-2">Test type</th>
+                  <th className="text-left font-medium px-4 py-2">Validation</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/[0.05]">
+                <tr className="hover:bg-white/[0.02]">
+                  <td className="px-4 py-2 text-zinc-200 font-medium">HFA (Humphrey)</td>
+                  <td className="px-4 py-2 text-zinc-400">Clinical perimeter</td>
+                  <td className="px-4 py-2 text-zinc-400">SITA 24-2 / 30-2 / 10-2</td>
+                  <td className="px-4 py-2 text-zinc-400">Clinical gold standard</td>
+                </tr>
+                <tr className="hover:bg-white/[0.02]">
+                  <td className="px-4 py-2 text-zinc-200 font-medium">Specvis Desktop</td>
+                  <td className="px-4 py-2 text-zinc-400">Windows / macOS / Linux</td>
+                  <td className="px-4 py-2 text-zinc-400">Static staircase, 48/96 pts</td>
+                  <td className="px-4 py-2 text-zinc-400">vs Medmont M700 (Dzwiniel 2017)</td>
+                </tr>
+                <tr className="hover:bg-white/[0.02]">
+                  <td className="px-4 py-2 text-zinc-200 font-medium">Peristat Online</td>
+                  <td className="px-4 py-2 text-zinc-400">Web — any monitor</td>
+                  <td className="px-4 py-2 text-zinc-400">Suprathreshold (4 levels)</td>
+                  <td className="px-4 py-2 text-zinc-400">80–86% sens, 94–97% spec vs HFA</td>
+                </tr>
+                <tr className="hover:bg-white/[0.02]">
+                  <td className="px-4 py-2 text-zinc-200 font-medium">Visual Fields Easy</td>
+                  <td className="px-4 py-2 text-zinc-400">iPad</td>
+                  <td className="px-4 py-2 text-zinc-400">Suprathreshold, 96 pts</td>
+                  <td className="px-4 py-2 text-zinc-400">Inadequate for one-time home screen</td>
+                </tr>
+                <tr className="bg-white/[0.04] font-semibold">
+                  <td className="px-4 py-2 text-accent">{APP_NAME}</td>
+                  <td className="px-4 py-2 text-zinc-300">Web — any browser</td>
+                  <td className="px-4 py-2 text-zinc-300">Kinetic + static + ring</td>
+                  <td className="px-4 py-2 text-zinc-300">Not yet validated against a clinical perimeter</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p className="text-sm text-zinc-400">
+            If a defect appears in your results, follow up with an ophthalmologist for a
+            test on a calibrated clinical perimeter. This tool is not a diagnostic device.
+          </p>
         </Section>
 
         <div className="bg-surface rounded-2xl p-6 space-y-2 border border-white/[0.06]">

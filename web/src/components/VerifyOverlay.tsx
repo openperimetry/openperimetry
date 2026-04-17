@@ -3,6 +3,7 @@ import type { TestPoint, Eye, CalibrationData, StimulusKey } from '../types'
 import { STIMULI, ISOPTER_ORDER } from '../types'
 import { computeSmoothedBoundary, clampBoundary } from '../isopterCalc'
 import type { BoundaryPoint } from '../isopterCalc'
+import { smoothClosedPath } from '../isopterRender'
 
 interface Props {
   points: TestPoint[]
@@ -41,24 +42,6 @@ interface ScreenBoundary {
   fallbackPath: string
   centerX: number
   centerY: number
-}
-
-function smoothClosedPath(pts: [number, number][]): string {
-  const n = pts.length
-  if (n < 3) return ''
-  let d = `M ${pts[0][0]} ${pts[0][1]}`
-  for (let i = 0; i < n; i++) {
-    const p1 = pts[i]
-    const p2 = pts[(i + 1) % n]
-    const p0 = pts[(i - 1 + n) % n]
-    const p3 = pts[(i + 2) % n]
-    const cp1x = p1[0] + (p2[0] - p0[0]) / 6
-    const cp1y = p1[1] + (p2[1] - p0[1]) / 6
-    const cp2x = p2[0] - (p3[0] - p1[0]) / 6
-    const cp2y = p2[1] - (p3[1] - p1[1]) / 6
-    d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2[0]} ${p2[1]}`
-  }
-  return d + ' Z'
 }
 
 export function VerifyOverlay({ points, eye, calibration, onClose }: Props) {

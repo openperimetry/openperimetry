@@ -15,19 +15,23 @@ import { ClinicalDisclaimer } from './ClinicalDisclaimer'
 import { STATIC_TEST } from '../constants'
 import { formatEyeLabel } from '../eyeLabels'
 import { HeadGuide } from './HeadGuide'
+import { degToPx } from '../geometry'
+import { blindspotLocation } from '../blindspot'
+import { stimulusDisplayColor } from '../stimulusDisplay'
+import {
+  CATCH_TRIAL_EVERY_N,
+  FIXATION_LOSS_ALERT_MS,
+  FIXATION_LOSS_ALERT_MESSAGE,
+  SPEED_PRESETS,
+  type SpeedPresetName,
+} from '../testDefaults'
 
 // ---------- constants ----------
 const DEFAULT_HEXAGONS = 100      // default number of test points per level
 const DENSITY_EXPONENT = 1.5      // >1 = denser near center (Goldmann bowl → flat projection)
 const { MIN_RESPONSE_MS, MIN_ECCENTRICITY_DEG, MAX_TESTABLE_ECCENTRICITY_DEG, BURST_STAGGER_MS } = STATIC_TEST
 
-// Speed presets: [stimulusDisplayMs, responseWindowMs, interStimulusMinMs, interStimulusMaxMs]
-const SPEED_PRESETS = {
-  relaxed:  { stimulusMs: 600, responseMs: 1800, gapMinMs: 500, gapMaxMs: 900 },
-  normal:   { stimulusMs: 500, responseMs: 1400, gapMinMs: 350, gapMaxMs: 650 },
-  fast:     { stimulusMs: 400, responseMs: 1000, gapMinMs: 250, gapMaxMs: 450 },
-} as const
-type SpeedSetting = keyof typeof SPEED_PRESETS
+type SpeedSetting = SpeedPresetName
 
 // Max eccentricity fraction per stimulus level.
 // Dim stimuli are mildly capped below full field — the tail-end periphery
@@ -224,6 +228,16 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   const batchPointsRef = useRef<GridPoint[]>([])
   const verifyQueueRef = useRef<GridPoint[]>([])
 
+  // Catch-trial tracking
+  const isCatchTrialRef = useRef(false)
+  const catchTrialRef = useRef<Array<{ detected: boolean }>>([])
+  const truePositivesRef = useRef(0)
+  const [showFixationLossAlert, setShowFixationLossAlert] = useState(false)
+
+  // ISI false-positive tracking
+  const isiActiveRef = useRef(false)
+  const fpIsiPressesRef = useRef(0)
+
   // Stimulus level progression
   const [currentStimulusIdx, setCurrentStimulusIdx] = useState(0)
   const currentStimulusRef = useRef<StimulusKey>(ISOPTER_ORDER[0])
@@ -400,32 +414,39 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   }, [getMaxExtentDeg, getScreenAreaDeg2, generateFilteredGrid, targetHexagons])
 
   // ---------- show/hide stimulus ----------
-  const showStimulus = useCallback((xDeg: number, yDeg: number) => {
+  // Core helper: show stimulus at (xDeg, yDeg) using an explicit stim key.
+  const showStimulusAt = useCallback((xDeg: number, yDeg: number, stimKey: StimulusKey) => {
     const el = stimulusRef.current
     if (!el) return
-    const stim = STIMULI[currentStimulusRef.current]
-    const sizePx = Math.max(4, Math.round(stim.sizeDeg * pixelsPerDegree))
-    const screenX = fixationXY.x + xDeg * pixelsPerDegree
-    const screenY = fixationXY.y - yDeg * pixelsPerDegree
+    const stim = STIMULI[stimKey]
+    const sizePx = Math.max(4, Math.round(degToPx(stim.sizeDeg, calibration)))
+    const screenX = fixationXY.x + degToPx(xDeg, calibration)
+    const screenY = fixationXY.y - degToPx(yDeg, calibration)
     el.style.width = `${sizePx}px`
     el.style.height = `${sizePx}px`
     el.style.marginLeft = `${-sizePx / 2 + screenX}px`
     el.style.marginTop = `${-sizePx / 2 + screenY}px`
+    el.style.backgroundColor = stimulusDisplayColor(stimKey)
     el.style.opacity = `${stim.intensityFrac}`
     stimulusShownRef.current = true
   }, [pixelsPerDegree, fixationXY.x, fixationXY.y])
+
+  const showStimulus = useCallback((xDeg: number, yDeg: number) => {
+    showStimulusAt(xDeg, yDeg, currentStimulusRef.current)
+  }, [showStimulusAt])
 
   const showStimulus2 = useCallback((xDeg: number, yDeg: number) => {
     const el = stimulus2Ref.current
     if (!el) return
     const stim = STIMULI[currentStimulusRef.current]
-    const sizePx = Math.max(4, Math.round(stim.sizeDeg * pixelsPerDegree))
-    const screenX = fixationXY.x + xDeg * pixelsPerDegree
-    const screenY = fixationXY.y - yDeg * pixelsPerDegree
+    const sizePx = Math.max(4, Math.round(degToPx(stim.sizeDeg, calibration)))
+    const screenX = fixationXY.x + degToPx(xDeg, calibration)
+    const screenY = fixationXY.y - degToPx(yDeg, calibration)
     el.style.width = `${sizePx}px`
     el.style.height = `${sizePx}px`
     el.style.marginLeft = `${-sizePx / 2 + screenX}px`
     el.style.marginTop = `${-sizePx / 2 + screenY}px`
+    el.style.backgroundColor = stimulusDisplayColor(currentStimulusRef.current)
     el.style.opacity = `${stim.intensityFrac}`
   }, [pixelsPerDegree, fixationXY.x, fixationXY.y])
 
@@ -582,11 +603,60 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   // Counter to interleave verify points among regular presentations
   const presentCountRef = useRef(0)
 
+  // Stable ref to presentNext so presentCatchTrial can call it without a
+  // circular useCallback dependency.
+  const presentNextRef = useRef<(() => void) | null>(null)
+
+  // ---------- catch-trial presentation ----------
+  const presentCatchTrial = useCallback(() => {
+    // Present a bright V4e stimulus at the anatomical blindspot. A patient
+    // fixating correctly will NOT see it; detection is a fixation-loss signal.
+    const bs = blindspotLocation(eye)
+    const bsRad = (bs.meridianDeg * Math.PI) / 180
+    const bsXDeg = bs.eccentricityDeg * Math.cos(bsRad)
+    const bsYDeg = bs.eccentricityDeg * Math.sin(bsRad)
+
+    isCatchTrialRef.current = true
+    respondedRef.current = false
+    // Use a sentinel GridPoint so currentPointRef is non-null (handleResponse guard)
+    const catchPoint: GridPoint = { xDeg: bsXDeg, yDeg: bsYDeg, key: '__catch__' }
+    currentPointRef.current = catchPoint
+    batchPointsRef.current = []
+
+    const delay = sp.gapMinMs + Math.random() * (sp.gapMaxMs - sp.gapMinMs)
+    delayTimeoutRef.current = setTimeout(() => {
+      if (phaseRef.current !== 'testing' && phaseRef.current !== 'retest') return
+      isiActiveRef.current = false
+      showStimulusAt(bsXDeg, bsYDeg, 'V4e')
+      stimulusStartRef.current = performance.now()
+      hideTimeoutRef.current = setTimeout(() => hideStimulus(), sp.stimulusMs)
+      responseTimeoutRef.current = setTimeout(() => {
+        if (!respondedRef.current && currentPointRef.current === catchPoint) {
+          hideStimulus()
+          // Miss: patient correctly did not see the catch trial
+          catchTrialRef.current.push({ detected: false })
+          isCatchTrialRef.current = false
+          currentPointRef.current = null
+          isiActiveRef.current = true
+          presentNextRef.current?.()
+        }
+      }, sp.responseMs)
+    }, delay)
+    isiActiveRef.current = true
+  }, [eye, showStimulusAt, hideStimulus, sp.gapMinMs, sp.gapMaxMs, sp.stimulusMs, sp.responseMs])
+
   // ---------- present next stimulus ----------
   const presentNext = useCallback(() => {
     if (phaseRef.current !== 'testing' && phaseRef.current !== 'retest') return
 
+    isiActiveRef.current = false
     presentCountRef.current++
+
+    // Every Nth presentation, inject a blindspot catch trial
+    if (presentCountRef.current % CATCH_TRIAL_EVERY_N === 0) {
+      presentCatchTrial()
+      return
+    }
 
     // Every 3rd presentation, take from verify queue if available (single dot, no burst)
     if (verifyQueueRef.current.length > 0 && presentCountRef.current % 3 === 0) {
@@ -606,6 +676,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
         const delay = sp.gapMinMs + Math.random() * (sp.gapMaxMs - sp.gapMinMs)
         delayTimeoutRef.current = setTimeout(() => {
           if (phaseRef.current !== 'testing' && phaseRef.current !== 'retest') return
+          isiActiveRef.current = false
           showStimulus(theVerifyPoint.xDeg, theVerifyPoint.yDeg)
           stimulusStartRef.current = performance.now()
           hideTimeoutRef.current = setTimeout(() => hideStimulus(), sp.stimulusMs)
@@ -614,10 +685,12 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
               hideStimulus()
               recordResult(theVerifyPoint, false)
               flashFixation('#ef4444', 200)
+              isiActiveRef.current = true
               presentNext()
             }
           }, sp.responseMs)
         }, delay)
+        isiActiveRef.current = true
         return
       }
     }
@@ -652,6 +725,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
           phaseRef.current = 'retest'
           const delay = sp.gapMinMs + Math.random() * (sp.gapMaxMs - sp.gapMinMs)
           delayTimeoutRef.current = setTimeout(presentNext, delay)
+          isiActiveRef.current = true
           return
         }
         goToCleanupOrNextLevel()
@@ -685,6 +759,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     delayTimeoutRef.current = setTimeout(() => {
       if (phaseRef.current !== 'testing' && phaseRef.current !== 'retest') return
 
+      isiActiveRef.current = false
       showStimulus(thePoint.xDeg, thePoint.yDeg)
       stimulusStartRef.current = performance.now()
 
@@ -706,6 +781,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
               recordResult(bp, false)
             }
             flashFixation('#ef4444', 200)
+            isiActiveRef.current = true
             presentNext()
           }
         }, sp.responseMs + BURST_STAGGER_MS)
@@ -717,12 +793,18 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
             hideStimulus()
             recordResult(thePoint, false)
             flashFixation('#ef4444', 200)
+            isiActiveRef.current = true
             presentNext()
           }
         }, sp.responseMs)
       }
     }, delay)
-  }, [showStimulus, showStimulus2, hideStimulus, recordResult, flashFixation, pickDistantPoint, findIsolatedUnseen, goToCleanupOrNextLevel, sp.gapMaxMs, sp.gapMinMs, sp.responseMs, sp.stimulusMs])
+    isiActiveRef.current = true
+  }, [showStimulus, showStimulus2, hideStimulus, recordResult, flashFixation, pickDistantPoint, findIsolatedUnseen, goToCleanupOrNextLevel, presentCatchTrial, sp.gapMaxMs, sp.gapMinMs, sp.responseMs, sp.stimulusMs])
+
+  // Keep the stable ref up to date so presentCatchTrial can call presentNext
+  // without a circular useCallback dependency.
+  presentNextRef.current = presentNext
 
   // ---------- handle response ----------
   const handleResponse = useCallback(() => {
@@ -743,6 +825,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
       batchPointsRef.current = []
       clearAllTimeouts()
       hideStimulus()
+      isiActiveRef.current = true
       setTimeout(() => presentNext(), 500)
       return
     }
@@ -751,15 +834,31 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     clearAllTimeouts()
     hideStimulus()
 
-    // Burst: don't know which was seen — verify each individually
-    if (batchPointsRef.current.length > 1) {
-      verifyQueueRef.current = [...batchPointsRef.current]
-      batchPointsRef.current = []
+    // Catch-trial response: patient reported seeing blindspot stimulus (fixation loss)
+    if (isCatchTrialRef.current) {
+      catchTrialRef.current.push({ detected: true })
+      // Fixation-loss alert — inform the patient they looked away.
+      setShowFixationLossAlert(true)
+      window.setTimeout(() => setShowFixationLossAlert(false), FIXATION_LOSS_ALERT_MS)
+      isCatchTrialRef.current = false
+      currentPointRef.current = null
+      isiActiveRef.current = true
       presentNext()
       return
     }
 
+    // Burst: don't know which was seen — verify each individually
+    if (batchPointsRef.current.length > 1) {
+      verifyQueueRef.current = [...batchPointsRef.current]
+      batchPointsRef.current = []
+      isiActiveRef.current = true
+      presentNext()
+      return
+    }
+
+    truePositivesRef.current += 1
     recordResult(currentPointRef.current, true, elapsed)
+    isiActiveRef.current = true
     presentNext()
   }, [flashFixation, hideStimulus, recordResult, presentNext, clearAllTimeouts, sp.responseMs])
 
@@ -801,6 +900,10 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
         if (phaseRef.current === 'paused') {
           resume()
         } else {
+          if (isiActiveRef.current) {
+            fpIsiPressesRef.current += 1
+            return
+          }
           handleResponse()
         }
       }
@@ -809,11 +912,26 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     return () => window.removeEventListener('keydown', onKey)
   }, [handleResponse, resume, pauseTest])
 
+  const handlePointerDown = useCallback(() => {
+    if (isiActiveRef.current) {
+      fpIsiPressesRef.current += 1
+      return
+    }
+    handleResponse()
+  }, [handleResponse])
+
   // ---------- start test ----------
   const startTest = useCallback(() => {
     enterFullscreen()
     testedPointsRef.current.clear()
     setVisiblePoints([])
+    // Reset catch-trial and reliability counters
+    catchTrialRef.current = []
+    truePositivesRef.current = 0
+    isCatchTrialRef.current = false
+    presentCountRef.current = 0
+    isiActiveRef.current = false
+    fpIsiPressesRef.current = 0
     initGrid(ISOPTER_ORDER[0])
     setCurrentStimulusIdx(0)
     currentStimulusRef.current = ISOPTER_ORDER[0]
@@ -888,6 +1006,13 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
 
   // ---------- save ----------
   const handleSave = () => {
+    const catchTrials = catchTrialRef.current
+    const reliabilityIndices = {
+      catchTrialsPresented: catchTrials.length,
+      catchTrialsFalsePositive: catchTrials.filter((c) => c.detected).length,
+      falsePositiveIsiPresses: fpIsiPressesRef.current,
+      truePositiveResponses: truePositivesRef.current,
+    }
     const result: TestResult = {
       id: crypto.randomUUID(),
       eye,
@@ -897,6 +1022,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
 	      calibration,
 	      testType: 'static',
 	      durationSeconds: getTestDurationSeconds(),
+      reliabilityIndices,
 	    }
     saveResult(result)
     setSavedId(result.id)
@@ -1266,7 +1392,18 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
             })}
           </div>
           <ClinicalDisclaimer variant="results" />
-          <Interpretation points={results} areas={areas} maxEccentricityDeg={maxEccentricityDeg} calibration={calibration} />
+          <Interpretation
+            points={results}
+            areas={areas}
+            maxEccentricityDeg={maxEccentricityDeg}
+            calibration={calibration}
+            reliabilityIndices={{
+              catchTrialsPresented: catchTrialRef.current.length,
+              catchTrialsFalsePositive: catchTrialRef.current.filter(c => c.detected).length,
+              falsePositiveIsiPresses: fpIsiPressesRef.current,
+              truePositiveResponses: truePositivesRef.current,
+            }}
+          />
           <ScenarioOverlay userPoints={results} userAreas={areas} maxEccentricity={maxEccentricityDeg} />
           {!showVisionSim ? (
             <button
@@ -1348,7 +1485,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
       className="min-h-screen bg-gray-950 select-none cursor-none relative overflow-hidden"
       role="application"
       aria-label={`Visual field test in progress for ${eye} eye. Press Space or tap when you see a dot.`}
-      onPointerDown={handleResponse}
+      onPointerDown={handlePointerDown}
     >
       <button
         type="button"
@@ -1364,8 +1501,8 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
       </button>
       {/* Persistent dots for unseen points */}
       {visiblePoints.filter(p => p.status === 'unseen').map(p => {
-        const screenX = window.innerWidth / 2 + fixationXY.x + p.xDeg * pixelsPerDegree
-        const screenY = window.innerHeight / 2 + fixationXY.y - p.yDeg * pixelsPerDegree
+        const screenX = window.innerWidth / 2 + fixationXY.x + degToPx(p.xDeg, calibration)
+        const screenY = window.innerHeight / 2 + fixationXY.y - degToPx(p.yDeg, calibration)
 
         return (
           <div
@@ -1386,8 +1523,8 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
 
       {/* Grid overlay (toggle with G key) */}
       {showGrid && currentGridRef.current.map(p => {
-        const screenX = window.innerWidth / 2 + fixationXY.x + p.xDeg * pixelsPerDegree
-        const screenY = window.innerHeight / 2 + fixationXY.y - p.yDeg * pixelsPerDegree
+        const screenX = window.innerWidth / 2 + fixationXY.x + degToPx(p.xDeg, calibration)
+        const screenY = window.innerHeight / 2 + fixationXY.y - degToPx(p.yDeg, calibration)
         const isTested = testedPointsRef.current.has(p.key)
         const tp = testedPointsRef.current.get(p.key)
         return (
@@ -1472,6 +1609,17 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
         className="absolute rounded-full bg-white"
         style={{ top: '50%', left: '50%', width: 6, height: 6, opacity: 0, willChange: 'transform', zIndex: 5 }}
       />
+
+      {/* Fixation-loss alert: fires when patient responds to a blindspot catch trial */}
+      {showFixationLossAlert && (
+        <div
+          className="absolute top-[60%] left-1/2 -translate-x-1/2 px-6 py-3 bg-orange-600 text-white rounded-lg font-semibold text-lg shadow-xl pointer-events-none z-30"
+          role="alert"
+          aria-live="polite"
+        >
+          {FIXATION_LOSS_ALERT_MESSAGE}
+        </div>
+      )}
     </div>
   )
 }

@@ -119,7 +119,9 @@ const OVFX_TO_TEST_TYPE: Record<OvfxTestKind, TestType> = {
 const TEST_STRATEGY: Record<TestType, string> = {
   goldmann: 'kinetic',
   ring: 'ring-sector',
-  static: 'threshold',
+  // Default for static is suprathreshold; threshold mode overrides to
+  // 'threshold' per-result in exportToOvfx.
+  static: 'suprathreshold',
 }
 
 // APP_VERSION is sourced from branding.ts, which falls back to 'dev'.
@@ -160,6 +162,10 @@ function toOvfxPoint(p: TestPoint): OvfxPoint {
   if (p.catchTrial === true) {
     out.catchTrial = true
   }
+  // Threshold-mode dB estimate → OVFX's standard sensitivityDb field.
+  if (p.thresholdDb != null) {
+    out.sensitivityDb = p.thresholdDb
+  }
   return out
 }
 
@@ -174,6 +180,9 @@ function fromOvfxPoint(p: OvfxPoint): TestPoint {
   }
   if (p.catchTrial === true) {
     out.catchTrial = true
+  }
+  if (p.sensitivityDb != null) {
+    out.thresholdDb = p.sensitivityDb
   }
   return out
 }
@@ -198,6 +207,14 @@ export function exportToOvfx(result: TestResult): OvfxDocument {
     brightnessFloor: cal.brightnessFloor,
   }
 
+  // Override the default static strategy for threshold-mode results so that
+  // round-tripped or externally-read docs correctly describe a real dB
+  // staircase vs. a suprathreshold Goldmann-style static scan.
+  const strategy =
+    testType === 'static' && result.testMode === 'threshold'
+      ? 'threshold'
+      : TEST_STRATEGY[testType]
+
   const doc: OvfxDocument = {
     ovfxVersion: OVFX_VERSION,
     id: result.id,
@@ -205,7 +222,7 @@ export function exportToOvfx(result: TestResult): OvfxDocument {
     test: {
       type: ovfxKind,
       eye: result.eye,
-      strategy: TEST_STRATEGY[testType],
+      strategy,
       ...(result.binocularGroup ? { binocularGroup: result.binocularGroup } : {}),
     },
     calibration: {
@@ -343,6 +360,17 @@ export function importFromOvfx(doc: OvfxDocument): TestResult {
     }
   }
 
+  // Threshold mode is signalled primarily by per-point sensitivityDb. The
+  // strategy string is a secondary hint — legacy iemdr exports <= 0.4.0 wrote
+  // strategy: 'threshold' for suprathreshold static tests, so trust the data,
+  // not the label.
+  const hasThresholdData = testType === 'static' && points.some((p) => p.thresholdDb != null)
+  const testMode = hasThresholdData
+    ? ('threshold' as const)
+    : testType === 'static'
+      ? ('suprathreshold' as const)
+      : undefined
+
   return {
     id: crypto.randomUUID(),
     eye,
@@ -351,6 +379,7 @@ export function importFromOvfx(doc: OvfxDocument): TestResult {
     isopterAreas,
     calibration,
     testType,
+    ...(testMode ? { testMode } : {}),
     ...(doc.test.binocularGroup ? { binocularGroup: doc.test.binocularGroup } : {}),
     ...(doc.reliabilityIndices != null ? { reliabilityIndices: { ...doc.reliabilityIndices } } : {}),
   }

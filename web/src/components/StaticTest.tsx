@@ -2,6 +2,9 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import type { CalibrationData, StoredEye, TestPoint, TestResult, StimulusKey } from '../types'
 import { STIMULI, ISOPTER_ORDER } from '../types'
 import { VisualFieldMap } from './VisualFieldMap'
+import { SensitivityMap } from './SensitivityMap'
+import { deriveDbFromSuprathreshold, dbToOpacity } from '../sensitivity'
+import { initStaircase, stepStaircase, type StaircaseState } from '../staircase'
 import { calcIsopterAreas } from '../isopterCalc'
 import { Interpretation } from './Interpretation'
 import { VisionSimulator } from './VisionSimulator'
@@ -211,6 +214,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   // ---------- configurable settings (shown on instructions screen) ----------
   const [targetHexagons, setTargetHexagons] = useState(DEFAULT_HEXAGONS)
   const [speed, setSpeed] = useState<SpeedSetting>('normal')
+  const [thresholdMode, setThresholdMode] = useState(false)
   // If the user enabled the advanced-settings speed-preset override, its
   // timings win over the selected built-in preset. Otherwise fall through
   // to SPEED_PRESETS[speed].
@@ -262,6 +266,12 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   const [currentStimulusIdx, setCurrentStimulusIdx] = useState(0)
   const currentStimulusRef = useRef<StimulusKey>(ISOPTER_ORDER[0])
 
+  // Threshold mode (4-2 dB staircase per location)
+  const staircasesRef = useRef<Map<string, StaircaseState>>(new Map())
+  const thresholdModeRef = useRef(false)
+  const currentStaircaseKeyRef = useRef<string | null>(null)
+  const thresholdResultsRef = useRef<TestPoint[]>([])
+
   // Timing
   const stimulusShownRef = useRef(false)
   const stimulusStartRef = useRef(0)
@@ -297,6 +307,13 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   useEffect(() => {
     phaseRef.current = phase
   }, [phase])
+
+  // Mirror thresholdMode state into a ref so static callbacks (presentNext
+  // family, handleResponse, finishTest) can read the live value without
+  // becoming stale through closure capture.
+  useEffect(() => {
+    thresholdModeRef.current = thresholdMode
+  }, [thresholdMode])
 
   // Helper to clear all timeouts
   const clearAllTimeouts = useCallback(() => {
@@ -435,7 +452,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
 
   // ---------- show/hide stimulus ----------
   // Core helper: show stimulus at (xDeg, yDeg) using an explicit stim key.
-  const showStimulusAt = useCallback((xDeg: number, yDeg: number, stimKey: StimulusKey) => {
+  const showStimulusAt = useCallback((xDeg: number, yDeg: number, stimKey: StimulusKey, overrideOpacity?: number) => {
     const el = stimulusRef.current
     if (!el) return
     const stim = STIMULI[stimKey]
@@ -447,7 +464,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     el.style.marginLeft = `${-sizePx / 2 + screenX}px`
     el.style.marginTop = `${-sizePx / 2 + screenY}px`
     el.style.backgroundColor = stimulusDisplayColor(stimKey)
-    el.style.opacity = `${stim.intensityFrac}`
+    el.style.opacity = `${overrideOpacity ?? stim.intensityFrac}`
     stimulusShownRef.current = true
   }, [pixelsPerDegree, fixationXY.x, fixationXY.y])
 
@@ -499,6 +516,26 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
       dot.style.marginTop = `${restOff + fixationXY.y}px`
     }, durationMs)
   }, [fixationXY.x, fixationXY.y, isMobileTest, fixDotRestPx, fixDotRestOffset])
+
+  // ---------- record threshold-mode result ----------
+  const recordThresholdPoint = useCallback((point: GridPoint, thresholdDb: number) => {
+    const ecc = Math.sqrt(point.xDeg * point.xDeg + point.yDeg * point.yDeg)
+    const meridian = ((Math.atan2(point.yDeg, point.xDeg) * 180 / Math.PI) + 360) % 360
+    thresholdResultsRef.current.push({
+      meridianDeg: meridian,
+      eccentricityDeg: ecc,
+      rawEccentricityDeg: ecc,
+      detected: true,
+      stimulus: 'III4e',
+      thresholdDb,
+    })
+  }, [])
+
+  const countPendingStaircases = useCallback(() => {
+    let pending = 0
+    for (const s of staircasesRef.current.values()) if (!s.done) pending++
+    return pending
+  }, [])
 
   // ---------- record result ----------
   const recordResult = useCallback((point: GridPoint, seen: boolean, responseTimeMs?: number) => {
@@ -572,7 +609,9 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   // ---------- finish test ----------
   const finishTest = useCallback(() => {
     exitFullscreen()
-    const testPoints = scatterToTestPoints(testedPointsRef.current)
+    const testPoints = thresholdModeRef.current
+      ? [...thresholdResultsRef.current]
+      : scatterToTestPoints(testedPointsRef.current)
     setResults(testPoints)
     setPhase('results')
   }, [exitFullscreen])
@@ -826,11 +865,119 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   // without a circular useCallback dependency.
   presentNextRef.current = presentNext
 
+  // ---------- present next stimulus (threshold mode) ----------
+  // Round-robin through the staircases, presenting the next pending location.
+  // Catch trials and burst pairing are intentionally skipped — the staircase
+  // already presents each point ~6 times and reliability monitoring for
+  // threshold mode can be added later.
+  const presentNextThreshold = useCallback(() => {
+    if (phaseRef.current !== 'testing') return
+    isiActiveRef.current = false
+
+    const queue = queueRef.current
+    let point: GridPoint | null = null
+    while (queue.length > 0) {
+      const candidate = queue.shift()!
+      const state = staircasesRef.current.get(candidate.key)
+      if (state && !state.done) {
+        point = candidate
+        // Re-queue at the end so we round-robin until every staircase finishes.
+        queue.push(candidate)
+        break
+      }
+    }
+    if (!point) {
+      // All staircases done — go straight to results (no isopter progression
+      // in threshold mode).
+      finishTest()
+      return
+    }
+
+    // Already validated in the while loop above, but re-fetch so TS has the narrow.
+    const state = staircasesRef.current.get(point.key)
+    if (!state) return
+    const opacity = dbToOpacity(state.currentDb)
+    currentPointRef.current = point
+    currentStaircaseKeyRef.current = point.key
+    respondedRef.current = false
+    batchPointsRef.current = []
+
+    const delay = sp.gapMinMs + Math.random() * (sp.gapMaxMs - sp.gapMinMs)
+    const thePoint = point
+    delayTimeoutRef.current = setTimeout(() => {
+      if (phaseRef.current !== 'testing') return
+      isiActiveRef.current = false
+      showStimulusAt(thePoint.xDeg, thePoint.yDeg, 'III4e', opacity)
+      stimulusStartRef.current = performance.now()
+      hideTimeoutRef.current = setTimeout(() => hideStimulus(), sp.stimulusMs)
+      responseTimeoutRef.current = setTimeout(() => {
+        if (!respondedRef.current && currentStaircaseKeyRef.current === thePoint.key) {
+          hideStimulus()
+          // Timeout = unseen
+          const s = staircasesRef.current.get(thePoint.key)
+          if (!s) return
+          const next = stepStaircase(s, false)
+          staircasesRef.current.set(thePoint.key, next)
+          if (next.done && next.thresholdDb != null) {
+            recordThresholdPoint(thePoint, next.thresholdDb)
+          }
+          setRemainingCount(countPendingStaircases())
+          isiActiveRef.current = true
+          presentNextThreshold()
+        }
+      }, sp.responseMs)
+    }, delay)
+    isiActiveRef.current = true
+  }, [showStimulusAt, hideStimulus, finishTest, recordThresholdPoint, countPendingStaircases, sp.gapMaxMs, sp.gapMinMs, sp.responseMs, sp.stimulusMs])
+
+  // Dispatcher: pick the right scheduler based on test mode.
+  const dispatchNext = useCallback(() => {
+    if (thresholdModeRef.current) presentNextThreshold()
+    else presentNext()
+  }, [presentNext, presentNextThreshold])
+
   // ---------- handle response ----------
   const handleResponse = useCallback(() => {
     if (phaseRef.current !== 'testing' && phaseRef.current !== 'retest') return
     if (respondedRef.current || !currentPointRef.current) return
     if (stimulusStartRef.current === 0) return
+
+    // Threshold mode: simple seen/unseen → step the matching staircase.
+    // No burst, no verify queue, no catch trials. Must run before the
+    // burst-aware response window check below (which adds BURST_STAGGER_MS).
+    if (thresholdModeRef.current) {
+      const elapsedT = performance.now() - stimulusStartRef.current
+      if (elapsedT > sp.responseMs) return
+      respondedRef.current = true
+      if (elapsedT < MIN_RESPONSE_MS) {
+        // False-positive guard: ignore but don't penalize the staircase.
+        flashFixation('#ef4444', 300)
+        clearAllTimeouts()
+        hideStimulus()
+        fpIsiPressesRef.current += 1
+        isiActiveRef.current = true
+        setTimeout(() => presentNextThreshold(), 500)
+        return
+      }
+      flashFixation('#3b82f6', 150)
+      clearAllTimeouts()
+      hideStimulus()
+      const key = currentStaircaseKeyRef.current
+      const state = key != null ? staircasesRef.current.get(key) : undefined
+      if (key != null && state) {
+        const next = stepStaircase(state, true)
+        staircasesRef.current.set(key, next)
+        if (next.done && next.thresholdDb != null) {
+          const point = currentGridRef.current.find(p => p.key === key)
+          if (point) recordThresholdPoint(point, next.thresholdDb)
+        }
+        setRemainingCount(countPendingStaircases())
+      }
+      truePositivesRef.current += 1
+      isiActiveRef.current = true
+      presentNextThreshold()
+      return
+    }
 
     const elapsed = performance.now() - stimulusStartRef.current
     if (elapsed > sp.responseMs + BURST_STAGGER_MS) return
@@ -883,7 +1030,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     recordResult(currentPointRef.current, true, elapsed)
     isiActiveRef.current = true
     presentNext()
-  }, [flashFixation, hideStimulus, recordResult, presentNext, clearAllTimeouts, sp.responseMs, advanced.fixationAlertMs])
+  }, [flashFixation, hideStimulus, recordResult, presentNext, presentNextThreshold, recordThresholdPoint, countPendingStaircases, clearAllTimeouts, sp.responseMs, advanced.fixationAlertMs])
 
   // ---------- pause/resume ----------
   const pauseTest = useCallback(() => {
@@ -900,8 +1047,8 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     setPhase(resumePhase)
     phaseRef.current = resumePhase
     enterFullscreen()
-    setTimeout(() => presentNext(), 1000)
-  }, [presentNext, enterFullscreen])
+    setTimeout(() => dispatchNext(), 1000)
+  }, [dispatchNext, enterFullscreen])
 
   // ---------- keyboard/touch handling ----------
   useEffect(() => {
@@ -955,12 +1102,39 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     presentCountRef.current = 0
     isiActiveRef.current = false
     fpIsiPressesRef.current = 0
-    initGrid(ISOPTER_ORDER[0])
-    setCurrentStimulusIdx(0)
-    currentStimulusRef.current = ISOPTER_ORDER[0]
+    staircasesRef.current.clear()
+    thresholdResultsRef.current = []
+    if (thresholdMode) {
+      thresholdModeRef.current = true
+      // One hex grid, Goldmann III, no isopter progression. Coarser spacing
+      // than suprathreshold because each location takes ~3-6 presentations.
+      const maxExtent = getMaxExtentDeg()
+      const screenArea = getScreenAreaDeg2()
+      const targetCount = Math.max(20, Math.round(targetHexagons / 3))
+      const spacing = Math.sqrt(screenArea * 2 / (Math.sqrt(3) * targetCount))
+      const grid = generateHexGrid(maxExtent, spacing, DENSITY_EXPONENT)
+        .filter(p => isOnScreen(p.xDeg, p.yDeg, pixelsPerDegree, fixationXY.x))
+      currentGridRef.current = grid
+      // Prior seed: 25 dB — HFA-normal midpoint; staircase converges quickly.
+      const PRIOR_DB = 25
+      for (const p of grid) {
+        staircasesRef.current.set(p.key, initStaircase(PRIOR_DB))
+      }
+      queueRef.current = shuffle(grid)
+      verifyQueueRef.current = []
+      setTotalPoints(grid.length)
+      setRemainingCount(grid.length)
+      setCurrentStimulusIdx(ISOPTER_ORDER.indexOf('III4e'))
+      currentStimulusRef.current = 'III4e'
+    } else {
+      thresholdModeRef.current = false
+      initGrid(ISOPTER_ORDER[0])
+      setCurrentStimulusIdx(0)
+      currentStimulusRef.current = ISOPTER_ORDER[0]
+    }
     setPhase('countdown')
     setCountdown(3)
-  }, [initGrid, enterFullscreen])
+  }, [thresholdMode, initGrid, enterFullscreen, getMaxExtentDeg, getScreenAreaDeg2, targetHexagons, pixelsPerDegree, fixationXY.x])
 
   // ---------- countdown ----------
   useEffect(() => {
@@ -973,12 +1147,12 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
         testStartedAtRef.current = Date.now()
         trackEvent('test_started', getDeviceId(), { testType: 'static', eye }).catch(() => {})
       }
-      setTimeout(() => presentNext(), 500)
+      setTimeout(() => dispatchNext(), 500)
       return
     }
     const t = setTimeout(() => setCountdown(c => c - 1), 1000)
     return () => clearTimeout(t)
-  }, [phase, countdown, presentNext, eye])
+  }, [phase, countdown, dispatchNext, eye])
 
   // ---------- start next level ----------
   const startNextLevel = useCallback(() => {
@@ -1030,12 +1204,17 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   // ---------- save ----------
   const handleSave = () => {
     const catchTrials = catchTrialRef.current
-    const reliabilityIndices = {
-      catchTrialsPresented: catchTrials.length,
-      catchTrialsFalsePositive: catchTrials.filter((c) => c.detected).length,
-      falsePositiveIsiPresses: fpIsiPressesRef.current,
-      truePositiveResponses: truePositivesRef.current,
-    }
+    // Threshold mode doesn't run catch trials, so the reliability fields would
+    // read as "0 false-positives out of 0 presented" and be misread downstream
+    // as perfect reliability. Omit the block entirely in threshold mode.
+    const reliabilityIndices = thresholdMode
+      ? undefined
+      : {
+          catchTrialsPresented: catchTrials.length,
+          catchTrialsFalsePositive: catchTrials.filter((c) => c.detected).length,
+          falsePositiveIsiPresses: fpIsiPressesRef.current,
+          truePositiveResponses: truePositivesRef.current,
+        }
     const result: TestResult = {
       id: crypto.randomUUID(),
       eye,
@@ -1044,8 +1223,9 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
 	      isopterAreas: calcIsopterAreas(results),
 	      calibration,
 	      testType: 'static',
+	      testMode: thresholdMode ? 'threshold' : 'suprathreshold',
 	      durationSeconds: getTestDurationSeconds(),
-      reliabilityIndices,
+      ...(reliabilityIndices ? { reliabilityIndices } : {}),
 	    }
     saveResult(result)
     setSavedId(result.id)
@@ -1154,6 +1334,24 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
                 ))}
               </div>
             </div>
+
+            <label className="flex items-start gap-2 mt-4 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={thresholdMode}
+                onChange={(e) => setThresholdMode(e.target.checked)}
+                className="mt-1"
+              />
+              <span className="text-sm">
+                <span className="font-medium text-zinc-100">Threshold mode (experimental)</span>
+                <span className="block text-zinc-400 mt-0.5">
+                  Instead of showing each Goldmann level, this estimates the exact
+                  sensitivity (in decibels) at each location using a short 4-2 dB
+                  staircase. Takes longer per point but produces a real dB map like
+                  clinical static perimetry. Uses stimulus size III.
+                </span>
+              </span>
+            </label>
           </div>
 
           <p className="text-xs text-gray-500">
@@ -1378,6 +1576,15 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     }
 
     const areas = calcIsopterAreas(results)
+    const measuredDbPoints = thresholdMode
+      ? results
+          .filter(p => p.thresholdDb != null)
+          .map(p => ({
+            meridianDeg: p.meridianDeg,
+            eccentricityDeg: p.eccentricityDeg,
+            db: p.thresholdDb!,
+          }))
+      : []
 
     if (!savedId && results.length > 0) {
       handleSave()
@@ -1393,41 +1600,66 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
               Saved automatically — this result is now available on the Results page.
             </p>
           )}
-          <VisualFieldMap
-            points={results}
-            eye={eye}
-            maxEccentricity={maxEccentricityDeg}
-            size={Math.min(600, window.innerWidth - 48)}
-            calibration={calibration}
-            enableVerify
-          />
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            {ISOPTER_ORDER.map(key => {
-              const area = areas[key]
-              if (area == null) return null
-              return (
-                <div key={key} className="bg-gray-900 rounded-lg px-3 py-2 flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: STIMULI[key].color }} />
-                  <span className="text-gray-400">{STIMULI[key].label}</span>
-                  <span className="ml-auto font-mono text-white">{area.toFixed(0)} deg²</span>
-                </div>
-              )
-            })}
-          </div>
+          {thresholdMode ? (
+            <SensitivityMap
+              points={measuredDbPoints}
+              eye={eye}
+              maxEccentricity={maxEccentricityDeg}
+              size={Math.min(600, window.innerWidth - 48)}
+              source="measured"
+            />
+          ) : (
+            <>
+              <VisualFieldMap
+                points={results}
+                eye={eye}
+                maxEccentricity={maxEccentricityDeg}
+                size={Math.min(600, window.innerWidth - 48)}
+                calibration={calibration}
+                enableVerify
+              />
+              <SensitivityMap
+                points={deriveDbFromSuprathreshold(results)}
+                eye={eye}
+                maxEccentricity={maxEccentricityDeg}
+                size={Math.min(600, window.innerWidth - 48)}
+                source="derived"
+              />
+            </>
+          )}
+          {!thresholdMode && (
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              {ISOPTER_ORDER.map(key => {
+                const area = areas[key]
+                if (area == null) return null
+                return (
+                  <div key={key} className="bg-gray-900 rounded-lg px-3 py-2 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: STIMULI[key].color }} />
+                    <span className="text-gray-400">{STIMULI[key].label}</span>
+                    <span className="ml-auto font-mono text-white">{area.toFixed(0)} deg²</span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
           <ClinicalDisclaimer variant="results" />
-          <Interpretation
-            points={results}
-            areas={areas}
-            maxEccentricityDeg={maxEccentricityDeg}
-            calibration={calibration}
-            reliabilityIndices={{
-              catchTrialsPresented: catchTrialRef.current.length,
-              catchTrialsFalsePositive: catchTrialRef.current.filter(c => c.detected).length,
-              falsePositiveIsiPresses: fpIsiPressesRef.current,
-              truePositiveResponses: truePositivesRef.current,
-            }}
-          />
-          <ScenarioOverlay userPoints={results} userAreas={areas} maxEccentricity={maxEccentricityDeg} />
+          {!thresholdMode && (
+            <>
+              <Interpretation
+                points={results}
+                areas={areas}
+                maxEccentricityDeg={maxEccentricityDeg}
+                calibration={calibration}
+                reliabilityIndices={{
+                  catchTrialsPresented: catchTrialRef.current.length,
+                  catchTrialsFalsePositive: catchTrialRef.current.filter(c => c.detected).length,
+                  falsePositiveIsiPresses: fpIsiPressesRef.current,
+                  truePositiveResponses: truePositivesRef.current,
+                }}
+              />
+              <ScenarioOverlay userPoints={results} userAreas={areas} maxEccentricity={maxEccentricityDeg} />
+            </>
+          )}
           {!showVisionSim ? (
             <button
               onClick={() => setShowVisionSim(true)}
@@ -1482,6 +1714,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
 	                  isopterAreas: areas,
 	                  calibration,
 	                  testType: 'static',
+	                  testMode: thresholdMode ? 'threshold' : 'suprathreshold',
 	                  durationSeconds: getTestDurationSeconds(),
 	                }
                 exportTrackedResultPDF(result)

@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react'
 import type { TestPoint, TestResult, CalibrationData } from '../types'
 import { STIMULI, ISOPTER_ORDER } from '../types'
 import { VisualFieldMap } from './VisualFieldMap'
+import { SensitivityMap } from './SensitivityMap'
+import { deriveDbFromSuprathreshold } from '../sensitivity'
 import { calcIsopterAreas } from '../isopterCalc'
 import { Interpretation } from './Interpretation'
 import { VisionSimulator } from './VisionSimulator'
@@ -184,16 +186,32 @@ export function BinocularResults({
             <p className="text-center text-xs text-zinc-500 mt-1">
               Combined field — best response from either eye at each direction
             </p>
+            <SensitivityMap
+              points={deriveDbFromSuprathreshold(combinedStandard)}
+              eye="right"
+              maxEccentricity={maxEccentricity}
+              size={mapSize}
+              source="derived"
+            />
           </div>
         ) : (
-          <VisualFieldMap
-            points={activePoints}
-            eye={activeEye}
-            maxEccentricity={maxEccentricity}
-            size={mapSize}
-            calibration={calibration}
-            enableVerify
-          />
+          <>
+            <VisualFieldMap
+              points={activePoints}
+              eye={activeEye}
+              maxEccentricity={maxEccentricity}
+              size={mapSize}
+              calibration={calibration}
+              enableVerify
+            />
+            <SensitivityMap
+              points={deriveDbFromSuprathreshold(activePoints)}
+              eye={activeEye}
+              maxEccentricity={maxEccentricity}
+              size={mapSize}
+              source="derived"
+            />
+          </>
         )}
 
         {/* Area comparison table */}

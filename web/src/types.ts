@@ -30,9 +30,12 @@ export interface CalibrationData {
   fixationOffsetPx: number  // horizontal fixation offset from screen center (positive = right)
   screenWidthPx?: number    // screen width at test time (for accurate boundary rendering)
   screenHeightPx?: number   // screen height at test time
-  /** If true, apply flat-screen sphericity correction (d = D*tan(θ)) when
-   *  converting degrees to pixels. Defaults to false for backward
-   *  compatibility with results recorded before 2026-04. */
+  /** Flat-screen sphericity correction: when unset or true, `degToPx`
+   *  uses `offset_cm = D * tan(θ)` so peripheral points project
+   *  accurately on a flat monitor. Set to `false` to opt into the
+   *  small-angle linear approximation (`deg * pixelsPerDegree`), which
+   *  matches SPECVIS's single-scalar px/deg but under-projects past
+   *  ~20° of eccentricity. */
   sphericityCorrection?: boolean
 }
 
@@ -47,6 +50,11 @@ export interface TestPoint {
    *  signal (false positive). Catch trials are excluded from isopter and
    *  area calculations. Omitted/undefined means a normal probe. */
   catchTrial?: boolean
+  /** Measured threshold in dB at this location (threshold-mode only).
+   *  Omitted on suprathreshold points; consumers MUST treat this as
+   *  optional. Populated by the 4-2 staircase engine (`staircase.ts`)
+   *  when `TestResult.testMode === 'threshold'`. */
+  thresholdDb?: number
 }
 
 export type TestType = 'goldmann' | 'ring' | 'static'
@@ -64,6 +72,14 @@ export interface TestResult {
   isopterAreas: Partial<Record<StimulusKey, number>>
   calibration: CalibrationData
   testType?: TestType
+  /** Test presentation mode:
+   *  - `'suprathreshold'` — Goldmann-level sweep (V4e → I2e), yields isopters.
+   *     Same as the default flow; omitted on results recorded before the
+   *     threshold mode shipped.
+   *  - `'threshold'` — per-location 4-2 dB staircase with stimulus III.
+   *     Yields `thresholdDb` on every TestPoint. No isopters produced;
+   *     `isopterAreas` is left empty. */
+  testMode?: 'suprathreshold' | 'threshold'
   /** Elapsed time from first presented stimulus/interaction to results. */
   durationSeconds?: number
   /** Links two single-eye TestResults from the same binocular session. */

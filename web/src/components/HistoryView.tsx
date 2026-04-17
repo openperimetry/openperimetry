@@ -3,6 +3,8 @@ import type { TestResult } from '../types'
 import { STIMULI, ISOPTER_ORDER } from '../types'
 import { getResults, deleteResult, saveResult, saveSurvey, hasSurveyForResult } from '../storage'
 import { VisualFieldMap } from './VisualFieldMap'
+import { SensitivityMap } from './SensitivityMap'
+import { deriveDbFromSuprathreshold } from '../sensitivity'
 import { Interpretation } from './Interpretation'
 import { VisionSimulator } from './VisionSimulator'
 import { exportTrackedResultPDF } from '../pdfExportTracking'
@@ -161,6 +163,12 @@ export function HistoryView({ onBack }: Props) {
             maxEccentricity={maxEcc}
             calibration={selected.calibration}
             enableVerify
+          />
+          <SensitivityMap
+            points={deriveDbFromSuprathreshold(standardPoints)}
+            eye={selected.eye}
+            maxEccentricity={maxEcc}
+            source="derived"
           />
           <div className="grid grid-cols-2 gap-2 text-sm">
             {ISOPTER_ORDER.map(key => {

@@ -9,15 +9,19 @@ export function pixelsPerCm(calib: CalibrationData): number {
 
 /** Convert a visual-angle offset (degrees) to screen pixels.
  *
- *  Default (linear): `deg * pixelsPerDegree`. Good to ~1% within 5° of
- *  fixation; under-projects peripheral eccentricities on a flat screen.
+ *  Default (`sphericityCorrection` unset or `true`): uses the true
+ *  flat-screen formula `offset_cm = D * tan(θ)` where D is viewing
+ *  distance and θ is the visual angle. Accurate at every eccentricity;
+ *  noticeably matters past ~20° where the linear approximation
+ *  under-projects peripheral points on a flat monitor.
  *
- *  With `calib.sphericityCorrection=true`: uses `D * tan(θ)` where D is
- *  viewing distance and θ is the visual angle, producing the true flat-
- *  screen pixel offset. Matters for extended-field (>~30°) testing.
+ *  Explicit opt-out (`sphericityCorrection: false`): plain
+ *  `deg * pixelsPerDegree`. Retained so tests, imported OVFX files, or
+ *  consumers that deliberately want the small-angle approximation
+ *  (matching e.g. SPECVIS's single-scalar px/deg) can request it.
  */
 export function degToPx(deg: number, calib: CalibrationData): number {
-  if (!calib.sphericityCorrection) {
+  if (calib.sphericityCorrection === false) {
     return deg * calib.pixelsPerDegree
   }
   const rad = (deg * Math.PI) / 180

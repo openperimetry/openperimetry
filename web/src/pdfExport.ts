@@ -10,6 +10,7 @@ import { computeReliability } from './reliabilityScore'
 import { computeReliabilityIndices } from './reliabilityIndices'
 import { RELIABILITY_REFERENCE_RANGES } from './testDefaults'
 import { polarToXY, smoothClosedPath, computeIsopters } from './isopterRender'
+import { renderSensitivityToCanvas, deriveDbFromSuprathreshold } from './sensitivity'
 
 // ── Classification logic (matches Interpretation.tsx) ──
 
@@ -264,6 +265,28 @@ async function renderRadarImage(result: TestResult, sizePx: number): Promise<str
   })
 }
 
+/** Render the derived sensitivity heatmap to a PNG data URL. Uses the
+ *  same IDW/jet_r rendering as the on-screen `SensitivityMap`. */
+async function renderSensitivityImage(result: TestResult, sizePx: number): Promise<string> {
+  // Render at natural size first (putImageData ignores transforms).
+  const src = document.createElement('canvas')
+  src.width = sizePx
+  src.height = sizePx
+  const srcCtx = src.getContext('2d')!
+  srcCtx.fillStyle = '#0f172a'
+  srcCtx.fillRect(0, 0, sizePx, sizePx)
+  const points = deriveDbFromSuprathreshold(result.points)
+  renderSensitivityToCanvas(srcCtx, points, sizePx, result.calibration.maxEccentricityDeg)
+
+  // Upscale 2x for PDF sharpness via drawImage (respects transforms).
+  const dst = document.createElement('canvas')
+  dst.width = sizePx * 2
+  dst.height = sizePx * 2
+  const dstCtx = dst.getContext('2d')!
+  dstCtx.drawImage(src, 0, 0, sizePx * 2, sizePx * 2)
+  return dst.toDataURL('image/png')
+}
+
 // ── PDF text helpers ──
 
 /** Replace Unicode characters that break jsPDF's default font encoding */
@@ -459,6 +482,35 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
     doc.text(STIMULI[stim].label, lx + 4, y)
   }
   y += 6
+
+  // Sensitivity heatmap — derived dB from Goldmann suprathreshold data.
+  // Uses the same IDW + jet_r rendering as the on-screen SensitivityMap.
+  {
+    // Reserve space for the section header, map, caption and legend.
+    const sensNeeded = mapSizeMm + 20
+    if (y + sensNeeded > pageH - 15) {
+      doc.addPage()
+      y = margin
+    }
+
+    y = drawSection(doc, 'Derived Sensitivity Map', y, margin)
+    y += 2
+
+    const sensImg = await renderSensitivityImage(result, 800)
+    const sensX = (pageW - mapSizeMm) / 2
+    doc.addImage(sensImg, 'PNG', sensX, y, mapSizeMm, mapSizeMm)
+    y += mapSizeMm + 4
+
+    doc.setFontSize(7)
+    doc.setFont('helvetica', 'italic')
+    doc.setTextColor(120, 120, 120)
+    doc.text('Derived sensitivity (dB, from Goldmann levels)', pageW / 2, y, { align: 'center' })
+    doc.setFont('helvetica', 'normal')
+    y += 3.5
+    doc.setTextColor(100, 100, 100)
+    doc.text('-5 dB (insensitive, red)  <->  40 dB (sensitive, blue)', pageW / 2, y, { align: 'center' })
+    y += 6
+  }
 
   // Per-eye radar maps for binocular tests
   if (isBinocular && (options?.rightEyePoints || options?.leftEyePoints)) {

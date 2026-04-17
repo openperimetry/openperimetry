@@ -147,6 +147,50 @@ describe('OVFX round-trip: catchTrial and reliabilityIndices', () => {
     })
   })
 
+  it('round-trips thresholdDb + testMode for threshold-mode results', () => {
+    const result = makeResult({
+      testType: 'static',
+      testMode: 'threshold',
+      points: [
+        makePoint({ meridianDeg: 30, eccentricityDeg: 10, rawEccentricityDeg: 10, stimulus: 'III4e', thresholdDb: 28 }),
+        makePoint({ meridianDeg: 210, eccentricityDeg: 15, rawEccentricityDeg: 15, stimulus: 'III4e', thresholdDb: 14 }),
+      ],
+    })
+
+    const doc = exportToOvfx(result)
+    expect(doc.test.strategy).toBe('threshold')
+    expect(doc.points[0].sensitivityDb).toBe(28)
+    expect(doc.points[1].sensitivityDb).toBe(14)
+
+    const imported = importFromOvfx(doc)
+    expect(imported.testMode).toBe('threshold')
+    expect(imported.points[0].thresholdDb).toBe(28)
+    expect(imported.points[1].thresholdDb).toBe(14)
+  })
+
+  it('marks static imports as suprathreshold when no sensitivityDb is present', () => {
+    const result = makeResult({
+      testType: 'static',
+      testMode: 'suprathreshold',
+      points: [makePoint({ stimulus: 'III4e' })],
+    })
+
+    const doc = exportToOvfx(result)
+    expect(doc.test.strategy).toBe('suprathreshold')
+    expect(doc.points[0].sensitivityDb).toBeUndefined()
+
+    const imported = importFromOvfx(doc)
+    expect(imported.testMode).toBe('suprathreshold')
+    expect(imported.points[0].thresholdDb).toBeUndefined()
+  })
+
+  it('does not set testMode for non-static test types', () => {
+    const result = makeResult({ testType: 'goldmann' })
+    const doc = exportToOvfx(result)
+    const imported = importFromOvfx(doc)
+    expect(imported.testMode).toBeUndefined()
+  })
+
   it('multiple catch-trial points all round-trip correctly', () => {
     const points = [
       makePoint({ meridianDeg: 30, eccentricityDeg: 65, rawEccentricityDeg: 65 }),

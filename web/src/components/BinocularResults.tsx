@@ -186,32 +186,16 @@ export function BinocularResults({
             <p className="text-center text-xs text-zinc-500 mt-1">
               Combined field — best response from either eye at each direction
             </p>
-            <SensitivityMap
-              points={deriveDbFromSuprathreshold(combinedStandard)}
-              eye="right"
-              maxEccentricity={maxEccentricity}
-              size={mapSize}
-              source="derived"
-            />
           </div>
         ) : (
-          <>
-            <VisualFieldMap
-              points={activePoints}
-              eye={activeEye}
-              maxEccentricity={maxEccentricity}
-              size={mapSize}
-              calibration={calibration}
-              enableVerify
-            />
-            <SensitivityMap
-              points={deriveDbFromSuprathreshold(activePoints)}
-              eye={activeEye}
-              maxEccentricity={maxEccentricity}
-              size={mapSize}
-              source="derived"
-            />
-          </>
+          <VisualFieldMap
+            points={activePoints}
+            eye={activeEye}
+            maxEccentricity={maxEccentricity}
+            size={mapSize}
+            calibration={calibration}
+            enableVerify
+          />
         )}
 
         {/* Area comparison table */}
@@ -276,6 +260,16 @@ export function BinocularResults({
             })}
           </div>
         )}
+
+        {/* Derived sensitivity heatmap (placed after isopter-area table so
+            the area legend sits directly under the field map it describes) */}
+        <SensitivityMap
+          points={deriveDbFromSuprathreshold(tab === 'combined' ? combinedStandard : activePoints)}
+          eye={tab === 'combined' ? 'right' : activeEye}
+          maxEccentricity={maxEccentricity}
+          size={mapSize}
+          source="derived"
+        />
 
         {/* Interpretation */}
         <Interpretation

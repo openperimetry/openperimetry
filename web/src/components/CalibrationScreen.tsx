@@ -21,7 +21,7 @@ interface Props {
   mobileMode?: boolean
 }
 
-type Step = 'mobile' | 'screen' | 'brightness' | 'reaction' | 'ready'
+type Step = 'mobile' | 'screen' | 'distance' | 'brightness' | 'reaction' | 'ready'
 
 function StepProgress({ current, total }: { current: number; total: number }) {
   const pct = Math.round((current / total) * 100)
@@ -43,8 +43,15 @@ function StepProgress({ current, total }: { current: number; total: number }) {
 
 export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime, testMode, mobileMode }: Props) {
   const [step, setStep] = useState<Step>(mobileMode ? 'mobile' : 'screen')
-  const totalSteps = skipReactionTime ? 3 : 4 // screen + brightness + (reaction?) + ready
-  const stepNumber = step === 'mobile' ? 1 : step === 'screen' ? 1 : step === 'brightness' ? 2 : step === 'reaction' ? 3 : totalSteps
+  // screen (card) + distance + brightness + (reaction?) + ready
+  const totalSteps = skipReactionTime ? 4 : 5
+  const stepNumber =
+    step === 'mobile' ? 1 :
+    step === 'screen' ? 1 :
+    step === 'distance' ? 2 :
+    step === 'brightness' ? 3 :
+    step === 'reaction' ? 4 :
+    totalSteps
 
   // Screen calibration
   const [cardWidthPx, setCardWidthPx] = useState(320)
@@ -107,7 +114,8 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
     ? [...rtTimes].sort((a, b) => a - b)[Math.floor(rtTimes.length / 2)]
     : CALIBRATION.DEFAULT_REACTION_TIME_MS
 
-  const handleScreenDone = () => setStep('brightness')
+  const handleScreenDone = () => setStep('distance')
+  const handleDistanceDone = () => setStep('brightness')
 
   const handleBrightnessDone = () => {
     setBrightnessFloor(brightness)
@@ -206,7 +214,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   // ==================== MOBILE CALIBRATION ====================
   if (step === 'mobile') {
     return (
-      <div className="min-h-[100dvh] bg-base text-white safe-pad flex items-center justify-center p-6 animate-page-in">
+      <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
         <main className="max-w-lg w-full space-y-6">
           <BackButton onClick={onBack} />
 
@@ -295,7 +303,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   // ==================== STEP 1: Screen ====================
   if (step === 'screen') {
     return (
-      <div className="min-h-[100dvh] bg-base text-white safe-pad flex items-center justify-center p-6 animate-page-in">
+      <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
         <main className="max-w-lg w-full space-y-8">
           <BackButton onClick={onBack} />
           <StepProgress current={stepNumber} total={totalSteps} />
@@ -346,10 +354,31 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
             />
           </div>
 
+          <AdvancedSettingsPanel />
+
+          <button
+            onClick={handleScreenDone}
+            className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
+          >Next</button>
+        </main>
+      </div>
+    )
+  }
+
+  // ==================== STEP 2: Viewing distance ====================
+  if (step === 'distance') {
+    return (
+      <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
+        <main className="max-w-lg w-full space-y-8">
+          <BackButton onClick={() => setStep('screen')} />
+          <StepProgress current={stepNumber} total={totalSteps} />
+
+          <h1 className="text-2xl font-heading font-bold">Viewing distance</h1>
+
           <div className="space-y-2">
-            <label className="text-sm text-zinc-300 block">
-              Viewing distance
-            </label>
+            <p className="text-sm text-zinc-300">
+              How far is your eye from the screen?
+            </p>
             <div className="flex items-center gap-3">
               <button
                 onClick={() => setDistanceCm(d => Math.max(20, d - 5))}
@@ -554,10 +583,8 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
             )
           })()}
 
-          <AdvancedSettingsPanel />
-
           <button
-            onClick={handleScreenDone}
+            onClick={handleDistanceDone}
             className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
           >Next</button>
         </main>
@@ -565,19 +592,24 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
     )
   }
 
-  // ==================== STEP 2: Brightness ====================
+  // ==================== STEP 3: Brightness ====================
   if (step === 'brightness') {
     return (
-      <div className="min-h-[100dvh] bg-base text-white safe-pad flex items-center justify-center p-6 animate-page-in">
+      <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
         <main className="max-w-lg w-full space-y-8">
-          <BackButton onClick={() => setStep('screen')} />
+          <BackButton onClick={() => setStep('distance')} />
 
           <StepProgress current={stepNumber} total={totalSteps} />
-          <h1 className="text-2xl font-heading font-bold">Brightness calibration</h1>
+          <h1 className="text-2xl font-heading font-bold">Find your dimmest visible dot</h1>
 
-          <p className="text-sm text-zinc-300">
-            Drag the slider down until the dot <strong>just barely disappears</strong> against the background.
-          </p>
+          <div className="space-y-2 text-sm text-zinc-300">
+            <p>We need to know the dimmest dot your screen can show.</p>
+            <ol className="list-decimal list-inside space-y-1 text-zinc-400">
+              <li>Start high — drag the slider right until you clearly see the white dot.</li>
+              <li>Slowly drag left. Stop the moment the dot disappears.</li>
+              <li>Nudge back right by one step so the dot is just barely visible again.</li>
+            </ol>
+          </div>
 
           <div className="relative w-full h-48 bg-base rounded-xl border border-white/[0.06] flex items-center justify-center">
             <div
@@ -601,15 +633,15 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
           />
 
           <div className="flex gap-2 text-xs text-zinc-500">
-            <span>Invisible</span>
+            <span>← dimmer (invisible)</span>
             <span className="flex-1" />
-            <span>Clearly visible</span>
+            <span>brighter (clearly visible) →</span>
           </div>
 
           <button
             onClick={handleBrightnessDone}
             className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
-          >Confirm — dot is just invisible</button>
+          >This is the dimmest I can see — continue</button>
         </main>
       </div>
     )
@@ -619,7 +651,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   if (step === 'reaction') {
     if (rtPhase === 'done' || rtTimes.length >= RT_TRIALS) {
       return (
-        <div className="min-h-[100dvh] bg-base text-white safe-pad flex items-center justify-center p-6 animate-page-in">
+        <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
           <main className="max-w-lg w-full space-y-8">
             <BackButton onClick={() => { setRtTimes([]); setRtPhase('waiting'); setRtStarted(false); setStep('brightness') }} />
             <StepProgress current={stepNumber} total={totalSteps} />
@@ -658,7 +690,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
     // RT instruction screen
     if (!rtStarted) {
       return (
-        <div className="min-h-[100dvh] bg-base text-white safe-pad flex items-center justify-center p-6 animate-page-in">
+        <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
           <main className="max-w-lg w-full space-y-8">
             <BackButton onClick={() => setStep('brightness')} />
 
@@ -721,7 +753,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
 
   // ==================== STEP 4: Ready ====================
   return (
-    <div className="min-h-[100dvh] bg-base text-white safe-pad flex items-center justify-center p-6 animate-page-in">
+    <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
       <main className="max-w-lg w-full space-y-8">
         <BackButton onClick={() => setStep(skipReactionTime ? 'brightness' : 'reaction')} />
 
@@ -730,7 +762,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
         <div className="bg-surface rounded-2xl border border-white/[0.06] p-5 space-y-3 text-sm">
           <div className="flex justify-between">
             <span className="text-zinc-400">Test type</span>
-            <span>{testMode === 'static' ? 'Tom (static test)' : testMode === 'ring' ? 'Tom (ring test)' : 'Goldmann (kinetic)'}</span>
+            <span>{testMode === 'static' ? 'Static test' : testMode === 'ring' ? 'Ring test' : 'Goldmann (kinetic)'}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-zinc-400">Eye</span>
@@ -772,6 +804,14 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
           <div className="flex gap-2 items-start">
             <span className="text-green-400 mt-0.5">&#9673;</span>
             <p><span className="text-zinc-300 font-medium">Fixation.</span> Keep your eye fixed on the yellow dot during the test. Only press when you see a stimulus in your peripheral vision.</p>
+          </div>
+          <div className="flex gap-2 items-start">
+            <span className="text-zinc-500 mt-0.5">&#9099;</span>
+            <p>
+              <span className="text-zinc-300 font-medium">Pause or leave.</span> Press{' '}
+              <kbd className="px-1.5 py-0.5 bg-zinc-800 border border-white/[0.06] rounded text-[10px] font-mono text-zinc-300">Esc</kbd>{' '}
+              any time to pause the test or exit.
+            </p>
           </div>
         </div>
 

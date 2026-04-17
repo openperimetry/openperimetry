@@ -849,7 +849,7 @@ export function Interpretation({ points, areas, maxEccentricityDeg, calibration,
             from clinical perimetry due to screen limitations, uncontrolled viewing distance,
             and the absence of standardized testing conditions. Always consult your
             ophthalmologist for diagnosis and treatment decisions. Use this tool to notice
-            changes in your own field — not as absolute truth.
+            changes in your own field — not as a reliable clinical indicator.
           </p>
         </div>
       )}

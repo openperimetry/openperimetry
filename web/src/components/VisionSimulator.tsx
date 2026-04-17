@@ -11,6 +11,11 @@ interface Props {
   /** Optional second eye data for binocular simulation */
   secondEyePoints?: TestPoint[]
   secondEyeMaxEccentricity?: number
+  /** Compact render: only the photo + scotoma canvas, no scene picker,
+   *  no sliders, no effects panel, no legend, no explanatory copy. Used
+   *  in the demo gallery where each card already carries its own label
+   *  and we only want a clean visual to sit alongside the radar. */
+  minimal?: boolean
 }
 
 // Curated Unsplash photos showing real scenarios difficult with tunnel vision
@@ -683,7 +688,7 @@ const EFFECT_INFO: Record<VisualEffect, { label: string; desc: string; prevalenc
   },
 }
 
-export function VisionSimulator({ points, eye, maxEccentricity, secondEyePoints, secondEyeMaxEccentricity }: Props) {
+export function VisionSimulator({ points, eye, maxEccentricity, secondEyePoints, secondEyeMaxEccentricity, minimal = false }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
   const [sceneUrl, setSceneUrl] = useState(DEFAULT_SCENE_URL)
@@ -1896,6 +1901,19 @@ export function VisionSimulator({ points, eye, maxEccentricity, secondEyePoints,
           </div>
         </div>
       </>
+    )
+  }
+
+  // ---------- Minimal (demo gallery) ----------
+  // Strip the scene picker, sliders, effects panel, legend, and
+  // explanatory copy. The surrounding demo card already provides context,
+  // and the extra chrome on every card makes the gallery overwhelming.
+  if (minimal) {
+    return (
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium text-gray-300">Vision simulation</h3>
+        {canvasBlock}
+      </div>
     )
   }
 

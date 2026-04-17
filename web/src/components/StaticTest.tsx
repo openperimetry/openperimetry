@@ -25,10 +25,10 @@ import {
   SPEED_PRESETS,
   type SpeedPresetName,
 } from '../testDefaults'
+import type { SpeedMode } from './GoldmannTest'
 import { useAdvancedSettings } from '../advancedSettings'
 
 // ---------- constants ----------
-const DEFAULT_HEXAGONS = 100      // default number of test points per level
 const DENSITY_EXPONENT = 1.5      // >1 = denser near center (Goldmann bowl → flat projection)
 const { MIN_RESPONSE_MS, MIN_ECCENTRICITY_DEG, MAX_TESTABLE_ECCENTRICITY_DEG, BURST_STAGGER_MS } = STATIC_TEST
 
@@ -72,6 +72,17 @@ interface Props {
   extendedField: boolean
   onDone: () => void
   onComplete?: (points: TestPoint[]) => void
+  /**
+   * Home-page speed preset. 'fast' → 50 points, 'normal' → 100 points.
+   * Stimulus-timing speed always defaults to 'normal' here and is only
+   * adjusted via the in-test speed selector.
+   */
+  speedMode?: SpeedMode
+}
+
+/** Map home-page speed preset → static test point count. */
+function hexagonsForSpeed(mode: SpeedMode): number {
+  return mode === 'fast' ? 50 : 100
 }
 
 // ---------- utility functions ----------
@@ -188,7 +199,7 @@ function scatterToTestPoints(points: Map<string, TestedPoint>): TestPoint[] {
   return result
 }
 
-export function StaticTest({ eye, calibration, extendedField, onDone, onComplete }: Props) {
+export function StaticTest({ eye, calibration, extendedField, onDone, onComplete, speedMode = 'normal' }: Props) {
   const { pixelsPerDegree, maxEccentricityDeg, fixationOffsetPx } = calibration
   const isMobileTest = calibration.viewingDistanceCm <= 15
   // Fixation dot sizing — explicit px so countdown and test phases match and so
@@ -212,8 +223,10 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
         : 'bg-gray-950'
 
   // ---------- configurable settings (shown on instructions screen) ----------
-  const [targetHexagons, setTargetHexagons] = useState(DEFAULT_HEXAGONS)
-  const [speed, setSpeed] = useState<SpeedSetting>('normal')
+  // Point count is derived from the home-page speed preset; the in-test
+  // precision/speed selectors were removed, so these are fixed for the run.
+  const targetHexagons = hexagonsForSpeed(speedMode)
+  const speed: SpeedSetting = 'normal'
   const [thresholdMode, setThresholdMode] = useState(false)
   // If the user enabled the advanced-settings speed-preset override, its
   // timings win over the selected built-in preset. Otherwise fall through
@@ -240,6 +253,14 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   const [visiblePoints, setVisiblePoints] = useState<TestedPoint[]>([])
   const [totalPoints, setTotalPoints] = useState(0)
   const [remainingCount, setRemainingCount] = useState(0)
+  // Threshold mode only: count stimulus presentations, so the in-test progress
+  // counter advances on every trial (not just when a full 4-2 staircase for a
+  // location finishes — which can take ~50 s when round-robining across all
+  // locations). `remainingCount` reflects pending staircases (good for the ring
+  // fraction once points start completing), but we want a numerator that moves
+  // from the very first trial. Expected ~5 presentations per location, so the
+  // denominator for display is `totalPoints * 5`.
+  const [thresholdTrialsDone, setThresholdTrialsDone] = useState(0)
 
   // Grid spacing (calculated to get ~TARGET_HEXAGONS points)
   const gridSpacingRef = useRef(5)
@@ -909,6 +930,9 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
       isiActiveRef.current = false
       showStimulusAt(thePoint.xDeg, thePoint.yDeg, 'III4e', opacity)
       stimulusStartRef.current = performance.now()
+      // Advance the trial counter so the on-screen progress text moves on
+      // every presentation (staircases take several trials each to finish).
+      setThresholdTrialsDone(n => n + 1)
       hideTimeoutRef.current = setTimeout(() => hideStimulus(), sp.stimulusMs)
       responseTimeoutRef.current = setTimeout(() => {
         if (!respondedRef.current && currentStaircaseKeyRef.current === thePoint.key) {
@@ -1104,6 +1128,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     fpIsiPressesRef.current = 0
     staircasesRef.current.clear()
     thresholdResultsRef.current = []
+    setThresholdTrialsDone(0)
     if (thresholdMode) {
       thresholdModeRef.current = true
       // One hex grid, Goldmann III, no isopter progression. Coarser spacing
@@ -1115,8 +1140,16 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
       const grid = generateHexGrid(maxExtent, spacing, DENSITY_EXPONENT)
         .filter(p => isOnScreen(p.xDeg, p.yDeg, pixelsPerDegree, fixationXY.x))
       currentGridRef.current = grid
-      // Prior seed: 25 dB — HFA-normal midpoint; staircase converges quickly.
-      const PRIOR_DB = 25
+      // Prior seed: clinical convention is ~25 dB (HFA normal midpoint), but
+      // that assumes a calibrated 31.5-asb bowl. On a consumer LCD with a
+      // near-black background the 25-dB stimulus (opacity ≈ 0.003) is below
+      // practical visibility — and because the staircase round-robins across
+      // ~30 points, each location only steps once per full cycle (~50 s), so
+      // the user sees nothing for ages and the test feels broken. Seeding at
+      // 10 dB (opacity 0.1) puts the first presentation at an obviously-
+      // visible intensity on a dark screen; the 4-2 dB staircase then walks
+      // to the local threshold in 3-5 presentations per point.
+      const PRIOR_DB = 10
       for (const p of grid) {
         staircasesRef.current.set(p.key, initStaircase(PRIOR_DB))
       }
@@ -1235,9 +1268,17 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   const completedTasks = visiblePoints.length
   const currentStim = STIMULI[ISOPTER_ORDER[currentStimulusIdx]]
   const unseenCount = visiblePoints.filter(p => p.status === 'unseen').length
-  // Per-round progress for the fixation ring (resets each stimulus level)
   const roundDone = Math.max(0, totalPoints - remainingCount)
-  const roundProgress = totalPoints > 0 ? Math.min(1, roundDone / totalPoints) : 0
+  // Threshold-mode progress: each 4-2 dB staircase takes ~5 presentations to
+  // reach the required 2 reversals, so the expected total trial count for a
+  // run is ~5 × totalPoints. Also estimate remaining time from the current
+  // speed preset: each trial is avg(gap) + avg(response) worst-case (timeout
+  // on an unseen), so budget ~half of responseMs on average.
+  const thresholdLocationsDone = roundDone
+  const thresholdEstimatedTrials = totalPoints * 5
+  const avgTrialMs = (sp.gapMinMs + sp.gapMaxMs) / 2 + sp.responseMs * 0.5
+  const thresholdTrialsRemaining = Math.max(0, thresholdEstimatedTrials - thresholdTrialsDone)
+  const thresholdMinutesLeft = Math.max(1, Math.round((thresholdTrialsRemaining * avgTrialMs) / 60000))
 
   // ==================== RENDER ====================
 
@@ -1249,18 +1290,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
             {eye === 'right' ? 'Right' : 'Left'} eye — static test
           </h1>
 
-          <div className="relative w-full h-40 bg-gray-900 rounded-xl flex items-center justify-center overflow-hidden">
-            <div className="w-2 h-2 rounded-full bg-yellow-400 z-10" />
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="w-3 h-3 rounded-full bg-white absolute animate-ping" style={{ left: '30%', top: '40%', animationDelay: '0s', animationDuration: '2s' }} />
-              <div className="w-3 h-3 rounded-full bg-white absolute animate-ping" style={{ left: '60%', top: '30%', animationDelay: '0.5s', animationDuration: '2s' }} />
-              <div className="w-3 h-3 rounded-full bg-white absolute animate-ping" style={{ left: '70%', top: '55%', animationDelay: '1s', animationDuration: '2s' }} />
-              <div className="w-3 h-3 rounded-full bg-white absolute animate-ping" style={{ left: '25%', top: '65%', animationDelay: '1.5s', animationDuration: '2s' }} />
-            </div>
-            <span className="absolute bottom-2 text-xs text-gray-600 z-10">
-              ~{targetHexagons} test points per level
-            </span>
-          </div>
+          <HeadGuide eye={eye} viewingDistanceCm={calibration.viewingDistanceCm} />
 
           <div className="text-left space-y-3 text-gray-300">
             <p>1. Cover your <strong>{eye === 'right' ? 'left' : 'right'} eye</strong></p>
@@ -1278,63 +1308,10 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
             <p>~{targetHexagons} hexagons cover your visual field at each brightness level. Areas you can't see are excluded in later rounds, so the remaining area gets re-tiled with {targetHexagons} fresh points at higher density. Isolated misses are automatically retested.</p>
           </div>
 
-          <HeadGuide eye={eye} viewingDistanceCm={calibration.viewingDistanceCm} />
-
-          {/* Settings */}
+          {/* Settings — precision and speed are now chosen from the home page
+              (Select test type → Fast/Normal). Only threshold mode remains as
+              an experimental in-test toggle. */}
           <div className="space-y-3 text-left">
-            <div>
-              <div className="flex items-center justify-between text-sm mb-1.5">
-                <span className="text-gray-400">Precision</span>
-                <span className="text-gray-500 font-mono text-xs">{targetHexagons} hexagons</span>
-              </div>
-              <div className="flex bg-gray-900 rounded-lg p-1 gap-1">
-                {[
-                  { n: 50, label: 'Fast', time: '~4 min' },
-                  { n: 100, label: 'Standard', time: '~8 min' },
-                  { n: 200, label: 'High', time: '~15 min' },
-                ].map(opt => (
-                  <button
-                    key={opt.n}
-                    onClick={() => setTargetHexagons(opt.n)}
-                    className={`flex-1 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                      targetHexagons === opt.n
-                        ? 'bg-green-600 text-white'
-                        : 'text-gray-400 hover:text-white hover:bg-gray-800'
-                    }`}
-                  >
-                    <span className="block">{opt.label}</span>
-                    <span className="block text-[9px] opacity-60">{opt.n} pts · {opt.time}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between text-sm mb-1.5">
-                <span className="text-gray-400">Speed</span>
-              </div>
-              <div className="flex bg-gray-900 rounded-lg p-1 gap-1">
-                {([
-                  { key: 'relaxed' as const, label: 'Relaxed', desc: 'more time' },
-                  { key: 'normal' as const, label: 'Normal', desc: 'default' },
-                  { key: 'fast' as const, label: 'Fast', desc: 'experienced' },
-                ]).map(opt => (
-                  <button
-                    key={opt.key}
-                    onClick={() => setSpeed(opt.key)}
-                    className={`flex-1 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                      speed === opt.key
-                        ? 'bg-green-600 text-white'
-                        : 'text-gray-400 hover:text-white hover:bg-gray-800'
-                    }`}
-                  >
-                    <span className="block">{opt.label}</span>
-                    <span className="block text-[9px] opacity-60">{opt.desc}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
             <label className="flex items-start gap-2 mt-4 cursor-pointer">
               <input
                 type="checkbox"
@@ -1343,16 +1320,33 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
                 className="mt-1"
               />
               <span className="text-sm">
-                <span className="font-medium text-zinc-100">Threshold mode (experimental)</span>
+                <span className="font-medium text-zinc-100">Detailed sensitivity mode (experimental)</span>
                 <span className="block text-zinc-400 mt-0.5">
-                  Instead of showing each Goldmann level, this estimates the exact
-                  sensitivity (in decibels) at each location using a short 4-2 dB
-                  staircase. Takes longer per point but produces a real dB map like
-                  clinical static perimetry. Uses stimulus size III.
+                  At each spot we find the dimmest dot you can still see, instead
+                  of just checking a few brightness levels. The result is more
+                  detailed, but it takes a bit longer.
                 </span>
+                {(() => {
+                  // Mirror the grid sizing in startTest so the estimate matches
+                  // what actually gets generated (targetCount = max(20, hexagons/3),
+                  // ~5 trials per location for a 2-reversal 4-2 dB staircase).
+                  const locations = Math.max(20, Math.round(targetHexagons / 3))
+                  const trials = locations * 5
+                  const avgTrialMs = (sp.gapMinMs + sp.gapMaxMs) / 2 + sp.responseMs * 0.5
+                  const minutes = Math.max(1, Math.round((trials * avgTrialMs) / 60000))
+                  return (
+                    <span className="block text-zinc-500 mt-1 text-xs">
+                      About {locations} spots · roughly {minutes} minutes.
+                    </span>
+                  )
+                })()}
               </span>
             </label>
           </div>
+
+          <p className="text-xs text-gray-500">
+            Press <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-[10px] font-mono text-gray-300">Esc</kbd> any time to pause the test or exit.
+          </p>
 
           <p className="text-xs text-gray-500">
             Self-monitoring tool, not a clinical diagnosis. Always consult your ophthalmologist.
@@ -1609,23 +1603,14 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
               source="measured"
             />
           ) : (
-            <>
-              <VisualFieldMap
-                points={results}
-                eye={eye}
-                maxEccentricity={maxEccentricityDeg}
-                size={Math.min(600, window.innerWidth - 48)}
-                calibration={calibration}
-                enableVerify
-              />
-              <SensitivityMap
-                points={deriveDbFromSuprathreshold(results)}
-                eye={eye}
-                maxEccentricity={maxEccentricityDeg}
-                size={Math.min(600, window.innerWidth - 48)}
-                source="derived"
-              />
-            </>
+            <VisualFieldMap
+              points={results}
+              eye={eye}
+              maxEccentricity={maxEccentricityDeg}
+              size={Math.min(600, window.innerWidth - 48)}
+              calibration={calibration}
+              enableVerify
+            />
           )}
           {!thresholdMode && (
             <div className="grid grid-cols-2 gap-2 text-sm">
@@ -1641,6 +1626,15 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
                 )
               })}
             </div>
+          )}
+          {!thresholdMode && (
+            <SensitivityMap
+              points={deriveDbFromSuprathreshold(results)}
+              eye={eye}
+              maxEccentricity={maxEccentricityDeg}
+              size={Math.min(600, window.innerWidth - 48)}
+              source="derived"
+            />
           )}
           <ClinicalDisclaimer variant="results" />
           {!thresholdMode && (
@@ -1794,36 +1788,11 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
         style={{ top: 12, left: '50%', transform: 'translateX(-50%)' }}
       >
         <span className="text-xs text-gray-600" aria-live="polite">
-          {phaseRef.current === 'retest' ? '🔄 Retesting suspicious' : 'Testing'} · {currentStim.label} · {roundDone}/{totalPoints}{unseenCount > 0 ? ` · ${unseenCount} unseen` : ''}{showGrid ? ' · [G] grid' : ''}
+          {thresholdModeRef.current
+            ? `Thresholding · III4e · trial ${thresholdTrialsDone} of ~${thresholdEstimatedTrials} · ~${thresholdMinutesLeft} min left${thresholdLocationsDone > 0 ? ` · ${thresholdLocationsDone}/${totalPoints} locations done` : ''}`
+            : `${phaseRef.current === 'retest' ? '🔄 Retesting suspicious' : 'Testing'} · ${currentStim.label} · ${roundDone}/${totalPoints}${unseenCount > 0 ? ` · ${unseenCount} unseen` : ''}`}{showGrid ? ' · [G] grid' : ''}
         </span>
       </div>
-
-      {/* Progress ring */}
-      {totalPoints > 0 && !isMobileTest && (
-        <svg
-          className="absolute pointer-events-none"
-          aria-hidden="true"
-          style={{
-            top: '50%',
-            left: '50%',
-            marginLeft: -10 + fixationXY.x,
-            marginTop: -10 + fixationXY.y,
-            width: 20,
-            height: 20,
-          }}
-          viewBox="0 0 20 20"
-        >
-          <circle cx={10} cy={10} r={8} fill="none" stroke="#1e293b" strokeWidth={1.5} />
-          <circle
-            cx={10} cy={10} r={8} fill="none" stroke="#3b82f6" strokeWidth={1.5}
-            strokeDasharray={`${2 * Math.PI * 8}`}
-            strokeDashoffset={`${2 * Math.PI * 8 * (1 - roundProgress)}`}
-            transform="rotate(-90 10 10)"
-            strokeLinecap="round"
-            opacity={0.5}
-          />
-        </svg>
-      )}
 
       {/* Fixation dot */}
       <div

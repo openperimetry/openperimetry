@@ -164,25 +164,36 @@ export function HistoryView({ onBack }: Props) {
             calibration={selected.calibration}
             enableVerify
           />
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              {ISOPTER_ORDER.map(key => {
+                const area = selected.isopterAreas[key]
+                if (area == null) return null
+                return (
+                  <div key={key} className="bg-surface rounded-xl px-3 py-2 flex items-center gap-2 border border-white/[0.06]">
+                    <span className="w-4 text-center" style={{ color: STIMULI[key].color }} aria-hidden="true">{ISOPTER_SHAPES[key] || '●'}</span>
+                    <span className="text-zinc-400">{STIMULI[key].label}</span>
+                    <span className="ml-auto font-mono" title={isopterStrategyHint(selected.testType)}>
+                      {area.toFixed(0)} deg²
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+            {selected.testType && (selected.testType === 'static' || selected.testType === 'goldmann') && (
+              <p className="text-[11px] text-zinc-500 leading-snug">
+                Areas measured via{' '}
+                <span className="text-zinc-400">{selected.testType === 'static' ? 'static scatter' : 'Goldmann kinetic'}</span>
+                . {isopterStrategyHint(selected.testType)}
+              </p>
+            )}
+          </div>
           <SensitivityMap
             points={deriveDbFromSuprathreshold(standardPoints)}
             eye={selected.eye}
             maxEccentricity={maxEcc}
             source="derived"
           />
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            {ISOPTER_ORDER.map(key => {
-              const area = selected.isopterAreas[key]
-              if (area == null) return null
-              return (
-                <div key={key} className="bg-surface rounded-xl px-3 py-2 flex items-center gap-2 border border-white/[0.06]">
-                  <span className="w-4 text-center" style={{ color: STIMULI[key].color }} aria-hidden="true">{ISOPTER_SHAPES[key] || '●'}</span>
-                  <span className="text-zinc-400">{STIMULI[key].label}</span>
-                  <span className="ml-auto font-mono">{area.toFixed(0)} deg²</span>
-                </div>
-              )
-            })}
-          </div>
           <Interpretation points={standardPoints} areas={selected.isopterAreas} maxEccentricityDeg={selected.calibration.maxEccentricityDeg} calibration={selected.calibration} reliabilityIndices={selected.reliabilityIndices} />
           <ScenarioOverlay userPoints={standardPoints} userAreas={selected.isopterAreas} maxEccentricity={maxEcc} />
           {/* Vision sim gets ALL points including extended for wider coverage */}
@@ -478,6 +489,19 @@ type ListEntry =
   | { kind: 'single'; result: TestResult; date: string }
   | { kind: 'pair'; groupId: string; right?: TestResult; left?: TestResult; date: string }
 
+/** Short qualifier shown after the III4e area number in list rows. */
+function isopterStrategyShort(t?: string): string {
+  if (t === 'static') return '(static)'
+  if (t === 'goldmann') return '(kinetic)'
+  return ''
+}
+/** Tooltip text explaining why the same-eye area differs between strategies. */
+function isopterStrategyHint(t?: string): string {
+  if (t === 'static') return 'Static scatter: polygon fits only locations where III4e was actually detected. Tends to be 30–60% smaller than kinetic on the same eye.'
+  if (t === 'goldmann') return 'Goldmann kinetic: polygon traces the inward-detection boundary. Typically 1.5–4× larger than a static III4e isopter on the same eye.'
+  return ''
+}
+
 function testTypeBadge(t?: string) {
   if (!t) return null
   const cls = t === 'ring' ? 'bg-purple-600/15 text-purple-400' : t === 'static' ? 'bg-teal/10 text-teal' : 'bg-accent/10 text-accent'
@@ -589,8 +613,14 @@ function ResultsList({
                     {showSync && <SyncIndicator synced={syncedIds.has(leftResult.id)} />}
                     <span className="text-zinc-300 font-medium">OS (Left)</span>
                     {leftResult.isopterAreas['III4e'] != null && (
-                      <span className="ml-auto font-mono text-teal">
+                      <span
+                        className="ml-auto font-mono text-teal"
+                        title={isopterStrategyHint(leftResult.testType)}
+                      >
                         {leftResult.isopterAreas['III4e']!.toFixed(0)} deg²
+                        {leftResult.testType && (
+                          <span className="text-zinc-500 font-sans ml-1">{isopterStrategyShort(leftResult.testType)}</span>
+                        )}
                       </span>
                     )}
                   </button>
@@ -607,8 +637,14 @@ function ResultsList({
                     {showSync && <SyncIndicator synced={syncedIds.has(rightResult.id)} />}
                     <span className="text-zinc-300 font-medium">OD (Right)</span>
                     {rightResult.isopterAreas['III4e'] != null && (
-                      <span className="ml-auto font-mono text-teal">
+                      <span
+                        className="ml-auto font-mono text-teal"
+                        title={isopterStrategyHint(rightResult.testType)}
+                      >
                         {rightResult.isopterAreas['III4e']!.toFixed(0)} deg²
+                        {rightResult.testType && (
+                          <span className="text-zinc-500 font-sans ml-1">{isopterStrategyShort(rightResult.testType)}</span>
+                        )}
                       </span>
                     )}
                   </button>
@@ -661,34 +697,89 @@ function ResultsList({
   )
 }
 
+/** Per-test-type colors for the isopter trend chart. Static and kinetic
+ *  produce III4e areas on different scales (kinetic typically 1.5–4×
+ *  larger on the same eye — see the test-type caption below), so we never
+ *  connect them with a single line. Ring-test is excluded from the chart
+ *  entirely — its "isopter area" means something different (ring detection
+ *  coverage, not a III4e extent). */
+const TEST_TYPE_COLORS: Record<string, string> = {
+  static: '#2dd4bf',   // teal — matches the Static badge
+  goldmann: '#fb923c', // orange — matches the Goldmann badge
+}
+const TEST_TYPE_LABELS: Record<string, string> = {
+  static: 'Static (scatter)',
+  goldmann: 'Goldmann (kinetic)',
+}
+
 function AreaChart({ results }: { results: TestResult[] }) {
   const sorted = [...results].sort((a, b) => a.date.localeCompare(b.date))
-  // Show III4e area trend (the clinically standard isopter)
-  const dataPoints = sorted
-    .map(r => ({ date: r.date, area: r.isopterAreas['III4e'] ?? null }))
-    .filter((d): d is { date: string; area: number } => d.area !== null)
 
-  if (dataPoints.length < 2) return null
+  // Group by testType. Static-scatter and Goldmann-kinetic produce the
+  // III4e area via different algorithms (seen-points hull vs. kinetic
+  // sweep endpoints) and shouldn't share a line. Ring tests don't produce
+  // a comparable III4e isopter so we skip them.
+  const byType = new Map<string, { date: string; area: number }[]>()
+  for (const r of sorted) {
+    const area = r.isopterAreas['III4e']
+    if (area == null) continue
+    const type = r.testType ?? 'unknown'
+    if (type === 'ring') continue
+    const arr = byType.get(type) ?? []
+    arr.push({ date: r.date, area })
+    byType.set(type, arr)
+  }
 
-  const areas = dataPoints.map(d => d.area)
-  const maxArea = Math.max(...areas, 1)
+  // Chart only useful when at least ONE strategy has ≥2 points.
+  const hasLine = [...byType.values()].some(arr => arr.length >= 2)
+  if (!hasLine) return null
+
+  const allPoints = [...byType.values()].flat()
+  const maxArea = Math.max(...allPoints.map(d => d.area), 1)
+  // Normalize all series along a shared time axis (index-based, not
+  // real-time), so each series' first point is at x=0 and last is at x=1
+  // relative to the ALL-points timeline. We use min/max date for that.
+  const allDates = allPoints.map(d => d.date).sort()
+  const minDate = allDates[0]
+  const maxDate = allDates[allDates.length - 1]
+  const spanMs = Math.max(1, new Date(maxDate).getTime() - new Date(minDate).getTime())
+
   const w = 600
   const h = 160
   const px = 40
   const py = 20
+  const rightPad = 20
 
-  const points = dataPoints.map((d, i) => {
-    const x = px + ((w - px - 20) * i) / Math.max(dataPoints.length - 1, 1)
-    const y = py + (h - 2 * py) * (1 - d.area / maxArea)
-    return { x, y, date: d.date }
-  })
+  const xFor = (date: string) => {
+    const t = new Date(date).getTime() - new Date(minDate).getTime()
+    return px + ((w - px - rightPad) * t) / spanMs
+  }
+  const yFor = (area: number) => py + (h - 2 * py) * (1 - area / maxArea)
 
-  const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
+  const series = [...byType.entries()]
+    .map(([type, arr]) => ({
+      type,
+      color: TEST_TYPE_COLORS[type] ?? '#a1a1aa',
+      label: TEST_TYPE_LABELS[type] ?? type,
+      points: arr.map(d => ({ x: xFor(d.date), y: yFor(d.area), date: d.date, area: d.area })),
+    }))
 
   return (
     <div className="space-y-2">
-      <h2 className="text-sm text-zinc-400 font-heading font-semibold">III4e isopter area over time</h2>
-      <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ maxWidth: w }} role="img" aria-label="Chart showing III4e isopter area trend over time">
+      <div className="flex items-baseline justify-between flex-wrap gap-x-3 gap-y-1">
+        <h2 className="text-sm text-zinc-400 font-heading font-semibold">
+          III4e isopter area over time
+        </h2>
+        <div className="flex items-center gap-3 text-[10px] text-zinc-500" aria-label="Test-type legend">
+          {series.map(s => (
+            <span key={s.type} className="inline-flex items-center gap-1.5">
+              <span aria-hidden="true" className="inline-block rounded-full" style={{ width: 8, height: 8, background: s.color }} />
+              <span>{s.label}</span>
+            </span>
+          ))}
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ maxWidth: w }} role="img" aria-label="Chart showing III4e isopter area trend over time, split by test type">
         <text x={px - 4} y={py + 4} fill="#71717a" fontSize={10} textAnchor="end">
           {maxArea.toFixed(0)}
         </text>
@@ -696,19 +787,36 @@ function AreaChart({ results }: { results: TestResult[] }) {
           0
         </text>
         <line x1={px} y1={py} x2={px} y2={h - py} stroke="#27272a" strokeWidth={0.5} />
-        <line x1={px} y1={h - py} x2={w - 20} y2={h - py} stroke="#27272a" strokeWidth={0.5} />
-        <path d={linePath} fill="none" stroke="#2dd4bf" strokeWidth={2} />
-        {points.map((p, i) => (
-          <g key={i}>
-            <circle cx={p.x} cy={p.y} r={4} fill="#2dd4bf" />
-            {(i === 0 || i === points.length - 1) && (
-              <text x={p.x} y={h - 2} fill="#71717a" fontSize={9} textAnchor="middle">
-                {new Date(p.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-              </text>
-            )}
-          </g>
-        ))}
+        <line x1={px} y1={h - py} x2={w - rightPad} y2={h - py} stroke="#27272a" strokeWidth={0.5} />
+        {series.map(s => {
+          const linePath = s.points.length >= 2
+            ? s.points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
+            : null
+          return (
+            <g key={s.type}>
+              {linePath && <path d={linePath} fill="none" stroke={s.color} strokeWidth={2} />}
+              {s.points.map((p, i) => (
+                <circle key={i} cx={p.x} cy={p.y} r={4} fill={s.color}>
+                  <title>{`${s.label}: ${p.area.toFixed(0)} deg² · ${new Date(p.date).toLocaleDateString()}`}</title>
+                </circle>
+              ))}
+            </g>
+          )
+        })}
+        {/* X-axis date labels at min/max of the combined timeline */}
+        <text x={px} y={h - 2} fill="#71717a" fontSize={9} textAnchor="start">
+          {new Date(minDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+        </text>
+        <text x={w - rightPad} y={h - 2} fill="#71717a" fontSize={9} textAnchor="end">
+          {new Date(maxDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+        </text>
       </svg>
+      <p className="text-[11px] text-zinc-500 leading-snug">
+        Static and kinetic isopter areas aren't directly comparable — kinetic
+        sweeps record only the detection boundary while static scatter tests
+        can leave seen-points clustered near fovea. Expect kinetic III4e area
+        to be 1.5–4× the static area on the same eye.
+      </p>
     </div>
   )
 }

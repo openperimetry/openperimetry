@@ -1,6 +1,13 @@
 import { useEffect, useRef } from 'react'
 import type { Eye } from '../types'
-import { DB_MIN, DB_MAX, jetReverseColor, renderSensitivityToCanvas } from '../sensitivity'
+import {
+  DB_MIN,
+  DB_MAX,
+  DB_MIN_DERIVED,
+  DB_MAX_DERIVED,
+  jetReverseColor,
+  renderSensitivityToCanvas,
+} from '../sensitivity'
 import { formatEyeLabelForResult } from '../eyeLabels'
 
 interface DbPoint {
@@ -36,15 +43,20 @@ export function SensitivityMap({
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
+  // Derived-from-Goldmann data only spans {0, 10, -5-sentinel} dB, so we
+  // use a tighter color ramp to keep the three outcomes visually distinct.
+  const dbMin = source === 'measured' ? DB_MIN : DB_MIN_DERIVED
+  const dbMax = source === 'measured' ? DB_MAX : DB_MAX_DERIVED
+
   useEffect(() => {
     const c = canvasRef.current
     if (!c) return
     const ctx = c.getContext('2d')
     if (!ctx) return
-    renderSensitivityToCanvas(ctx, points, size, maxEccentricity, power)
-  }, [points, size, maxEccentricity, power])
+    renderSensitivityToCanvas(ctx, points, size, maxEccentricity, power, dbMin, dbMax)
+  }, [points, size, maxEccentricity, power, dbMin, dbMax])
 
-  const midDb = Math.round((DB_MIN + DB_MAX) / 2)
+  const midDb = Math.round((dbMin + dbMax) / 2)
   const label =
     source === 'measured'
       ? 'Measured sensitivity (dB)'
@@ -56,7 +68,7 @@ export function SensitivityMap({
     .join(', ')
 
   return (
-    <div className="inline-block">
+    <div className="mx-auto" style={{ width: size }}>
       <div className="text-xs text-zinc-300 mb-1">
         {formatEyeLabelForResult(eye)} — {label}
       </div>
@@ -68,12 +80,12 @@ export function SensitivityMap({
         style={{ width: size, height: size }}
       />
       <div className="flex items-center gap-2 mt-2 text-[10px] text-zinc-400">
-        <span>{DB_MIN} dB (insensitive)</span>
+        <span>{dbMin} dB (insensitive)</span>
         <div
           className="flex-1 h-2 rounded"
           style={{ background: `linear-gradient(to right, ${legendStops})` }}
         />
-        <span>{DB_MAX} dB (sensitive)</span>
+        <span>{dbMax} dB (sensitive)</span>
         <span className="ml-2">mid {midDb}</span>
       </div>
     </div>

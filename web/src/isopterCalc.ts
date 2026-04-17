@@ -171,21 +171,51 @@ export function computeSmoothedBoundary(allDetected: TestPoint[]): BoundaryPoint
   // Spike-dampen MEASURED bins against their nearest measured neighbors on
   // each side, skipping interpolated bins (which are themselves averages).
   // Falls back to ordinary neighbors when there's only one measured bin.
+  //
+  // Sparse-data guard: when data is sparse (few measured bins or wide
+  // meridian gaps between them), "measured neighbors" can be 20°+ of
+  // meridian away. In that regime a legitimate peripheral peak looks
+  // "spiky" vs. its distant neighbors and the original aggressive
+  // dampening (threshold 30%, pull 0.65 toward neighbors) silently
+  // compressed the boundary by 20–30%. Since clampBoundary cascades this
+  // into every inner isopter, over-damping V4e constricted the whole
+  // nested set. We soften both the threshold and the pull weight when
+  // neighbors aren't close on the meridian circle; the assumption that
+  // "peak vs. neighbor = noise" is only valid when neighbors are adjacent.
   const measuredIdx: number[] = []
   for (let i = 0; i < n; i++) if (isMeasured[i]) measuredIdx.push(i)
 
   if (measuredIdx.length >= 3) {
+    // Store snapshot so dampening uses ORIGINAL neighbor values, not
+    // already-pulled ones from earlier iterations. This was also a source
+    // of over-correction: the first damped peak pulled its neighbors'
+    // effective positions, biasing subsequent decisions.
+    const original = boundary.map(p => p.eccentricityDeg)
     for (let k = 0; k < measuredIdx.length; k++) {
       const idx = measuredIdx[k]
-      const prevIdx = measuredIdx[(k - 1 + measuredIdx.length) % measuredIdx.length]
-      const nextIdx = measuredIdx[(k + 1) % measuredIdx.length]
-      const neighborAvg = (boundary[prevIdx].eccentricityDeg + boundary[nextIdx].eccentricityDeg) / 2
-      const diff = Math.abs(boundary[idx].eccentricityDeg - neighborAvg)
-      const threshold = Math.max(2, neighborAvg * 0.3)
+      const prevK = (k - 1 + measuredIdx.length) % measuredIdx.length
+      const nextK = (k + 1) % measuredIdx.length
+      const prevIdx = measuredIdx[prevK]
+      const nextIdx = measuredIdx[nextK]
+      // Meridian distance to nearest measured neighbor on each side.
+      const distPrev = ((idx - prevIdx + n) % n) * binSize
+      const distNext = ((nextIdx - idx + n) % n) * binSize
+      const maxGap = Math.max(distPrev, distNext)
+      // If either neighbor is far away on the circle, neighborAvg isn't
+      // a trustworthy local reference — skip dampening entirely.
+      if (maxGap > 30) continue
+      const neighborAvg = (original[prevIdx] + original[nextIdx]) / 2
+      const diff = Math.abs(original[idx] - neighborAvg)
+      // Tolerance grows with neighbor gap (sparser = more slack).
+      const gapFactor = 1 + maxGap / 30 // 1.0 at 0°, 2.0 at 30°
+      const threshold = Math.max(3, neighborAvg * 0.4 * gapFactor)
       if (diff > threshold) {
+        // Softer pull: 0.35 toward neighbors (was 0.65). Preserves more
+        // of the measured peak and lets the Gaussian smoother do the
+        // rest of the visual cleanup.
         boundary[idx] = {
           ...boundary[idx],
-          eccentricityDeg: neighborAvg * 0.65 + boundary[idx].eccentricityDeg * 0.35,
+          eccentricityDeg: neighborAvg * 0.35 + original[idx] * 0.65,
         }
       }
     }

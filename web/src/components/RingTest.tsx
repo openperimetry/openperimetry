@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import type { CalibrationData, StoredEye, TestPoint, StimulusKey, TestResult } from '../types'
+import type { SpeedMode } from './GoldmannTest'
 import { STIMULI } from '../types'
 import { formatEyeLabel } from '../eyeLabels'
 import { HeadGuide } from './HeadGuide'
@@ -37,20 +38,27 @@ interface Props {
   extendedField?: boolean
   onDone: () => void
   onComplete?: (points: TestPoint[]) => void
+  /** Home-page speed preset: 'fast' → 8 sectors, 'normal' → 12 sectors. */
+  speedMode?: SpeedMode
 }
 
 // Expansion speed per scroll/key event in degrees
 const STEP_DEG = 0.5
 // Gap between sectors
 const SECTOR_GAP_DEG = 4
-// Sector presets
+// Sector presets. The 24-sector "Precise" option was removed when we moved
+// fast/normal selection to the home page (fast=8, normal=12); 24 sectors took
+// too long for most self-testers and the two mid-range presets cover the
+// useful range.
 const SECTOR_PRESETS = [
   { sectors: 4,  label: 'Quick (4)',  desc: '4 quadrants — fast overview' },
   { sectors: 8,  label: 'Standard (8)', desc: '8 sectors — good balance' },
   { sectors: 12, label: 'Detailed (12)', desc: '12 sectors — more precise' },
-  { sectors: 24, label: 'Precise (24)', desc: '24 sectors — fine mapping' },
 ]
-const DEFAULT_SECTORS = 8
+/** Map home-page speed preset → ring sector count. */
+function sectorsForSpeed(mode: SpeedMode): number {
+  return mode === 'fast' ? 8 : 12
+}
 // Stimulus levels
 const TEST_LEVELS: { key: StimulusKey; thicknessDeg: number }[] = [
   { key: 'V4e',   thicknessDeg: 1.5 },
@@ -70,7 +78,8 @@ interface BoundaryEvent {
   meridianDeg: number
 }
 
-export function RingTest({ eye, calibration, extendedField, onDone, onComplete }: Props) {
+export function RingTest({ eye, calibration, extendedField, onDone, onComplete, speedMode = 'normal' }: Props) {
+  const initialSectors = sectorsForSpeed(speedMode)
   // Advanced settings — only background shade is applied here. Ring test
   // has no catch trials / fixation-alert overlay and does not use the
   // static speed-preset timings.
@@ -82,7 +91,7 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
         ? 'bg-gray-700'
         : 'bg-gray-950'
   const [phase, setPhase] = useState<Phase>('instructions')
-  const [numSectors, setNumSectors] = useState(DEFAULT_SECTORS)
+  const [numSectors, setNumSectors] = useState(initialSectors)
   const [levelIdx, setLevelIdx] = useState(0)
   const [sectorIdx, setSectorIdx] = useState(0)
   const [currentEcc, setCurrentEcc] = useState(0.5) // start small, near center
@@ -99,7 +108,7 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
   const eccRef = useRef(0.5)
   const levelIdxRef = useRef(0)
   const sectorIdxRef = useRef(0)
-  const numSectorsRef = useRef(DEFAULT_SECTORS)
+  const numSectorsRef = useRef(initialSectors)
   const eventsRef = useRef<BoundaryEvent[]>([])
   const autoAdvancingRef = useRef(false)
   const touchStartY = useRef<number | null>(null)
@@ -737,7 +746,7 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
           {/* Sector precision */}
           <div className="space-y-3">
             <p className="text-xs text-gray-500">Scotoma detail level</p>
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid grid-cols-3 gap-2">
               {SECTOR_PRESETS.map(preset => (
                 <button
                   key={preset.sectors}
@@ -913,6 +922,10 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
               </div>
             )
           })()}
+
+          <p className="text-xs text-gray-500">
+            Press <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-[10px] font-mono text-gray-300">Esc</kbd> any time to pause the test or exit.
+          </p>
 
           <button
             onClick={() => { numSectorsRef.current = numSectors; eccRef.current = 0.5; setCurrentEcc(0.5); setPhase('active') }}

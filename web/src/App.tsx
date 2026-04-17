@@ -199,6 +199,7 @@ const [showAuth, setShowAuth] = useState(() => {
         extendedField={extendedField}
         onDone={handleDone}
         onComplete={eye === 'both' ? handleRightEyeComplete : undefined}
+        speedMode={speedMode}
       />
     )
   }
@@ -213,6 +214,7 @@ const [showAuth, setShowAuth] = useState(() => {
         extendedField={extendedField}
         onDone={handleDone}
         onComplete={eye === 'both' ? handleRightEyeComplete : undefined}
+        speedMode={speedMode}
       />
     )
   }
@@ -316,6 +318,7 @@ const [showAuth, setShowAuth] = useState(() => {
           extendedField={extendedField}
           onDone={handleDone}
           onComplete={handleLeftEyeComplete}
+          speedMode={speedMode}
         />
       )
     }
@@ -328,6 +331,7 @@ const [showAuth, setShowAuth] = useState(() => {
           extendedField={extendedField}
           onDone={handleDone}
           onComplete={handleLeftEyeComplete}
+          speedMode={speedMode}
         />
       )
     }
@@ -397,10 +401,21 @@ const [showAuth, setShowAuth] = useState(() => {
   }
 
   // Home
-  const goldmannTime = speedMode === 'fast' ? '~5 min' : '~15 min'
-  const goldmannTimeBoth = speedMode === 'fast' ? '~10 min' : '~30 min'
-  const duration = testMode === 'ring' ? '~3 min' : testMode === 'static' ? '~8 min' : goldmannTime
-  const durationBoth = testMode === 'ring' ? '~6 min' : testMode === 'static' ? '~16 min' : goldmannTimeBoth
+  // Per-mode durations: fast vs normal. Speed now applies to all three modes.
+  // Ring fast=8 sectors / normal=12; static fast=50 pts / normal=100;
+  // goldmann fast-mode shortens block sequences (see GoldmannTest speedMode).
+  const DURATION_SINGLE = {
+    goldmann: { normal: '~15 min', fast: '~5 min' },
+    ring:     { normal: '~3 min',  fast: '~2 min' },
+    static:   { normal: '~8 min',  fast: '~4 min' },
+  } as const
+  const DURATION_BOTH = {
+    goldmann: { normal: '~30 min', fast: '~10 min' },
+    ring:     { normal: '~6 min',  fast: '~4 min' },
+    static:   { normal: '~16 min', fast: '~8 min' },
+  } as const
+  const duration = DURATION_SINGLE[testMode][speedMode]
+  const durationBoth = DURATION_BOTH[testMode][speedMode]
 
   return (
     <div className="min-h-[100dvh] bg-base text-white flex flex-col items-center justify-center relative overflow-hidden grain safe-pad">
@@ -519,9 +534,9 @@ const [showAuth, setShowAuth] = useState(() => {
           })}
 
           {/* Fixation point with pulse */}
-          <circle cx={250} cy={250} r={5} fill="#c8902a" opacity={0.6}>
+          <circle cx={250} cy={250} r={5} fill="#c8902a" opacity={0.35}>
             <animate attributeName="r" values="4;7;4" dur="4s" repeatCount="indefinite" />
-            <animate attributeName="opacity" values="0.4;0.85;0.4" dur="4s" repeatCount="indefinite" />
+            <animate attributeName="opacity" values="0.2;0.45;0.2" dur="4s" repeatCount="indefinite" />
           </circle>
         </svg>
       </div>
@@ -579,7 +594,7 @@ const [showAuth, setShowAuth] = useState(() => {
             "Start" button. Now the flow is: pick eye → pick test type →
             press the prominent Start Test button below. */}
         <div className="fade-up fade-up-3 space-y-3">
-          <p className="text-zinc-400 text-[11px] font-medium uppercase tracking-[0.2em] inline-flex items-center gap-2 bg-base/60 backdrop-blur-sm px-3 py-1 rounded-full" id="eye-selection-label">
+          <p className="text-zinc-400 text-[11px] font-medium uppercase tracking-[0.2em] inline-flex items-center gap-2 bg-white/[0.03] backdrop-blur-sm border border-white/[0.06] px-3 py-1 rounded-full" id="eye-selection-label">
             <span className="w-4 h-4 rounded-full bg-accent/20 text-accent text-[10px] flex items-center justify-center font-bold">1</span>
             Select eye
           </p>
@@ -651,7 +666,7 @@ const [showAuth, setShowAuth] = useState(() => {
 
         {/* ── Test mode + speed toggle ── */}
         <div className="fade-up fade-up-4 space-y-3">
-          <p className="text-zinc-400 text-[11px] font-medium uppercase tracking-[0.2em] inline-flex items-center gap-2 bg-base/60 backdrop-blur-sm px-3 py-1 rounded-full">
+          <p className="text-zinc-400 text-[11px] font-medium uppercase tracking-[0.2em] inline-flex items-center gap-2 bg-white/[0.03] backdrop-blur-sm border border-white/[0.06] px-3 py-1 rounded-full">
             <span className="w-4 h-4 rounded-full bg-accent/20 text-accent text-[10px] flex items-center justify-center font-bold">2</span>
             Select test type
           </p>
@@ -674,25 +689,23 @@ const [showAuth, setShowAuth] = useState(() => {
             ))}
           </div>
 
-          {/* Speed toggle — always present to avoid layout shift, invisible when not goldmann */}
+          {/* Speed toggle — applies to all three modes. Fast: goldmann shortens
+              block sequences; ring uses 8 sectors instead of 12; static uses
+              50 points instead of 100. */}
           <button
             onClick={() => setSpeedMode(s => s === 'normal' ? 'fast' : 'normal')}
             role="switch"
             aria-checked={speedMode === 'fast'}
-            tabIndex={testMode === 'goldmann' ? 0 : -1}
-            aria-hidden={testMode !== 'goldmann'}
             className={`w-full py-2.5 rounded-xl text-sm font-medium border backdrop-blur-sm ${
-              testMode !== 'goldmann'
-                ? 'invisible'
-                : speedMode === 'fast'
-                  ? 'bg-accent/10 border-accent/25 text-accent-light'
-                  : 'bg-white/[0.02] border-white/[0.06] text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]'
+              speedMode === 'fast'
+                ? 'bg-accent/10 border-accent/25 text-accent-light'
+                : 'bg-white/[0.02] border-white/[0.06] text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]'
             }`}
           >
             <svg className="inline w-4 h-4 mr-1.5 -mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
               <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
             </svg>
-            {speedMode === 'fast' ? 'Fast mode — ~5 min' : 'Normal speed — ~15 min'}
+            {speedMode === 'fast' ? `Fast mode — ${duration}` : `Normal speed — ${duration}`}
           </button>
         </div>
 

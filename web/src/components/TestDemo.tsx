@@ -7,12 +7,12 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import { getAllScenarios } from '../testFixtures'
 import { BackButton } from './AccessibleNav'
 import { VisualFieldMap } from './VisualFieldMap'
+import { SensitivityMap } from './SensitivityMap'
 import { calcIsopterAreas } from '../isopterCalc'
+import { deriveDbFromSuprathreshold } from '../sensitivity'
 import { Interpretation } from './Interpretation'
 import { VisionSimulator } from './VisionSimulator'
-import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { STIMULI, ISOPTER_ORDER } from '../types'
-import type { TestResult } from '../types'
 
 interface Props {
   onBack: () => void
@@ -94,6 +94,9 @@ function ScenarioCard({ scenario, mapSize }: { scenario: ReturnType<typeof getAl
       {/* Heavy components — lazy rendered on scroll */}
       <LazySection>
         <div className="space-y-4">
+          {/* Radar + derived sensitivity heatmap side-by-side — clinician-style
+              two-panel layout. Vision simulator sits below, full width, so
+              the scene photo has enough room to read. */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <VisualFieldMap
@@ -104,40 +107,30 @@ function ScenarioCard({ scenario, mapSize }: { scenario: ReturnType<typeof getAl
               />
             </div>
             <div>
-              <VisionSimulator
-                points={scenario.points}
+              <SensitivityMap
+                points={deriveDbFromSuprathreshold(scenario.points)}
                 eye="right"
                 maxEccentricity={scenario.maxEccentricity}
+                size={mapSize}
+                source="derived"
               />
             </div>
           </div>
 
-          <Interpretation points={scenario.points} areas={areas} maxEccentricityDeg={scenario.maxEccentricity} />
+          <VisionSimulator
+            points={scenario.points}
+            eye="right"
+            maxEccentricity={scenario.maxEccentricity}
+            minimal
+          />
 
-          <button
-            onClick={(e) => {
-              const card = (e.target as HTMLElement).closest('[data-scenario]')
-              const canvas = card?.querySelector('canvas') as HTMLCanvasElement | null
-              const visionSimImage = canvas?.toDataURL('image/png')
+          <Interpretation
+            points={scenario.points}
+            areas={areas}
+            maxEccentricityDeg={scenario.maxEccentricity}
+            calibration={scenario.calibration}
+          />
 
-              const result: TestResult = {
-                id: `demo-${scenario.id}`,
-                eye: 'right',
-                date: new Date().toISOString(),
-                points: scenario.points,
-                isopterAreas: areas,
-                calibration: scenario.calibration,
-                testType: 'goldmann',
-              }
-              exportTrackedResultPDF(result, {
-                isDemo: true,
-                visionSimImage,
-              }, 'demo')
-            }}
-            className="w-full py-2.5 btn-primary rounded-xl text-sm font-medium text-white"
-          >
-            Export PDF
-          </button>
         </div>
       </LazySection>
     </div>

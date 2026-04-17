@@ -5,12 +5,14 @@
  * Shape, persistence, and validation live here; the UI to edit them lives
  * in `CalibrationScreen`. Test components read the current settings via
  * the `useAdvancedSettings` hook so one provider at the App root threads
- * overrides through the whole tree.
+ * overrides through the whole tree. The provider component itself lives
+ * in `./advancedSettingsRoot.tsx` — kept in a separate file so this module
+ * has no component exports and Vite's react-refresh plugin stays happy.
  *
  * See `docs/superpowers/plans/2026-04-18-advanced-settings.md`.
  */
 
-import { createContext, useCallback, useContext, useState, type ReactNode } from 'react'
+import { createContext, useContext } from 'react'
 import {
   CATCH_TRIAL_EVERY_N,
   FIXATION_LOSS_ALERT_MS,
@@ -116,33 +118,18 @@ export function validateAdvancedSettings(raw: unknown): Partial<AdvancedSettings
   return out
 }
 
-const CTX = createContext<AdvancedSettings>(DEFAULT_ADVANCED_SETTINGS)
-export const AdvancedSettingsProvider = CTX.Provider
-export const useAdvancedSettings = () => useContext(CTX)
+/** Internal — consumed by {@link AdvancedSettingsRoot} in
+ *  `./advancedSettingsRoot.tsx` to wire the provider, and by the
+ *  `useAdvancedSettings` / `useSetAdvancedSettings` hooks below. */
+export const ADVANCED_SETTINGS_CTX = createContext<AdvancedSettings>(DEFAULT_ADVANCED_SETTINGS)
+export const useAdvancedSettings = () => useContext(ADVANCED_SETTINGS_CTX)
 
 /** Mutator context — separate from the value context so consumers that
  *  only read don't re-render when the setter identity changes. */
-const SET_CTX = createContext<(next: AdvancedSettings) => void>(() => {
+export const ADVANCED_SETTINGS_SET_CTX = createContext<(next: AdvancedSettings) => void>(() => {
   throw new Error('useSetAdvancedSettings called outside AdvancedSettingsRoot')
 })
-export const useSetAdvancedSettings = () => useContext(SET_CTX)
-
-/** Root-level provider: owns the settings state, hydrates from
- *  localStorage, persists on every mutation. Place once near the app
- *  entry point. Any descendant can call `useAdvancedSettings()` to read
- *  and `useSetAdvancedSettings()` to write. */
-export function AdvancedSettingsRoot({ children }: { children: ReactNode }) {
-  const [settings, setSettings] = useState<AdvancedSettings>(() => loadAdvancedSettings())
-  const update = useCallback((next: AdvancedSettings) => {
-    setSettings(next)
-    saveAdvancedSettings(next)
-  }, [])
-  return (
-    <SET_CTX.Provider value={update}>
-      <CTX.Provider value={settings}>{children}</CTX.Provider>
-    </SET_CTX.Provider>
-  )
-}
+export const useSetAdvancedSettings = () => useContext(ADVANCED_SETTINGS_SET_CTX)
 
 const STORAGE_KEY = 'vfc-advanced-settings'
 

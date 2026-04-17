@@ -820,7 +820,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
       }
     }, delay)
     isiActiveRef.current = true
-  }, [showStimulus, showStimulus2, hideStimulus, recordResult, flashFixation, pickDistantPoint, findIsolatedUnseen, goToCleanupOrNextLevel, presentCatchTrial, sp.gapMaxMs, sp.gapMinMs, sp.responseMs, sp.stimulusMs])
+  }, [showStimulus, showStimulus2, hideStimulus, recordResult, flashFixation, pickDistantPoint, findIsolatedUnseen, goToCleanupOrNextLevel, presentCatchTrial, sp.gapMaxMs, sp.gapMinMs, sp.responseMs, sp.stimulusMs, advanced.catchTrialEveryN])
 
   // Keep the stable ref up to date so presentCatchTrial can call presentNext
   // without a circular useCallback dependency.
@@ -883,7 +883,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     recordResult(currentPointRef.current, true, elapsed)
     isiActiveRef.current = true
     presentNext()
-  }, [flashFixation, hideStimulus, recordResult, presentNext, clearAllTimeouts, sp.responseMs])
+  }, [flashFixation, hideStimulus, recordResult, presentNext, clearAllTimeouts, sp.responseMs, advanced.fixationAlertMs])
 
   // ---------- pause/resume ----------
   const pauseTest = useCallback(() => {

@@ -12,16 +12,11 @@ import { ScenarioOverlay } from './ScenarioOverlay'
 import { PostTestSurvey } from './PostTestSurvey'
 import type { SurveyResponse } from './PostTestSurvey'
 import { ClinicalDisclaimer } from './ClinicalDisclaimer'
-import { HeadGuide } from './HeadGuide'
 import { GOLDMANN } from '../constants'
 import { degToPx } from '../geometry'
 import { stimulusDisplayColor } from '../stimulusDisplay'
 import { blindspotLocation } from '../blindspot'
-import {
-  CATCH_TRIAL_EVERY_N,
-  FIXATION_LOSS_ALERT_MS,
-  FIXATION_LOSS_ALERT_MESSAGE,
-} from '../testDefaults'
+import { useAdvancedSettings } from '../advancedSettings'
 
 // ---------- constants ----------
 const BASE_MERIDIANS = Array.from({ length: 12 }, (_, i) => i * 30)
@@ -47,7 +42,7 @@ const SPEED_PRESETS = {
 
 const { MIN_RESPONSE_MS, BOUNDARY_OFFSET_DEG, ADAPTIVE_THRESHOLD_DEG, OUTLIER_FACTOR } = GOLDMANN
 
-type Phase = 'instructions' | 'countdown' | 'interstitial' | 'wait' | 'moving' | 'paused' | 'results'
+type Phase = 'countdown' | 'interstitial' | 'wait' | 'moving' | 'paused' | 'results'
 
 interface TestTask {
   meridianDeg: number
@@ -440,7 +435,21 @@ function edgeEccentricityDeg(
 
 export function GoldmannTest({ eye, calibration, extendedField, onDone, onComplete, speedMode = 'normal' }: Props) {
   const sp = SPEED_PRESETS[speedMode]
-  const [phase, setPhase] = useState<Phase>('instructions')
+  // Advanced settings — user-adjustable overrides. Kinetic tests only use a
+  // subset: catch-trial cadence, fixation alert, and background shade.
+  // SpeedPresetOverride is Static-only (different shape from Goldmann's
+  // kinetic speed preset) and is not consulted here.
+  const advanced = useAdvancedSettings()
+  const bgClass =
+    advanced.backgroundShade === 'light'
+      ? 'bg-gray-400'
+      : advanced.backgroundShade === 'medium'
+        ? 'bg-gray-700'
+        : 'bg-gray-950'
+  // Calibration already covers the pre-test summary and "Start test" gesture,
+  // so we open directly on the first-block interstitial (head silhouette +
+  // fixation dot + tap-to-begin hint). The ref defaults handle counter reset.
+  const [phase, setPhase] = useState<Phase>('interstitial')
   const [countdown, setCountdown] = useState(3)
   const [results, setResults] = useState<TestPoint[]>([])
   const [savedId, setSavedId] = useState<string | null>(null)
@@ -471,7 +480,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   const respondedRef = useRef(false)
   const rafRef = useRef(0)
   const lastTimeRef = useRef(0)
-  const phaseRef = useRef<Phase>('instructions')
+  const phaseRef = useRef<Phase>('interstitial')
   const currentMeridianRef = useRef(0)
   const currentStimulusRef = useRef<StimulusKey>('III4e')
   const resultsRef = useRef<TestPoint[]>([])
@@ -900,7 +909,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       presentCountRef.current += 1
       if (
         presentCountRef.current > 0
-        && presentCountRef.current % CATCH_TRIAL_EVERY_N === 0
+        && presentCountRef.current % advanced.catchTrialEveryN === 0
       ) {
         presentCatchTrial()
         return
@@ -1032,9 +1041,9 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       if (stimulusRef.current) stimulusRef.current.style.opacity = '0'
       catchTrialRef.current.push({ detected: true })
       isCatchTrialRef.current = false
-      if (FIXATION_LOSS_ALERT_MS > 0) {
+      if (advanced.fixationAlertMs > 0) {
         setShowFixationLossAlert(true)
-        window.setTimeout(() => setShowFixationLossAlert(false), FIXATION_LOSS_ALERT_MS)
+        window.setTimeout(() => setShowFixationLossAlert(false), advanced.fixationAlertMs)
       }
       resumingFromCatchRef.current = true
       startCurrentTask()
@@ -1130,23 +1139,6 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     return () => window.removeEventListener('keydown', onKey)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [handleResponse, pause, resume])
-
-  // ---------- show positioning screen for first block ----------
-  const startPositioning = () => {
-    enterFullscreen()
-    blockIdxRef.current = 0
-    taskIdxRef.current = 0
-    setCurrentBlockIdx(0)
-    // Reset catch-trial and reliability counters for a fresh test run
-    catchTrialRef.current = []
-    truePositivesRef.current = 0
-    presentCountRef.current = 0
-    fpIsiPressesRef.current = 0
-    isCatchTrialRef.current = false
-    resumingFromCatchRef.current = false
-    isiActiveRef.current = false
-    setPhase('interstitial')
-  }
 
   // ---------- wrap onDone to exit fullscreen ----------
   const handleDone = () => {
@@ -1299,67 +1291,12 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     }, durationMs)
   }
 
-  // ---------- stimulus size for demo ----------
-  const demoSizePx = Math.max(6, Math.round(degToPx(0.43, calibration)))
-  const demoHalf = demoSizePx / 2
-
   // ==================== RENDER ====================
-
-  if (phase === 'instructions') {
-    return (
-      <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center p-6">
-        <div className="max-w-md space-y-6 text-center">
-          <h1 className="text-2xl font-semibold">
-            {eye === 'right' ? 'Right' : 'Left'} eye — multi-isopter
-          </h1>
-
-          {/* Head positioning guide */}
-          <HeadGuide eye={eye} viewingDistanceCm={calibration.viewingDistanceCm} />
-
-          {/* Visual demo */}
-          <div className="relative w-full h-32 bg-gray-900 rounded-xl flex items-center justify-center overflow-hidden">
-            <div className="w-2 h-2 rounded-full bg-yellow-400" />
-            <div
-              className="absolute rounded-full bg-white animate-[slideIn_3s_ease-in_infinite]"
-              style={{ width: demoSizePx, height: demoSizePx, top: '50%', marginTop: -demoHalf }}
-            />
-            <span className="absolute bottom-2 text-xs text-gray-600">
-              demo — the white dot moves toward the yellow center
-            </span>
-          </div>
-
-          <div className="text-left space-y-3 text-gray-300">
-            <p>Make sure you're sitting in a comfortable position before starting.</p>
-            <p>1. Cover your <strong>{eye === 'right' ? 'left' : 'right'} eye</strong></p>
-            <p>2. Stare at the <span className="text-yellow-400">yellow dot</span> — don't look away</p>
-            <p>3. Dots of different <strong>sizes and brightness</strong> move toward center</p>
-            <p>
-              4. Press <kbd className="px-2 py-0.5 bg-gray-800 rounded text-sm">Space</kbd>,{' '}
-              <strong>click the mouse</strong>, or <strong>tap</strong> the moment you see it in your peripheral vision
-            </p>
-          </div>
-
-          <p className="text-xs text-gray-500">
-            Self-monitoring tool, not a clinical diagnosis. Always consult your ophthalmologist.
-          </p>
-          <button
-            onClick={startPositioning}
-            className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
-          >
-            Ready
-          </button>
-          <button onClick={handleDone} className="text-gray-500 hover:text-gray-300 text-sm">
-            Cancel
-          </button>
-        </div>
-      </div>
-    )
-  }
 
   if (phase === 'countdown') {
     return (
       <div
-        className="min-h-screen bg-gray-950 text-white select-none cursor-none relative overflow-hidden"
+        className={`min-h-screen ${bgClass} text-white select-none cursor-none relative overflow-hidden`}
         onTouchStart={e => e.preventDefault()}
       >
         {/* Fixation dot at real position */}
@@ -1392,7 +1329,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   if (phase === 'paused') {
     const progressPct = totalTasks > 0 ? (completedTasks / totalTasks) * 100 : 0
     return (
-      <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center select-none p-6">
+      <div className={`min-h-screen ${bgClass} text-white flex items-center justify-center select-none p-6`}>
         <div className="text-center space-y-6 max-w-sm w-full">
           <h1 className="text-2xl font-semibold">Paused</h1>
           <p className="text-gray-400 text-sm">{completedTasks} of {totalTasks} points completed</p>
@@ -1450,7 +1387,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     const fy = block?.fixation ? block.fixation.y : 0
     return (
       <div
-        className="min-h-screen bg-gray-950 text-white select-none cursor-pointer relative overflow-hidden"
+        className={`min-h-screen ${bgClass} text-white select-none cursor-pointer relative overflow-hidden`}
         onPointerDown={() => startCountdown()}
       >
         {/* Arrow from previous fixation to new fixation */}
@@ -1657,7 +1594,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       handleSave()
     }
     return (
-      <div className="min-h-screen bg-gray-950 text-white p-6 overflow-y-auto">
+      <div className={`min-h-screen ${bgClass} text-white p-6 overflow-y-auto`}>
         <main className="max-w-lg mx-auto space-y-6 pb-12">
           <h1 className="text-2xl font-semibold text-center">Results</h1>
           <p className="text-center text-xs text-gray-500">Goldmann kinetic perimetry · {eye === 'right' ? <abbr title="Oculus Dexter">OD</abbr> : <abbr title="Oculus Sinister">OS</abbr>}</p>
@@ -1781,23 +1718,11 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // Active test (wait + moving phases)
   return (
     <div
-      className="min-h-screen bg-gray-950 select-none cursor-none relative overflow-hidden"
+      className={`min-h-screen ${bgClass} select-none cursor-none relative overflow-hidden`}
       onPointerDown={handlePointerDown}
       role="application"
       aria-label="Visual field test in progress — press Space or tap when you see the stimulus"
     >
-      <button
-        type="button"
-        onPointerDown={e => { e.stopPropagation(); pause() }}
-        className="absolute bottom-4 right-4 z-20 min-w-[44px] min-h-[44px] px-3 rounded-full bg-white/[0.08] hover:bg-white/[0.15] text-gray-300 text-xs font-medium cursor-pointer flex items-center gap-1.5 backdrop-blur-sm border border-white/[0.1]"
-        aria-label="Pause test"
-      >
-        <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor" aria-hidden="true">
-          <rect x="6" y="5" width="4" height="14" rx="1" />
-          <rect x="14" y="5" width="4" height="14" rx="1" />
-        </svg>
-        Pause
-      </button>
       {/* Progress ring around fixation dot */}
       {totalTasks > 0 && !isMobileTest && (
         <svg
@@ -1854,7 +1779,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
           role="alert"
           aria-live="polite"
         >
-          {FIXATION_LOSS_ALERT_MESSAGE}
+          {advanced.fixationAlertMessage}
         </div>
       )}
     </div>

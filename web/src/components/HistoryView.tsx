@@ -189,11 +189,28 @@ export function HistoryView({ onBack }: Props) {
             <p>Total points: {selected.points.length} ({selected.points.filter(p => p.detected).length} detected)</p>
           </div>
           <ClinicalDisclaimer variant="results" />
-	          <div className="flex gap-3">
-	            <button
-	              onClick={() => exportTrackedResultPDF(selected, undefined, 'history_detail')}
-	              className="flex-1 py-2.5 btn-primary rounded-xl text-sm font-medium text-white"
-	            >
+
+          {resultHasSurvey(selected.id) ? (
+            <p className="text-center text-teal text-xs">Feedback saved for this result.</p>
+          ) : surveyOpenForId === selected.id ? (
+            <PostTestSurvey
+              onSubmit={(response: SurveyResponse) => handleSurveySubmit(selected.id, response)}
+              onSkip={() => setSurveyOpenForId(null)}
+            />
+          ) : (
+            <button
+              onClick={() => setSurveyOpenForId(selected.id)}
+              className="w-full py-2.5 bg-surface hover:bg-elevated rounded-xl text-sm font-medium text-zinc-200 transition-colors border border-white/[0.06]"
+            >
+              Add feedback for this result
+            </button>
+          )}
+
+          <div className="flex gap-3">
+            <button
+              onClick={() => exportTrackedResultPDF(selected, undefined, 'history_detail')}
+              className="flex-1 py-2.5 btn-primary rounded-xl text-sm font-medium text-white"
+            >
               Export PDF
             </button>
             <button
@@ -208,26 +225,10 @@ export function HistoryView({ onBack }: Props) {
               className="py-2.5 px-4 bg-surface hover:bg-elevated rounded-xl text-sm text-red-400 hover:text-red-300 transition-colors border border-white/[0.06]"
             >
               Delete
-	            </button>
-	          </div>
+            </button>
+          </div>
 
-	          {resultHasSurvey(selected.id) ? (
-	            <p className="text-center text-teal text-xs">Feedback saved for this result.</p>
-	          ) : surveyOpenForId === selected.id ? (
-	            <PostTestSurvey
-	              onSubmit={(response: SurveyResponse) => handleSurveySubmit(selected.id, response)}
-	              onSkip={() => setSurveyOpenForId(null)}
-	            />
-	          ) : (
-	            <button
-	              onClick={() => setSurveyOpenForId(selected.id)}
-	              className="w-full py-2.5 bg-surface hover:bg-elevated rounded-xl text-sm font-medium text-zinc-200 transition-colors border border-white/[0.06]"
-	            >
-	              Add feedback for this result
-	            </button>
-	          )}
-
-	          {/* Delete confirmation dialog */}
+          {/* Delete confirmation dialog */}
           {confirmDeleteId && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="presentation">
               <div
@@ -438,43 +439,27 @@ export function HistoryView({ onBack }: Props) {
           <ResultsList
             binocularGroups={binocularGroups}
             singleResults={[...rightEyeResults, ...leftEyeResults]}
-	            onSelect={setSelected}
-	            onSurvey={result => {
-	              setSelected(result)
-	              if (!resultHasSurvey(result.id)) setSurveyOpenForId(result.id)
-	            }}
-	            onExportPDF={entry => {
-	              if (entry.kind === 'single') {
-	                exportTrackedResultPDF(entry.result, undefined, 'history_list')
-	                return
-	              }
+            onSelect={setSelected}
+            onExportPDF={entry => {
+              if (entry.kind === 'single') {
+                exportTrackedResultPDF(entry.result, undefined, 'history_list')
+                return
+              }
               // Binocular pair — render as combined OU report.
               const anchor = entry.right ?? entry.left
               if (!anchor) return
               const rightPoints = entry.right?.points ?? []
               const leftPoints = entry.left?.points ?? []
               const combined = [...rightPoints, ...leftPoints]
-	              exportTrackedResultPDF(
-	                { ...anchor, points: combined },
-	                { binocular: true, rightEyePoints: rightPoints, leftEyePoints: leftPoints },
-	                'history_list',
-	              )
-	            }}
-            onExportOvfx={entry => {
-              if (entry.kind === 'single') {
-                downloadOvfx(entry.result)
-                return
-              }
-              // Binocular pair → two OVFX files sharing the same
-              // binocularGroup. Emit them back-to-back; browsers allow
-              // multiple downloads from a single user gesture.
-              if (entry.right) downloadOvfx(entry.right)
-              if (entry.left) downloadOvfx(entry.left)
+              exportTrackedResultPDF(
+                { ...anchor, points: combined },
+                { binocular: true, rightEyePoints: rightPoints, leftEyePoints: leftPoints },
+                'history_list',
+              )
             }}
-	            syncedIds={syncedIds}
-	            showSync={!!user}
-	            hasSurvey={resultHasSurvey}
-	          />
+            syncedIds={syncedIds}
+            showSync={!!user}
+          />
         )}
       </main>
     </div>
@@ -508,24 +493,18 @@ function SyncIndicator({ synced }: { synced: boolean }) {
 function ResultsList({
   binocularGroups,
   singleResults,
-	  onSelect,
-	  onSurvey,
-	  onExportPDF,
-	  onExportOvfx,
-	  syncedIds,
-	  showSync,
-	  hasSurvey,
-	}: {
-	  binocularGroups: { groupId: string; right?: TestResult; left?: TestResult; date: string }[]
-	  singleResults: TestResult[]
-	  onSelect: (r: TestResult) => void
-	  onSurvey: (r: TestResult) => void
-	  onExportPDF: (entry: ListEntry) => void
-	  onExportOvfx: (entry: ListEntry) => void
-	  syncedIds: Set<string>
-	  showSync: boolean
-	  hasSurvey: (id: string) => boolean
-	}) {
+  onSelect,
+  onExportPDF,
+  syncedIds,
+  showSync,
+}: {
+  binocularGroups: { groupId: string; right?: TestResult; left?: TestResult; date: string }[]
+  singleResults: TestResult[]
+  onSelect: (r: TestResult) => void
+  onExportPDF: (entry: ListEntry) => void
+  syncedIds: Set<string>
+  showSync: boolean
+}) {
   // Merge into a single chronological list. Binocular pairs are one entry with
   // two sub-buttons; single-eye results are one entry with one button.
   const entries: ListEntry[] = [
@@ -560,12 +539,10 @@ function ResultsList({
           const eyeBadgeLabel: 'OD' | 'OS' | 'OU' = entry.kind === 'single'
             ? formatEyeLabel(entry.result.eye)
             : 'OU'
-	          const keyId = entry.kind === 'single' ? `single-${entry.result.id}` : `pair-${entry.groupId || i}`
-	          const anyR = entry.kind === 'single' ? entry.result : (entry.right ?? entry.left)
-	          const surveyTarget = entry.kind === 'single' ? entry.result : (entry.right ?? entry.left)
-	          const surveySaved = surveyTarget ? hasSurvey(surveyTarget.id) : false
+          const keyId = entry.kind === 'single' ? `single-${entry.result.id}` : `pair-${entry.groupId || i}`
+          const anyR = entry.kind === 'single' ? entry.result : (entry.right ?? entry.left)
 
-	          return (
+          return (
             <div
               key={keyId}
               className="px-4 py-3 bg-surface rounded-2xl border border-white/[0.06] space-y-2"
@@ -579,26 +556,9 @@ function ResultsList({
                 {testTypeBadge(testType)}
                 {entry.kind === 'single' && anyR && (
                   <span className="text-zinc-500 text-xs ml-2">{anyR.points.length} pts</span>
-	                )}
-	                <div className="ml-auto flex items-center gap-1">
-	                  {surveyTarget && (
-	                    <button
-	                      onClick={e => { e.stopPropagation(); onSurvey(surveyTarget) }}
-	                      aria-label={surveySaved ? 'Feedback saved' : 'Add feedback'}
-	                      title={surveySaved ? 'Feedback saved' : 'Add feedback'}
-	                      className={`w-7 h-7 flex items-center justify-center rounded transition-colors ${
-	                        surveySaved
-	                          ? 'text-teal hover:bg-white/[0.06]'
-	                          : 'text-zinc-500 hover:text-white hover:bg-white/[0.06]'
-	                      }`}
-	                    >
-	                      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={1.6} aria-hidden="true">
-	                        <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v8z" />
-	                        {surveySaved && <path d="m8 11 2.2 2.2L15.5 8" />}
-	                      </svg>
-	                    </button>
-	                  )}
-	                  <button
+                )}
+                <div className="ml-auto flex items-center gap-1">
+                  <button
                     onClick={e => { e.stopPropagation(); onExportPDF(entry) }}
                     aria-label="Export as PDF"
                     title="Export as PDF"
@@ -608,18 +568,6 @@ function ResultsList({
                       <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5z" />
                       <path d="M14 3v5h5" />
                       <path d="M9 13h6M9 17h4" />
-                    </svg>
-                  </button>
-                  <button
-                    onClick={e => { e.stopPropagation(); onExportOvfx(entry) }}
-                    aria-label="Export as OVFX"
-                    title="Export as OVFX (portable JSON)"
-                    className="w-7 h-7 flex items-center justify-center rounded text-zinc-500 hover:text-white hover:bg-white/[0.06] transition-colors"
-                  >
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={1.6} aria-hidden="true">
-                      <path d="M12 3v12" />
-                      <path d="m7 10 5 5 5-5" />
-                      <path d="M5 21h14" />
                     </svg>
                   </button>
                 </div>

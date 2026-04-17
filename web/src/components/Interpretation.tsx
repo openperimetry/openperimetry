@@ -844,10 +844,12 @@ export function Interpretation({ points, areas, maxEccentricityDeg, calibration,
 
           {/* Disclaimer */}
           <p className="text-xs text-gray-600 leading-relaxed px-1">
-            This interpretation is generated automatically for self-monitoring purposes only.
-            It is not a clinical diagnosis. Isopter areas may differ from clinical Goldmann perimetry
-            due to screen limitations, calibration differences, and the absence of controlled testing
-            conditions. Always consult your ophthalmologist for clinical assessment.
+            This tool has not been validated against a clinical perimeter. This interpretation
+            is generated automatically for self-monitoring purposes only. Results may differ
+            from clinical perimetry due to screen limitations, uncontrolled viewing distance,
+            and the absence of standardized testing conditions. Always consult your
+            ophthalmologist for diagnosis and treatment decisions. Use this tool to notice
+            changes in your own field — not as absolute truth.
           </p>
         </div>
       )}

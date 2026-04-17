@@ -15,6 +15,32 @@ interface Props {
   calibration?: CalibrationData
   /** Show a corner button that opens the 1:1 verify overlay. Requires calibration. */
   enableVerify?: boolean
+  /** Test-retest aggregation across repeated sessions. When present, each
+   *  aggregated point is rendered as a disk whose color encodes per-point
+   *  standard deviation (green → yellow → red) and whose opacity encodes
+   *  mean detection rate. Key format: "meridianDeg,eccentricityDeg". */
+  variance?: Map<string, { mean: number; stdev: number; n: number }>
+}
+
+/** Map per-point SD (0 → 0.5 for binary detection) to a diagnostic color.
+ *  Stable, low-noise points are green; unreliable ones are red. */
+function sdToColor(stdev: number): string {
+  const t = Math.min(1, Math.max(0, stdev / 0.5))
+  // Green (#10b981) → Yellow (#eab308) → Red (#ef4444)
+  if (t < 0.5) {
+    // green → yellow
+    const k = t / 0.5
+    const r = Math.round(0x10 + (0xea - 0x10) * k)
+    const g = Math.round(0xb9 + (0xb3 - 0xb9) * k)
+    const b = Math.round(0x81 + (0x08 - 0x81) * k)
+    return `rgb(${r},${g},${b})`
+  }
+  // yellow → red
+  const k = (t - 0.5) / 0.5
+  const r = Math.round(0xea + (0xef - 0xea) * k)
+  const g = Math.round(0xb3 + (0x44 - 0xb3) * k)
+  const b = Math.round(0x08 + (0x44 - 0x08) * k)
+  return `rgb(${r},${g},${b})`
 }
 
 const CHART_PADDING = 40
@@ -32,6 +58,7 @@ export function VisualFieldMap({
   showLabels = true,
   calibration,
   enableVerify = false,
+  variance,
 }: Props) {
   const [verifyOpen, setVerifyOpen] = useState(false)
   const center = size / 2
@@ -225,6 +252,37 @@ export function VisualFieldMap({
               />
             )
           })}
+
+        {/* Variance overlay — one disk per aggregated grid point, color
+            encodes per-point SD across sessions, opacity encodes mean
+            detection rate. Rendered above isopters so variance is visible
+            on any stored pattern. */}
+        {variance && Array.from(variance.entries()).map(([key, agg]) => {
+          const [mStr, eStr] = key.split(',')
+          const meridianDeg = Number(mStr)
+          const eccDeg = Number(eStr)
+          if (!Number.isFinite(meridianDeg) || !Number.isFinite(eccDeg)) return null
+          const [x, y] = polarToXY(eccDeg, meridianDeg, center, scale)
+          const color = sdToColor(agg.stdev)
+          // Clamp opacity so low-mean (often-missed) points are still visible.
+          const opacity = 0.3 + 0.7 * agg.mean
+          return (
+            <circle
+              key={`var-${key}`}
+              cx={x}
+              cy={y}
+              r={4}
+              fill={color}
+              opacity={opacity}
+              stroke="#0b0b12"
+              strokeWidth={0.5}
+            >
+              <title>
+                {`${meridianDeg}°, ${eccDeg}°\nmean ${(agg.mean * 100).toFixed(0)}%, SD ${agg.stdev.toFixed(2)}, n=${agg.n}`}
+              </title>
+            </circle>
+          )
+        })}
 
         {/* Fixation dot */}
         <circle cx={center} cy={center} r={2} fill="#fbbf24" />

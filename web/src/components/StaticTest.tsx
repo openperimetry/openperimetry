@@ -19,12 +19,10 @@ import { degToPx } from '../geometry'
 import { blindspotLocation } from '../blindspot'
 import { stimulusDisplayColor } from '../stimulusDisplay'
 import {
-  CATCH_TRIAL_EVERY_N,
-  FIXATION_LOSS_ALERT_MS,
-  FIXATION_LOSS_ALERT_MESSAGE,
   SPEED_PRESETS,
   type SpeedPresetName,
 } from '../testDefaults'
+import { useAdvancedSettings } from '../advancedSettings'
 
 // ---------- constants ----------
 const DEFAULT_HEXAGONS = 100      // default number of test points per level
@@ -198,10 +196,32 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   const fixDotSize = isMobileTest ? 'w-[2px] h-[2px]' : 'w-3 h-3'
   const fixDotOffset = isMobileTest ? -1 : -6
 
+  // ---------- advanced settings ----------
+  // User-adjustable overrides for catch-trial cadence, alert duration/text,
+  // speed-preset timings, and background shade. Defaults to DEFAULT_ADVANCED_SETTINGS.
+  const advanced = useAdvancedSettings()
+  // Map background shade to the background class used on every phase shell.
+  const bgClass =
+    advanced.backgroundShade === 'light'
+      ? 'bg-gray-400'
+      : advanced.backgroundShade === 'medium'
+        ? 'bg-gray-700'
+        : 'bg-gray-950'
+
   // ---------- configurable settings (shown on instructions screen) ----------
   const [targetHexagons, setTargetHexagons] = useState(DEFAULT_HEXAGONS)
   const [speed, setSpeed] = useState<SpeedSetting>('normal')
-  const sp = SPEED_PRESETS[speed]
+  // If the user enabled the advanced-settings speed-preset override, its
+  // timings win over the selected built-in preset. Otherwise fall through
+  // to SPEED_PRESETS[speed].
+  const sp = advanced.speedPreset.override
+    ? {
+        stimulusMs: advanced.speedPreset.stimulusMs,
+        responseMs: advanced.speedPreset.responseMs,
+        gapMinMs: advanced.speedPreset.gapMinMs,
+        gapMaxMs: advanced.speedPreset.gapMaxMs,
+      }
+    : SPEED_PRESETS[speed]
 
   // Fixation position
   const fixationXY = { x: fixationOffsetPx, y: 0 }
@@ -653,7 +673,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     presentCountRef.current++
 
     // Every Nth presentation, inject a blindspot catch trial
-    if (presentCountRef.current % CATCH_TRIAL_EVERY_N === 0) {
+    if (presentCountRef.current % advanced.catchTrialEveryN === 0) {
       presentCatchTrial()
       return
     }
@@ -837,9 +857,12 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     // Catch-trial response: patient reported seeing blindspot stimulus (fixation loss)
     if (isCatchTrialRef.current) {
       catchTrialRef.current.push({ detected: true })
-      // Fixation-loss alert — inform the patient they looked away.
-      setShowFixationLossAlert(true)
-      window.setTimeout(() => setShowFixationLossAlert(false), FIXATION_LOSS_ALERT_MS)
+      // Fixation-loss alert — inform the patient they looked away. A
+      // setting of 0 ms disables the overlay entirely (advanced setting).
+      if (advanced.fixationAlertMs > 0) {
+        setShowFixationLossAlert(true)
+        window.setTimeout(() => setShowFixationLossAlert(false), advanced.fixationAlertMs)
+      }
       isCatchTrialRef.current = false
       currentPointRef.current = null
       isiActiveRef.current = true
@@ -1040,7 +1063,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
 
   if (phase === 'instructions') {
     return (
-      <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center p-6">
+      <div className={`min-h-screen ${bgClass} text-white flex items-center justify-center p-6`}>
         <main className="max-w-md space-y-6 text-center">
           <h1 className="text-2xl font-semibold">
             {eye === 'right' ? 'Right' : 'Left'} eye — static test
@@ -1153,7 +1176,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   if (phase === 'countdown') {
     return (
       <div
-        className="min-h-screen bg-gray-950 text-white select-none cursor-none relative overflow-hidden"
+        className={`min-h-screen ${bgClass} text-white select-none cursor-none relative overflow-hidden`}
         onTouchStart={e => e.preventDefault()}
       >
         <div
@@ -1183,7 +1206,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
 
   if (phase === 'paused') {
     return (
-      <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center select-none p-6">
+      <div className={`min-h-screen ${bgClass} text-white flex items-center justify-center select-none p-6`}>
         <main className="text-center space-y-6 max-w-sm w-full">
           <h1 className="text-2xl font-semibold">Paused</h1>
           <p className="text-gray-400 text-sm">
@@ -1237,7 +1260,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     const levelUnseen = levelPoints.filter(p => p.status === 'unseen').length
 
     return (
-      <div className="min-h-screen bg-gray-950 text-white p-6 overflow-y-auto">
+      <div className={`min-h-screen ${bgClass} text-white p-6 overflow-y-auto`}>
         <main className="max-w-lg mx-auto space-y-6 pb-12 text-center">
           <div className="w-16 h-16 mx-auto rounded-full bg-green-600/20 flex items-center justify-center">
             <svg viewBox="0 0 24 24" className="w-8 h-8 text-green-400" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
@@ -1361,7 +1384,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     }
 
     return (
-      <div className="min-h-screen bg-gray-950 text-white p-6 overflow-y-auto">
+      <div className={`min-h-screen ${bgClass} text-white p-6 overflow-y-auto`}>
         <main className="max-w-lg mx-auto space-y-6 pb-12">
           <h1 className="text-2xl font-semibold text-center">Results</h1>
           <p className="text-center text-xs text-gray-500">Tom static test · {formatEyeLabel(eye)}</p>
@@ -1482,23 +1505,11 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   // ==================== ACTIVE TEST ====================
   return (
     <div
-      className="min-h-screen bg-gray-950 select-none cursor-none relative overflow-hidden"
+      className={`min-h-screen ${bgClass} select-none cursor-none relative overflow-hidden`}
       role="application"
       aria-label={`Visual field test in progress for ${eye} eye. Press Space or tap when you see a dot.`}
       onPointerDown={handlePointerDown}
     >
-      <button
-        type="button"
-        onPointerDown={e => { e.stopPropagation(); pauseTest() }}
-        className="absolute bottom-4 right-4 z-20 min-w-[44px] min-h-[44px] px-3 rounded-full bg-white/[0.08] hover:bg-white/[0.15] text-gray-300 text-xs font-medium cursor-pointer flex items-center gap-1.5 backdrop-blur-sm border border-white/[0.1]"
-        aria-label="Pause test"
-      >
-        <svg viewBox="0 0 24 24" className="w-4 h-4" fill="currentColor" aria-hidden="true">
-          <rect x="6" y="5" width="4" height="14" rx="1" />
-          <rect x="14" y="5" width="4" height="14" rx="1" />
-        </svg>
-        Pause
-      </button>
       {/* Persistent dots for unseen points */}
       {visiblePoints.filter(p => p.status === 'unseen').map(p => {
         const screenX = window.innerWidth / 2 + fixationXY.x + degToPx(p.xDeg, calibration)
@@ -1617,7 +1628,7 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
           role="alert"
           aria-live="polite"
         >
-          {FIXATION_LOSS_ALERT_MESSAGE}
+          {advanced.fixationAlertMessage}
         </div>
       )}
     </div>

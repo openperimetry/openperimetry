@@ -85,6 +85,40 @@ Fork or hosted-instance operators can rebrand by setting `VITE_APP_NAME`, `VITE_
 - **console** (default) — prints emails to stdout. Fine for local dev.
 - **ses** — AWS SES for production email delivery. Requires `SES_REGION` + a verified sending domain.
 
+### Shareable test settings
+
+Casual users get clinically-grounded defaults for catch-trial cadence, fixation-loss alert, speed-preset timings, and background shade. Advanced users (researchers, clinicians running custom protocols, tinkerers) can tweak these from the **Advanced test settings (optional)** panel on the calibration *Screen calibration* step (below the field-coverage preview), export the result as a small JSON file, and share it with others.
+
+Settings are stored in `localStorage` under the key `vfc-advanced-settings`, so any override persists per-browser across sessions.
+
+**File format (version 1.x):**
+
+```json
+{
+  "vfcSettingsVersion": "1.0.0",
+  "generatedAt": "2026-04-18T10:00:00.000Z",
+  "settings": {
+    "catchTrialEveryN": 7,
+    "fixationAlertMs": 1500,
+    "fixationAlertMessage": "Keep your eye on the fixation point",
+    "speedPreset": {
+      "override": false,
+      "stimulusMs": 500,
+      "responseMs": 1400,
+      "gapMinMs": 350,
+      "gapMaxMs": 650
+    },
+    "backgroundShade": "dark"
+  }
+}
+```
+
+- `settings` carries every field — not just the ones that differ from defaults — so the file doubles as a discoverable schema. A recipient can open the JSON and immediately see every knob they could turn.
+- The import path also accepts partial settings (old exports, hand-written files), filling in defaults for anything left out.
+- The import path requires `vfcSettingsVersion` to start with `"1."` so forward-compatible minor additions (new fields) won't break the parser, but an incompatible major bump will refuse to load.
+- The on-device `localStorage` copy (key `vfc-advanced-settings`) is still stored compactly — only non-default fields are written there, since storage is an implementation detail and small saves are fast.
+- See [`web/src/advancedSettings.tsx`](web/src/advancedSettings.tsx) for the authoritative shape and validation rules.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and pull requests are welcome.

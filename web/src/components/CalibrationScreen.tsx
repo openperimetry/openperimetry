@@ -3,6 +3,7 @@ import type { CalibrationData, Eye } from '../types'
 import { BackButton } from './AccessibleNav'
 import { CALIBRATION } from '../constants'
 import { formatEyeLabelLong } from '../eyeLabels'
+import { AdvancedSettingsPanel } from './AdvancedSettingsPanel'
 
 const CREDIT_CARD_WIDTH_MM = 85.6
 const CREDIT_CARD_HEIGHT_MM = 53.98
@@ -552,6 +553,8 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
               </div>
             )
           })()}
+
+          <AdvancedSettingsPanel />
 
           <button
             onClick={handleScreenDone}

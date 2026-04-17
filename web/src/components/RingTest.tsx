@@ -17,6 +17,7 @@ import type { SurveyResponse } from './PostTestSurvey'
 import { ClinicalDisclaimer } from './ClinicalDisclaimer'
 import { degToPx } from '../geometry'
 import { stimulusDisplayColor } from '../stimulusDisplay'
+import { useAdvancedSettings } from '../advancedSettings'
 
 /**
  * "Ring Test" — user-controlled expanding arc scotoma boundary mapper.
@@ -70,6 +71,16 @@ interface BoundaryEvent {
 }
 
 export function RingTest({ eye, calibration, extendedField, onDone, onComplete }: Props) {
+  // Advanced settings — only background shade is applied here. Ring test
+  // has no catch trials / fixation-alert overlay and does not use the
+  // static speed-preset timings.
+  const advanced = useAdvancedSettings()
+  const bgClass =
+    advanced.backgroundShade === 'light'
+      ? 'bg-gray-400'
+      : advanced.backgroundShade === 'medium'
+        ? 'bg-gray-700'
+        : 'bg-gray-950'
   const [phase, setPhase] = useState<Phase>('instructions')
   const [numSectors, setNumSectors] = useState(DEFAULT_SECTORS)
   const [levelIdx, setLevelIdx] = useState(0)
@@ -662,7 +673,7 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
   // ---- Instructions ----
   if (phase === 'instructions') {
     return (
-      <div className="min-h-screen bg-gray-950 text-white flex items-center justify-center p-6">
+      <div className={`min-h-screen ${bgClass} text-white flex items-center justify-center p-6`}>
         <main className="max-w-sm w-full space-y-8 text-center">
           <div className="w-20 h-20 mx-auto rounded-full bg-blue-600/20 flex items-center justify-center">
             <svg viewBox="0 0 24 24" className="w-10 h-10 text-blue-400" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
@@ -919,7 +930,7 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
   if (phase === 'level-transition') {
     const nextLevel = TEST_LEVELS[levelIdx]
     return (
-      <div className="min-h-screen bg-black text-white relative">
+      <div className={`min-h-screen ${bgClass} text-white relative`}>
         <div
           className="absolute text-center space-y-4 max-w-xs"
           style={{
@@ -954,7 +965,7 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
       ? 'Look at the fixation cross near the top of the screen. This tests your inferior (lower) peripheral field further.'
       : 'Look at the fixation cross near the bottom of the screen. This tests your superior (upper) peripheral field further.'
     return (
-      <div className="min-h-screen bg-black text-white relative">
+      <div className={`min-h-screen ${bgClass} text-white relative`}>
         <div
           className="absolute text-center space-y-4 max-w-xs"
           style={{ left: fixX, top: typeof window !== 'undefined' ? window.innerHeight / 2 : 400, transform: 'translate(-50%, -50%)' }}
@@ -991,7 +1002,7 @@ export function RingTest({ eye, calibration, extendedField, onDone, onComplete }
     }
 
     return (
-      <div className="min-h-screen bg-gray-950 text-white p-6 overflow-y-auto">
+      <div className={`min-h-screen ${bgClass} text-white p-6 overflow-y-auto`}>
         <main className="max-w-lg mx-auto space-y-6 pb-12">
           <h1 className="text-2xl font-semibold text-center">Ring Test Results</h1>
           <p className="text-center text-xs text-gray-500">Ring scotoma boundary test · {formatEyeLabel(eye)}</p>

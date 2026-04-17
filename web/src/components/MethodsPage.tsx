@@ -353,7 +353,20 @@ export function MethodsPage({ onBack }: Props) {
             })()}
           />
           <p className="text-xs text-zinc-500 italic pt-1">
-            These values are tuneable in an upcoming Advanced Settings release.
+            These values are editable per-user in the{' '}
+            <strong className="not-italic text-zinc-300">Advanced test settings</strong>{' '}
+            panel on the calibration <em>Screen calibration</em> step (below
+            the field-coverage preview), and can be exported / imported as
+            JSON — see{' '}
+            <a
+              href="https://github.com/openperimetry/openperimetry#shareable-test-settings"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-accent hover:text-accent-light underline decoration-dotted"
+            >
+              Shareable test settings
+            </a>{' '}
+            in the README for the file format.
           </p>
         </Section>
 

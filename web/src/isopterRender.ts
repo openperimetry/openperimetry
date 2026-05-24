@@ -8,7 +8,7 @@
  * points and a Catmull-Rom closed path suitable for SVG output.
  */
 
-import type { TestPoint, StimulusKey } from './types'
+import type { TestPoint, StimulusKey, CalibrationData } from './types'
 import { ISOPTER_ORDER } from './types'
 import { computeSmoothedBoundary, clampBoundary } from './isopterCalc'
 
@@ -94,4 +94,68 @@ export function computeIsopters(
   }
 
   return results
+}
+
+export interface ScreenBoundary {
+  /** Screen-reachable polygon in radar-image pixel space (72 samples). */
+  points: [number, number][]
+  /** `"x1,y1 x2,y2 ..."` for `<polygon points=...>`. */
+  polygonStr: string
+  /** SVG path `M x y L x y ... Z`. */
+  polygonPath: string
+  /** Evenodd-fill path combining the chart outer circle and the screen
+   *  polygon, so a single `<path>` fills the annulus between them — the
+   *  "not tested beyond screen" mask. */
+  maskPath: string
+}
+
+/** Project the calibrated screen's reachable field onto radar-image pixel
+ *  space. VisualFieldMap and pdfExport.renderRadarImage both consume this
+ *  so the untested-area overlay stays pixel-identical across surfaces.
+ *
+ *  Returns `null` when screen dimensions aren't recorded on the
+ *  calibration (legacy pre-screenWidthPx results) and no fallback is
+ *  supplied — callers should skip the overlay in that case rather than
+ *  guessing. */
+export function computeScreenBoundary(
+  calibration: CalibrationData,
+  center: number,
+  scale: number,
+  radius: number,
+  fallback?: { width: number; height: number },
+): ScreenBoundary | null {
+  const screenW = calibration.screenWidthPx ?? fallback?.width
+  const screenH = calibration.screenHeightPx ?? fallback?.height
+  if (screenW == null || screenH == null) return null
+
+  const pxPerDeg = calibration.pixelsPerDegree
+  const fx = calibration.fixationOffsetPx
+  const halfW = screenW / 2
+  const halfH = screenH / 2
+  const outerR = radius + 5
+  const points = Array.from({ length: 72 }, (_, i) => {
+    const angleDeg = i * 5
+    const rad = (angleDeg * Math.PI) / 180
+    const cos = Math.cos(rad)
+    // SVG y grows downward; flip sin so meridian 90° lands at the top.
+    const sin = -Math.sin(rad)
+    let t = Number.POSITIVE_INFINITY
+    if (cos > 0.001) t = Math.min(t, (halfW - fx) / cos)
+    if (cos < -0.001) t = Math.min(t, (-halfW - fx) / cos)
+    if (sin > 0.001) t = Math.min(t, halfH / sin)
+    if (sin < -0.001) t = Math.min(t, (-halfH) / sin)
+    const eccDeg = t / pxPerDeg
+    const r = Math.min(eccDeg * scale, outerR)
+    return [center + r * Math.cos(rad), center + r * sin] as [number, number]
+  })
+
+  const polygonStr = points.map(([x, y]) => `${x},${y}`).join(' ')
+  const polygonPath = 'M ' + points.map(([x, y]) => `${x} ${y}`).join(' L ') + ' Z'
+  const circlePath =
+    `M ${center + outerR} ${center} ` +
+    `A ${outerR} ${outerR} 0 1 0 ${center - outerR} ${center} ` +
+    `A ${outerR} ${outerR} 0 1 0 ${center + outerR} ${center} Z`
+  const maskPath = `${circlePath} ${polygonPath}`
+
+  return { points, polygonStr, polygonPath, maskPath }
 }

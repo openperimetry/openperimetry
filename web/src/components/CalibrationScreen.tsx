@@ -1,9 +1,40 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+
+// Picks the dimensions the test will actually run in.
+//
+// Desktop: the test enters real fullscreen, so the testable canvas is
+// `screen.width × screen.height` regardless of current window size.
+//
+// Mobile: iPhone Safari can't enter true fullscreen on arbitrary
+// elements (see GoldmannTest comments), so the test runs inside the
+// current viewport — `window.innerWidth × innerHeight`. Just as
+// importantly, `screen.width/height` on iOS Safari does NOT swap on
+// orientation change, so reading from `screen.*` here would freeze the
+// field-coverage diagram in the initial orientation no matter how many
+// `orientationchange` events we listened for. The viewport swaps
+// reliably; the screen object does not.
+function effectiveTestDims(isMobile: boolean): { width: number; height: number } {
+  if (typeof window === 'undefined') return { width: 1440, height: 900 }
+  if (isMobile) return { width: window.innerWidth, height: window.innerHeight }
+  return {
+    width: typeof screen !== 'undefined' ? screen.width : window.innerWidth,
+    height: typeof screen !== 'undefined' ? screen.height : window.innerHeight,
+  }
+}
 import type { CalibrationData, Eye } from '../types'
 import { BackButton } from './AccessibleNav'
 import { CALIBRATION } from '../constants'
 import { formatEyeLabelLong } from '../eyeLabels'
 import { AdvancedSettingsPanel } from './AdvancedSettingsPanel'
+import { useAdvancedSettings } from '../advancedSettings'
+import { STATIC_GRID_INFO, countCustomGridPoints } from '../grids'
+import { useStudyMode } from '../studyMode'
+import {
+  addScreen,
+  clearActiveScreen,
+  getActiveScreen,
+  updateScreen,
+} from '../screenCalibration'
 
 const CREDIT_CARD_WIDTH_MM = 85.6
 const CREDIT_CARD_HEIGHT_MM = 53.98
@@ -13,15 +44,13 @@ interface Props {
   eye: Eye
   onCalibrated: (cal: CalibrationData, extendedField: boolean) => void
   onBack: () => void
-  /** Skip reaction time calibration (e.g. for ring test where user controls pacing) */
+  /** Skip reaction time calibration (e.g. for static test where user controls pacing) */
   skipReactionTime?: boolean
   /** Test mode label for the summary screen */
-  testMode?: 'goldmann' | 'ring' | 'static'
-  /** Mobile phone mode — simplified calibration, short viewing distance */
-  mobileMode?: boolean
+  testMode?: 'goldmann' | 'static'
 }
 
-type Step = 'mobile' | 'screen' | 'distance' | 'brightness' | 'reaction' | 'ready'
+type Step = 'screen' | 'distance' | 'brightness' | 'reaction' | 'ready'
 
 function StepProgress({ current, total }: { current: number; total: number }) {
   const pct = Math.round((current / total) * 100)
@@ -41,42 +70,122 @@ function StepProgress({ current, total }: { current: number; total: number }) {
   )
 }
 
-export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime, testMode, mobileMode }: Props) {
-  const [step, setStep] = useState<Step>(mobileMode ? 'mobile' : 'screen')
-  // screen (card) + distance + brightness + (reaction?) + ready
-  const totalSteps = skipReactionTime ? 4 : 5
+export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime, testMode }: Props) {
+  // Pull the live static-grid pattern and custom-grid params so the
+  // "Ready to test" summary can show the exact grid (and point count)
+  // the user will run, rather than claiming a generic "54 points".
+  const advanced = useAdvancedSettings()
+  const studyMode = useStudyMode()
+  const studyLocked = studyMode.enabled && studyMode.profile != null
+  // Reaction-time calibration is opt-in via advanced settings — without
+  // it we use CALIBRATION.DEFAULT_REACTION_TIME_MS so the calibration
+  // flow doesn't make every user sit through 5 RT trials by default.
+  // Static tests skip it unconditionally (they don't reaction-correct
+  // positions) which is what skipReactionTime already encodes.
+  const wantsReactionTime = !skipReactionTime && advanced.measureReactionTime
+
+  // Phones have screens so small that the 20 cm floor still leaves the
+  // narrowest meridian under ~10°. Allow holding the device closer
+  // (down to 10 cm) so handheld users can at least probe the central
+  // field. Desktop/tablet keep the 20 cm floor — moving a laptop that
+  // close is rarely intentional and usually a slider misclick.
+  //
+  // The slider min is separate from the *default* floor: even on phones
+  // we default to ≥20 cm because closer than that the screen sits inside
+  // most adults' near point of accommodation, defocus-blurring every
+  // stimulus into a starburst. Users who specifically want more field
+  // coverage can still drag the slider down to 10.
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+    && navigator.maxTouchPoints > 0
+  const minDistanceCm = isMobile ? 10 : 20
+  const defaultMinDistanceCm = 20
+
+  const [savedScreenCal, setSavedScreenCal] = useState(() => getActiveScreen())
+  // Skip whichever calibration steps already have a clinic-saved value.
+  // Order is screen → distance → brightness → (reaction) → ready, so we
+  // jump to the first un-saved step.
+  const initialStep: Step = !savedScreenCal
+    ? 'screen'
+    : savedScreenCal.viewingDistanceCm == null
+      ? 'distance'
+      : savedScreenCal.brightnessFloor == null
+        ? 'brightness'
+        : !wantsReactionTime
+          ? 'ready'
+          : 'reaction'
+  const [step, setStep] = useState<Step>(initialStep)
+  // screen (card) + distance + brightness + (reaction?) + ready.
+  // Blindspot position verification happens in the test component itself
+  // (as the `position-check` phase) right before the countdown fires, so
+  // the patient doesn't have to re-settle between "confirm distance" and
+  // "sit for the test". See components/PositionCheckOverlay.tsx.
+  const totalSteps = wantsReactionTime ? 5 : 4
   const stepNumber =
-    step === 'mobile' ? 1 :
     step === 'screen' ? 1 :
     step === 'distance' ? 2 :
     step === 'brightness' ? 3 :
     step === 'reaction' ? 4 :
     totalSteps
 
-  // Screen calibration
-  const [cardWidthPx, setCardWidthPx] = useState(320)
-  // Default viewing distance derived from screen width + initial card
-  // calibration so the farther screen edge subtends ~40° from fixation
-  // (or 25° in phone mode). Users can still override with the +/− buttons
-  // or the "use suggested" link below; this just picks a good starting
-  // value instead of the old hardcoded 50 cm which was wrong for small
-  // laptops and short for 27" monitors.
+  // Screen calibration — pre-fill from the active clinic-saved workstation
+  // if one exists for this display, so a workstation that's already been
+  // calibrated doesn't have to redo it before every test.
+  const [cardWidthPx, setCardWidthPx] = useState(() => savedScreenCal?.cardWidthPx ?? 320)
+  // Default viewing distance derived from screen width AND height + initial
+  // card calibration so the narrowest useful meridian (temporal + vertical)
+  // subtends ~40° from fixation. Users can still override with the +/−
+  // buttons or the "use suggested" link below; this just picks a good
+  // starting value instead of the old hardcoded 50 cm which was wrong for
+  // small laptops and short for 27" monitors.
+  //
+  // Why both dimensions: on 16:9 screens, halfHeight is only ~0.56·halfWidth,
+  // so a distance chosen from width alone leaves the vertical field at
+  // ~25°, which trips the III4e coverage heads-up on the user's screen even
+  // at the "suggested" distance. Extended mode is not considered here because
+  // extendedField starts false; once the user toggles it the suggestion in
+  // the UI recomputes and updates live.
   const [distanceCm, setDistanceCm] = useState<number>(() => {
-    if (mobileMode) return 5
+    if (savedScreenCal?.viewingDistanceCm != null) return savedScreenCal.viewingDistanceCm
     const defaultPxPerMm = 320 / CREDIT_CARD_WIDTH_MM
-    const screenWidthPx = typeof screen !== 'undefined' ? screen.width : (typeof window !== 'undefined' ? window.innerWidth : 1440)
+    const { width: screenWidthPx, height: screenHeightPx } = effectiveTestDims(isMobile)
     const screenWidthCm = screenWidthPx / defaultPxPerMm / 10
+    const screenHeightCm = screenHeightPx / defaultPxPerMm / 10
     const targetAngleDeg = 40
-    const raw = (screenWidthCm / 2) / Math.tan((targetAngleDeg * Math.PI) / 180)
-    return Math.max(20, Math.min(100, Math.round(raw / 5) * 5))
+    const tan = Math.tan((targetAngleDeg * Math.PI) / 180)
+    // Fixation is shifted 20% toward nose → temporal side = 70% of fullWidth.
+    // Vertical is halfHeight in normal (non-extended) mode.
+    const temporalCm = screenWidthCm * 0.7
+    const verticalCm = screenHeightCm * 0.5
+    const raw = Math.min(temporalCm, verticalCm) / tan
+    return Math.max(defaultMinDistanceCm, Math.min(100, Math.round(raw / 5) * 5))
   })
 
   // Brightness calibration
-  const [brightness, setBrightness] = useState(0.5)
-  const [brightnessFloor, setBrightnessFloor] = useState(0.04)
+  const [brightness, setBrightness] = useState(() => savedScreenCal?.brightnessFloor ?? 0.5)
+  const [brightnessFloor, setBrightnessFloor] = useState(() => savedScreenCal?.brightnessFloor ?? 0.04)
 
-  // Extended field
-  const [extendedField, setExtendedField] = useState(false)
+  // Extended field — default on for phones, where the screen barely
+  // covers the central 30° even in landscape; the two shifted-fixation
+  // passes nearly double the vertical reach for ~2 min of extra runtime.
+  // Desktops already have plenty of vertical room so the default stays
+  // off there. Study profile (handled below) overrides this if locked.
+  const [extendedField, setExtendedField] = useState(isMobile)
+
+  // Re-render the field-coverage diagram when the viewport rotates or
+  // resizes. The diagram reads window/screen dimensions directly in
+  // render to project the testable polygon, so without this listener a
+  // phone flipped portrait→landscape would keep showing the portrait
+  // field shape until something else triggered a re-render.
+  const [, setViewportTick] = useState(0)
+  useEffect(() => {
+    const onResize = () => setViewportTick(t => t + 1)
+    window.addEventListener('resize', onResize)
+    window.addEventListener('orientationchange', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      window.removeEventListener('orientationchange', onResize)
+    }
+  }, [])
 
   // Reaction time calibration
   const [rtStarted, setRtStarted] = useState(false)
@@ -86,19 +195,14 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   const rtStartRef = useRef(0)
   const rtTimeoutRef = useRef(0)
 
-  // Mobile mode: pixel calibration bar length (user adjusts to match 1cm on screen)
-  const [mobileBarPx, setMobileBarPx] = useState(100)
-
   const cardHeightPx = cardWidthPx * (CREDIT_CARD_HEIGHT_MM / CREDIT_CARD_WIDTH_MM)
-  // In mobile mode, derive pxPerMm from the calibration bar (mobileBarPx = 10mm = 1cm)
-  const pxPerMm = mobileMode ? mobileBarPx / 10 : cardWidthPx / CREDIT_CARD_WIDTH_MM
+  const pxPerMm = cardWidthPx / CREDIT_CARD_WIDTH_MM
   const pxPerDeg = pxPerMm * (distanceCm * 10) * Math.tan(Math.PI / 180)
 
-  // Shift fixation toward the nose side so the temporal field (larger in RP) gets more screen
-  // In mobile mode, use a smaller offset (10%) since the screen is small
+  // Shift fixation toward the nose side so the temporal field (larger in RP) gets more screen.
   const fixationOffsetPx = eye === 'right'
-    ? -Math.round(window.innerWidth * (mobileMode ? 0.1 : 0.2))
-    : Math.round(window.innerWidth * (mobileMode ? 0.1 : 0.2))
+    ? -Math.round(window.innerWidth * 0.2)
+    : Math.round(window.innerWidth * 0.2)
 
   // maxEcc is the MAXIMUM distance from fixation to any screen edge.
   // Dots start at the screen edge for each meridian (computed per-direction in GoldmannTest),
@@ -114,12 +218,31 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
     ? [...rtTimes].sort((a, b) => a - b)[Math.floor(rtTimes.length / 2)]
     : CALIBRATION.DEFAULT_REACTION_TIME_MS
 
-  const handleScreenDone = () => setStep('distance')
+  const handleScreenDone = () => {
+    // Persist the freshly-confirmed card size so subsequent tests on
+    // this workstation can skip the screen step entirely. If no
+    // workstation entry exists yet, create an implicit default one so
+    // non-clinician users still get the reuse benefit.
+    if (savedScreenCal) {
+      const updated = updateScreen(savedScreenCal.id, { cardWidthPx })
+      if (updated) setSavedScreenCal(updated)
+    } else {
+      setSavedScreenCal(addScreen({ label: 'This workstation', cardWidthPx }))
+    }
+    setStep('distance')
+  }
+  const handleRecalibrateScreen = () => {
+    // Drop the active selection — the bank-card step will then run
+    // from scratch and re-create / re-stamp the workstation entry.
+    clearActiveScreen()
+    setSavedScreenCal(null)
+    setStep('screen')
+  }
   const handleDistanceDone = () => setStep('brightness')
 
   const handleBrightnessDone = () => {
     setBrightnessFloor(brightness)
-    if (skipReactionTime) {
+    if (!wantsReactionTime) {
       // Skip reaction time — go straight to ready with a default value
       setStep('ready')
       return
@@ -164,6 +287,11 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rtStarted])
 
+  useEffect(() => {
+    if (!studyLocked || !studyMode.profile || testMode !== 'goldmann') return
+    setExtendedField(studyMode.profile.extendedField)
+  }, [studyLocked, studyMode.profile, testMode])
+
   // Cleanup timeout on unmount only
   useEffect(() => {
     return () => clearTimeout(rtTimeoutRef.current)
@@ -190,15 +318,14 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
       brightnessFloor,
       reactionTimeMs: medianRt,
       fixationOffsetPx,
-      screenWidthPx: typeof screen !== 'undefined' ? screen.width : window.innerWidth,
-      screenHeightPx: typeof screen !== 'undefined' ? screen.height : window.innerHeight,
+      screenWidthPx: effectiveTestDims(isMobile).width,
+      screenHeightPx: effectiveTestDims(isMobile).height,
       sphericityCorrection: true,
     }, extendedField)
   }
 
-  // Screen size quality assessment — detect actual mobile vs just a small window
-  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
-    && navigator.maxTouchPoints > 0
+  // Screen size quality assessment — `isMobile` is computed at the top
+  // of the function so the distance picker can use it for the floor.
   const isSmallWindow = !isMobile && (window.innerWidth < 900 || window.innerHeight < 600)
 
   // Per-direction field coverage (degrees from fixation to each edge)
@@ -210,95 +337,6 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   // For the tested eye: map left/right to nasal/temporal
   const fieldTemporal = eye === 'right' ? fieldRight : fieldLeft
   const fieldNasal = eye === 'right' ? fieldLeft : fieldRight
-
-  // ==================== MOBILE CALIBRATION ====================
-  if (step === 'mobile') {
-    return (
-      <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
-        <main className="max-w-lg w-full space-y-6">
-          <BackButton onClick={onBack} />
-
-          <div>
-            <p className="text-xs text-zinc-500 mb-1">Phone mode — calibration</p>
-            <h1 className="text-2xl font-heading font-bold">Screen &amp; distance</h1>
-          </div>
-
-          <div className="bg-amber-900/15 border border-amber-700/30 rounded-xl px-4 py-3 text-xs space-y-1.5">
-            <p className="text-amber-400 font-medium">Hold phone in landscape</p>
-            <p className="text-amber-400/70">
-              Close one eye and hold the phone close (1–10 cm). Only the central
-              ~{Math.floor(Math.min(fieldUp, Math.min(fieldLeft, fieldRight)))}° of your visual field will be tested.
-            </p>
-          </div>
-
-          {/* 1cm calibration bar */}
-          <div className="space-y-3">
-            <p className="text-sm text-zinc-300">
-              Drag until the bar below is exactly <strong>1 cm</strong> long (use a ruler or coin for reference).
-            </p>
-            <div className="flex justify-center items-center h-12">
-              <div
-                className="h-3 bg-blue-400 rounded-full"
-                style={{ width: mobileBarPx }}
-              />
-            </div>
-            <div className="flex items-center gap-2 text-xs text-zinc-500 justify-center">
-              <span>← 1 cm →</span>
-            </div>
-            <input
-              type="range"
-              min={30}
-              max={200}
-              value={mobileBarPx}
-              onChange={e => setMobileBarPx(Number(e.target.value))}
-              aria-label="Calibration bar width — adjust to match 1 cm"
-              className="w-full accent-amber-500"
-            />
-          </div>
-
-          {/* Distance */}
-          <div className="space-y-3">
-            <p className="text-sm text-zinc-300">
-              How far is the phone from your eye?
-            </p>
-            <div className="flex items-center gap-3">
-              <input
-                type="range"
-                min={1}
-                max={10}
-                step={0.5}
-                value={distanceCm}
-                onChange={e => setDistanceCm(Number(e.target.value))}
-                aria-label={`Phone viewing distance: ${distanceCm} cm`}
-                className="flex-1 accent-amber-500"
-              />
-              <span className="text-accent-light font-mono w-16 text-right">{distanceCm} cm</span>
-            </div>
-            <div className="text-xs text-zinc-500 flex justify-between">
-              <span>1 cm (very close)</span>
-              <span>10 cm</span>
-            </div>
-          </div>
-
-          {/* Field coverage preview */}
-          <div className="bg-surface rounded-2xl border border-white/[0.06] px-4 py-3 text-xs space-y-1">
-            <p className="text-zinc-400 font-medium">Estimated coverage</p>
-            <p className="text-zinc-500">
-              Central ~{Math.floor(Math.min(fieldUp, Math.min(fieldLeft, fieldRight)))}° from fixation
-              ({fieldTemporal}° temporal, {fieldNasal}° nasal, {fieldUp}° up/down)
-            </p>
-          </div>
-
-          <button
-            onClick={() => setStep('brightness')}
-            className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
-          >
-            Next
-          </button>
-        </main>
-      </div>
-    )
-  }
 
   // ==================== STEP 1: Screen ====================
   if (step === 'screen') {
@@ -354,7 +392,16 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
             />
           </div>
 
-          <AdvancedSettingsPanel />
+          {studyLocked && studyMode.profile ? (
+            <div className="rounded-xl border border-teal/20 bg-teal/10 px-4 py-3 text-sm space-y-1">
+              <p className="font-medium text-teal">Study profile active</p>
+              <p className="text-teal/80 text-xs leading-relaxed">
+                {studyMode.profile.label} ({studyMode.profile.id}, v{studyMode.profile.version}) locks advanced settings for this run.
+              </p>
+            </div>
+          ) : (
+            <AdvancedSettingsPanel testMode={testMode} />
+          )}
 
           <button
             onClick={handleScreenDone}
@@ -375,13 +422,52 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
 
           <h1 className="text-2xl font-heading font-bold">Viewing distance</h1>
 
+          {/* Rotate-to-landscape nudge — only on phones, only while
+              portrait. The field-coverage diagram below shows the same
+              info quantitatively, but a lot of users won't connect "T 8°"
+              to "I should turn my phone sideways" without an explicit
+              prompt. Re-renders via the viewport-tick effect set up
+              above, so flipping the phone hides the card immediately. */}
+          {isMobile && window.innerHeight > window.innerWidth && (
+            <div className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-3 flex items-center gap-3">
+              <svg width="52" height="32" viewBox="0 0 52 32" fill="none" className="text-accent flex-shrink-0" aria-hidden="true">
+                {/* Portrait phone (faded) */}
+                <rect x="3" y="3" width="11" height="22" rx="1.5" stroke="currentColor" strokeWidth="1.5" strokeOpacity="0.55" fill="none" />
+                <line x1="6.5" y1="6" x2="10.5" y2="6" stroke="currentColor" strokeWidth="1" strokeOpacity="0.55" strokeLinecap="round" />
+                {/* Arrow */}
+                <path d="M 19 14 L 30 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                <path d="M 27 11 L 30 14 L 27 17" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                {/* Landscape phone */}
+                <rect x="34" y="8" width="15" height="13" rx="1.5" stroke="currentColor" strokeWidth="1.5" fill="none" />
+                <line x1="37" y1="11" x2="37" y2="18" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
+              </svg>
+              <div className="text-sm">
+                <p className="text-zinc-100 font-medium">Turn your phone sideways</p>
+                <p className="text-zinc-400 text-xs mt-0.5">Landscape gives you a wider field to test.</p>
+              </div>
+            </div>
+          )}
+
+          {savedScreenCal && (
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-teal/20 bg-teal/10 px-3 py-2 text-xs text-teal/90">
+              <span>Using saved screen calibration for this display.</span>
+              <button
+                type="button"
+                onClick={handleRecalibrateScreen}
+                className="text-teal hover:text-teal/80 underline decoration-dotted"
+              >
+                recalibrate
+              </button>
+            </div>
+          )}
+
           <div className="space-y-2">
             <p className="text-sm text-zinc-300">
               How far is your eye from the screen?
             </p>
             <div className="flex items-center gap-3">
               <button
-                onClick={() => setDistanceCm(d => Math.max(20, d - 5))}
+                onClick={() => setDistanceCm(d => Math.max(minDistanceCm, d - 5))}
                 className="w-11 h-11 rounded bg-elevated hover:bg-overlay text-lg"
                 aria-label="Decrease viewing distance"
               >−</button>
@@ -392,28 +478,45 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
                 aria-label="Increase viewing distance"
               >+</button>
             </div>
-            {/* Suggested distance — computed from screen width + card
-                calibration so the edges of the monitor subtend a clinically
-                useful angle (target: ~40° from fixation to the farther
-                screen edge, ~25° for phone mode). The formula is
-                distance = halfScreenWidth_cm / tan(targetAngle). Rounded
-                to the nearest 5 cm. Offered as a suggestion with a
-                one-tap apply button rather than forced, so advanced users
-                can still choose their own distance. */}
+            {/* Suggested distance — computed from screen size + card
+                calibration so the narrowest useful meridian (temporal and
+                vertical; nasal excluded because fixation is offset 20%
+                toward the nose) reaches a clinically useful angle
+                (~40° from fixation). Taking vertical into account matters
+                on 16:9 screens where halfHeight is only ~0.56·halfWidth —
+                a width-only suggestion would still put vertical reach at
+                ~25° and trip the coverage heads-up. Extended-field mode
+                (Goldmann only) shifts fixation ±30% of fullHeight so the
+                vertical constraint is relaxed to halfH + 0.3·fullH; this
+                recomputes live when the toggle changes. Rounded to the
+                nearest 5 cm and offered with a one-tap apply button so
+                advanced users can still pick their own distance. */}
             {(() => {
-              const screenWidthPx = typeof screen !== 'undefined' ? screen.width : window.innerWidth
+              const { width: screenWidthPx, height: screenHeightPx } = effectiveTestDims(isMobile)
               const screenWidthCm = pxPerMm > 0 ? screenWidthPx / pxPerMm / 10 : 0
-              const targetAngleDeg = mobileMode ? 25 : 40
-              const rawSuggested = (screenWidthCm / 2) / Math.tan((targetAngleDeg * Math.PI) / 180)
-              const suggested = Math.max(20, Math.min(100, Math.round(rawSuggested / 5) * 5))
+              const screenHeightCm = pxPerMm > 0 ? screenHeightPx / pxPerMm / 10 : 0
+              const targetAngleDeg = 40
+              const tan = Math.tan((targetAngleDeg * Math.PI) / 180)
+              const temporalCm = screenWidthCm * 0.7
+              const verticalFraction = testMode === 'goldmann' && extendedField ? 0.8 : 0.5
+              const verticalCm = screenHeightCm * verticalFraction
+              const limitCm = Math.min(temporalCm, verticalCm)
+              const rawSuggested = limitCm / tan
+              const suggested = Math.max(defaultMinDistanceCm, Math.min(100, Math.round(rawSuggested / 5) * 5))
               if (screenWidthCm < 5) return null  // card not yet calibrated
               const isMatch = Math.abs(suggested - distanceCm) <= 2
+              // Compute the angle that the *clamped* suggested distance
+              // actually achieves on the narrowest meridian. On small
+              // phones the unclamped raw is well under 20 cm, so the
+              // clamp leaves the achievable field at, say, ~25–30°, not
+              // 40°. Report the truth instead of the wish.
+              const achievedAngleDeg = Math.round((Math.atan(limitCm / suggested) * 180) / Math.PI)
               return (
                 <div className="text-[11px] text-zinc-500 flex items-center gap-2">
                   <span>
                     Suggested: <span className="text-zinc-300 font-mono">{suggested} cm</span>{' '}
                     <span className="text-zinc-600">
-                      (so the screen edge reaches ~{targetAngleDeg}° from fixation)
+                      (field reaches ~{achievedAngleDeg}° on all sides except the nose)
                     </span>
                   </span>
                   {!isMatch && (
@@ -432,8 +535,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
 
           {/* Live field coverage diagram — updates with distance & card size */}
           {(() => {
-            const fullW = typeof screen !== 'undefined' ? screen.width : window.innerWidth
-            const fullH = typeof screen !== 'undefined' ? screen.height : window.innerHeight
+            const { width: fullW, height: fullH } = effectiveTestDims(isMobile)
             const fullFixX = fullW / 2 + fixationOffsetPx
             const fTemporal = eye === 'right'
               ? Math.floor((fullW - fullFixX) / pxPerDeg)
@@ -441,7 +543,17 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
             const fNasal = eye === 'right'
               ? Math.floor(fullFixX / pxPerDeg)
               : Math.floor((fullW - fullFixX) / pxPerDeg)
-            const fUp = Math.floor((fullH / 2) / pxPerDeg)
+            // Extended-field mode (Goldmann only) runs two extra passes
+            // with fixation shifted ±30% of fullHeight, so achievable
+            // vertical reach becomes halfH + 0.3·fullH. Horizontal reach
+            // is unchanged because we only shift the fixation dot
+            // vertically between passes. Reflect the achievable number
+            // here so the T·N·S·I readout matches what the test will
+            // actually probe.
+            const verticalReachPx = testMode === 'goldmann' && extendedField
+              ? fullH / 2 + fullH * 0.3
+              : fullH / 2
+            const fUp = Math.floor(verticalReachPx / pxPerDeg)
             const fDown = fUp
             const diagramMax = 100
             const dScale = 120 / diagramMax
@@ -549,11 +661,11 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
                   T {fTemporal}° · N {fNasal}° · S {fUp}° · I {fDown}°
                 </p>
 
-                {/* Extended field toggle — Goldmann only. Ring and
-                    Static tests don't implement the extra extended-field
-                    passes, so the option is hidden for those test types
-                    to avoid offering a setting that would have no effect. */}
-                {testMode === 'goldmann' && (
+                {/* Extended field toggle — Goldmann only. Static test
+                    doesn't implement the extra extended-field passes, so
+                    the option is hidden for it to avoid offering a
+                    setting that would have no effect. */}
+                {testMode === 'goldmann' && !studyLocked && (
                   <button
                     onClick={() => setExtendedField(v => !v)}
                     role="switch"
@@ -579,7 +691,71 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
                     </div>
                   </button>
                 )}
+                {testMode === 'goldmann' && studyLocked && studyMode.profile && (
+                  <div className="w-full rounded-xl border border-teal/20 bg-teal/10 px-4 py-3 text-left">
+                    <p className="font-medium text-xs text-teal">Extended field mode</p>
+                    <p className="mt-0.5 text-xs text-teal/80">
+                      Locked by study profile: {studyMode.profile.extendedField ? 'enabled' : 'disabled'}.
+                    </p>
+                  </div>
+                )}
               </div>
+            )
+          })()}
+
+          {/* Goldmann coverage note. Sits underneath the coverage diagram
+              so the user can adjust distance in place.
+              Trigger: III4e (clinical-standard isopter) can't be bounded
+              in one of the meridians that actually matters for RP
+              monitoring — temporal, superior, inferior. Nasal is excluded
+              on purpose:
+              - Fixation is deliberately shifted 20% toward the nose so
+                the temporal half of the screen gets more visual angle.
+                That means nasal reach is ~0.3·fullW/distance, always
+                less than temporal. Any "suggested" viewing distance
+                that puts the temporal edge at 40° puts the nasal edge
+                at only ~27° — it would trip this warning on every
+                reasonable setup, drowning out real ones.
+              - Nasal III4e is also anatomically capped near the nose,
+                so the number we can actually measure saturates.
+              V4e is also excluded: its temporal-side extent (≥90° in a
+              healthy eye) is unreachable on essentially any consumer
+              display at any sane viewing distance, and flagging it is
+              noise for the same reason.
+              Extended-field mode runs 2 extra passes with fixation
+              shifted ±30% of screen height, so achievable UP/DOWN
+              extents reach halfH + 0.3·fullH. Horizontal extents don't
+              change. Factor that in so the note clears when a
+              purely-vertical shortfall is covered by extended mode. */}
+          {testMode === 'goldmann' && (() => {
+            const { width: fullW, height: fullH } = effectiveTestDims(isMobile)
+            const fullFixX = fullW / 2 + fixationOffsetPx
+            const fTemporal = eye === 'right'
+              ? Math.floor((fullW - fullFixX) / pxPerDeg)
+              : Math.floor(fullFixX / pxPerDeg)
+            const verticalReachPx = extendedField
+              ? fullH / 2 + fullH * 0.3
+              : fullH / 2
+            const fUp = Math.floor(verticalReachPx / pxPerDeg)
+            const fDown = fUp
+            // Nasal deliberately not in this min — see comment above.
+            const narrowest = Math.min(fTemporal, fUp, fDown)
+            // III4e trigger threshold: healthy outer extent ~40°. Below
+            // that, the clinical-standard isopter can't be fully plotted.
+            if (narrowest >= 40) return null
+            // Vertical-only shortfall → extended mode would fix it.
+            const vertLimited = !extendedField && fTemporal >= 40
+            return (
+              <p className="text-xs text-zinc-500 leading-relaxed">
+                <span className="text-zinc-400">Heads-up:</span> your screen
+                only reaches {narrowest}° from the yellow dot (not counting
+                the nose side, which is naturally blocked by your nose), so
+                parts of the outer field can't be fully tested — results
+                there will say "at least N°" instead of a precise edge.
+                {vertLimited
+                  ? ' Turn on extended-field mode above, or move closer and bump the distance down, to test more of the field.'
+                  : ' Move closer and bump the distance down to test more of the field.'}
+              </p>
             )
           })()}
 
@@ -591,6 +767,14 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
       </div>
     )
   }
+
+  // NOTE: Blindspot position verification used to live here as a dedicated
+  // calibration step, but it's been moved into the test component itself
+  // (see PositionCheckOverlay) so it fires right before the countdown —
+  // the patient reads "cover your X eye and sit at Y cm" on the test-
+  // instructions screen, taps Ready, and the position check runs in-place
+  // instead of mid-calibration where the user would have to re-settle
+  // before the actual measurement begins.
 
   // ==================== STEP 3: Brightness ====================
   if (step === 'brightness') {
@@ -647,7 +831,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
     )
   }
 
-  // ==================== STEP 3: Reaction time ====================
+  // ==================== STEP 4: Reaction time ====================
   if (step === 'reaction') {
     if (rtPhase === 'done' || rtTimes.length >= RT_TRIALS) {
       return (
@@ -704,7 +888,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
               <div className="bg-surface rounded-2xl border border-white/[0.06] p-4 space-y-2">
                 <p>1. Stare at the center of the screen</p>
                 <p>2. A white dot will appear after a random delay</p>
-                <p>3. <strong className="text-white">Tap the screen or press Space</strong> as fast as you can when you see it</p>
+                <p>3. <strong className="text-white">{isMobile ? 'Tap the screen' : 'Tap the screen or press Space'}</strong> as fast as you can when you see it</p>
               </div>
               <p className="text-zinc-500 text-xs">
                 Your reaction time is used to compensate for response delay during the visual field test, improving accuracy.
@@ -733,7 +917,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
           <p className="text-zinc-400 text-sm max-w-xs mx-auto" aria-live="assertive">
             {rtPhase === 'waiting'
               ? 'Wait for the dot to appear…'
-              : 'Press Space or tap NOW!'}
+              : isMobile ? 'Tap NOW!' : 'Press Space or tap NOW!'}
           </p>
 
           {/* Dot area */}
@@ -751,18 +935,18 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
     )
   }
 
-  // ==================== STEP 4: Ready ====================
+  // ==================== STEP 5: Ready ====================
   return (
     <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
       <main className="max-w-lg w-full space-y-8">
-        <BackButton onClick={() => setStep(skipReactionTime ? 'brightness' : 'reaction')} />
+        <BackButton onClick={() => setStep(wantsReactionTime ? 'reaction' : 'brightness')} />
 
         <h1 className="text-2xl font-heading font-bold">Ready to test</h1>
 
         <div className="bg-surface rounded-2xl border border-white/[0.06] p-5 space-y-3 text-sm">
           <div className="flex justify-between">
             <span className="text-zinc-400">Test type</span>
-            <span>{testMode === 'static' ? 'Static test' : testMode === 'ring' ? 'Ring test' : 'Goldmann (kinetic)'}</span>
+            <span>{testMode === 'static' ? 'Static test' : 'Goldmann (kinetic)'}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-zinc-400">Eye</span>
@@ -776,20 +960,49 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
             <span className="text-zinc-400">Brightness floor</span>
             <span className="font-mono">{(brightnessFloor * 100).toFixed(1)}%</span>
           </div>
-          {!skipReactionTime && (
+          {wantsReactionTime && (
             <div className="flex justify-between">
               <span className="text-zinc-400">Reaction time</span>
               <span className="font-mono">{medianRt.toFixed(0)} ms (+{((3 * medianRt) / 1000).toFixed(1)}°)</span>
             </div>
           )}
-          <div className="flex justify-between">
-            <span className="text-zinc-400">Stimuli</span>
-            <span>V4e, III4e, III2e, I4e, I2e</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-zinc-400">{skipReactionTime ? 'Pacing' : 'Adaptive'}</span>
-            <span>{skipReactionTime ? 'User-controlled — no time pressure' : 'Yes — problem areas retested'}</span>
-          </div>
+          {testMode === 'static' ? (
+            <>
+              <div className="flex justify-between">
+                <span className="text-zinc-400">Grid</span>
+                <span>
+                  {STATIC_GRID_INFO[advanced.staticGridPattern].label} —{' '}
+                  {advanced.staticGridPattern === 'custom'
+                    ? countCustomGridPoints(advanced.customGrid)
+                    : STATIC_GRID_INFO[advanced.staticGridPattern].points}
+                  {' '}points
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-400">Stimuli</span>
+                <span>Goldmann III, 0–35 dB</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-400">Staircase</span>
+                <span>4-2 dB adaptive</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-400">Pacing</span>
+                <span>Timed flashes — tap when seen</span>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex justify-between">
+                <span className="text-zinc-400">Stimuli</span>
+                <span>V4e, III4e, III2e, I4e, I2e</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-400">Adaptive</span>
+                <span>Yes — problem areas retested</span>
+              </div>
+            </>
+          )}
         </div>
 
         {/* Test instructions */}
@@ -805,22 +1018,32 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
             <span className="text-green-400 mt-0.5">&#9673;</span>
             <p><span className="text-zinc-300 font-medium">Fixation.</span> Keep your eye fixed on the yellow dot during the test. Only press when you see a stimulus in your peripheral vision.</p>
           </div>
-          <div className="flex gap-2 items-start">
-            <span className="text-zinc-500 mt-0.5">&#9099;</span>
-            <p>
-              <span className="text-zinc-300 font-medium">Pause or leave.</span> Press{' '}
-              <kbd className="px-1.5 py-0.5 bg-zinc-800 border border-white/[0.06] rounded text-[10px] font-mono text-zinc-300">Esc</kbd>{' '}
-              any time to pause the test or exit.
-            </p>
-          </div>
+          {!isMobile && (
+            <div className="flex gap-2 items-start">
+              <span className="text-zinc-500 mt-0.5">&#9099;</span>
+              <p>
+                <span className="text-zinc-300 font-medium">Pause or leave.</span> Press{' '}
+                <kbd className="px-1.5 py-0.5 bg-zinc-800 border border-white/[0.06] rounded text-[10px] font-mono text-zinc-300">Esc</kbd>{' '}
+                any time to pause the test or exit.
+              </p>
+            </div>
+          )}
         </div>
 
+        {/* Duration estimates are advertised on the home screen next to
+            the speed toggle — no need to repeat them here and risk the
+            two surfaces drifting out of sync. */}
         <p className="text-xs text-zinc-500">
-          {skipReactionTime
-            ? 'Expand the ring outward in each sector. Mark where it disappears and reappears. Takes 2–4 minutes.'
-            : `The test runs in phases: initial scan, adaptive refinement, outer boundary, sensitivity, and central detail.${extendedField ? ' Plus 2 extended-field passes (up/down).' : ''} Takes about ${extendedField ? '5–8' : '4–6'} minutes.`
+          {testMode === 'static'
+            ? 'Briefly-flashed dots at 54 fixed grid points. Tap the screen each time you see one.'
+            : `The test runs in phases: initial scan, adaptive refinement, outer boundary, sensitivity, and central detail.${extendedField ? ' Plus 2 extended-field passes (up/down).' : ''}`
           }
         </p>
+
+        {/* Field-coverage warning ("V4e can't be bounded at this distance")
+            lives on the viewing-distance screen, next to the distance
+            picker, so users can adjust in place instead of navigating
+            back from this summary. */}
 
         <button
           onClick={handleStart}

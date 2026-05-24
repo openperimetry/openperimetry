@@ -11,7 +11,7 @@ test.describe('Test Instructions', () => {
     await page.getByRole('radio', { name: 'Right eye (OD)' }).click()
     await page.getByRole('button', { name: /^Start test/ }).click()
     await page.getByRole('button', { name: 'Next' }).click()
-    await page.getByRole('button', { name: /Confirm/ }).click()
+    await page.getByRole('button', { name: /dimmest.*continue/i }).click()
     // Now on Ready screen
     await page.getByRole('button', { name: 'Start test' }).click()
   })

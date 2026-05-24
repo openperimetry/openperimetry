@@ -9,10 +9,12 @@ import { BackButton } from './AccessibleNav'
 import { VisualFieldMap } from './VisualFieldMap'
 import { SensitivityMap } from './SensitivityMap'
 import { calcIsopterAreas } from '../isopterCalc'
-import { deriveDbFromSuprathreshold } from '../sensitivity'
 import { Interpretation } from './Interpretation'
 import { VisionSimulator } from './VisionSimulator'
 import { STIMULI, ISOPTER_ORDER } from '../types'
+
+/** HFA 24-2 grid fits within ~28° eccentricity; round up for a snug view. */
+const STATIC_MAX_ECC_DEG = 30
 
 interface Props {
   onBack: () => void
@@ -48,6 +50,17 @@ function LazySection({ children, minHeight = 360 }: { children: React.ReactNode;
 
 function ScenarioCard({ scenario, mapSize }: { scenario: ReturnType<typeof getAllScenarios>[number]; mapSize: number }) {
   const areas = useMemo(() => calcIsopterAreas(scenario.points), [scenario.points])
+  const staticDbPoints = useMemo(
+    () =>
+      (scenario.staticPoints ?? [])
+        .filter(p => p.thresholdDb != null)
+        .map(p => ({
+          meridianDeg: p.meridianDeg,
+          eccentricityDeg: p.eccentricityDeg,
+          db: p.thresholdDb!,
+        })),
+    [scenario.staticPoints],
+  )
 
   return (
     <div data-scenario={scenario.id} className="space-y-4 border border-white/[0.06] rounded-2xl p-6 bg-surface/30">
@@ -94,11 +107,17 @@ function ScenarioCard({ scenario, mapSize }: { scenario: ReturnType<typeof getAl
       {/* Heavy components — lazy rendered on scroll */}
       <LazySection>
         <div className="space-y-4">
-          {/* Radar + derived sensitivity heatmap side-by-side — clinician-style
-              two-panel layout. Vision simulator sits below, full width, so
-              the scene photo has enough room to read. */}
+          {/* Goldmann isopters and static sensitivity map side-by-side so
+              the same severity reads the same way across both test types.
+              Each panel has its own title so users can tell the isopter
+              plot from the heatmap at a glance. */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
+            <div className="space-y-2">
+              <h3 className="text-xs uppercase tracking-wider text-zinc-400 text-center">Goldmann</h3>
+              {/* No calibration prop: demo fixtures are synthetic data
+                  with points well beyond any realistic screen boundary,
+                  so the "not tested" overlay would misrepresent the
+                  scenario. Real test results do pass calibration in. */}
               <VisualFieldMap
                 points={scenario.points}
                 eye="right"
@@ -106,13 +125,13 @@ function ScenarioCard({ scenario, mapSize }: { scenario: ReturnType<typeof getAl
                 size={mapSize}
               />
             </div>
-            <div>
+            <div className="space-y-2">
+              <h3 className="text-xs uppercase tracking-wider text-zinc-400 text-center">Static</h3>
               <SensitivityMap
-                points={deriveDbFromSuprathreshold(scenario.points)}
+                points={staticDbPoints}
                 eye="right"
-                maxEccentricity={scenario.maxEccentricity}
+                maxEccentricity={STATIC_MAX_ECC_DEG}
                 size={mapSize}
-                source="derived"
               />
             </div>
           </div>

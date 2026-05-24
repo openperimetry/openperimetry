@@ -7,7 +7,7 @@
  * See `docs/superpowers/plans/2026-04-18-advanced-settings.md` (Task B.1).
  */
 
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import {
   DEFAULT_ADVANCED_SETTINGS,
   SettingsImportError,
@@ -18,14 +18,31 @@ import {
   type AdvancedSettings,
 } from '../advancedSettings'
 import { SPEED_PRESETS, type SpeedPresetName } from '../testDefaults'
+import {
+  CUSTOM_GRID_PRESETS,
+  countCustomGridPoints,
+  generateCustomGrid,
+  type CustomGridParams,
+  type CustomGridPresetName,
+  type StaticGridPattern,
+} from '../grids'
+import { SensitivityFieldPreview } from './SensitivityFieldPreview'
 
 interface Props {
   /** The user's currently-selected speed preset. Used to auto-fill
    *  the speed-override fields when the user first enables the toggle. */
   speedPreset?: SpeedPresetName
+  /** Which test the panel is being shown for. The speed-preset override
+   *  and the static grid pattern selector are only consumed by the
+   *  Static test, so we hide them for Goldmann to avoid presenting
+   *  settings that have no effect on the run the user is about to
+   *  start. Defaults to `'static'` to preserve the existing behaviour
+   *  for callers that don't pass a mode. */
+  testMode?: 'goldmann' | 'static'
 }
 
-export function AdvancedSettingsPanel({ speedPreset = 'normal' }: Props) {
+export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'static' }: Props) {
+  const showStaticOnly = testMode === 'static'
   const settings = useAdvancedSettings()
   const setSettings = useSetAdvancedSettings()
   const [open, setOpen] = useState(false)
@@ -72,6 +89,51 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal' }: Props) {
 
   const reset = () => setSettings(DEFAULT_ADVANCED_SETTINGS)
 
+  // ---------- Custom sensitivity-field generator helpers ----------
+  /** Detect which built-in preset (if any) the current custom-grid
+   *  params match. When nothing matches, the selector shows "Manual"
+   *  and the numeric fields become editable. `'manual'` is a local
+   *  sentinel separate from the `'custom'` staticGridPattern value. */
+  const currentCustomPreset: CustomGridPresetName | 'manual' = useMemo(() => {
+    const g = settings.customGrid
+    for (const name of ['screening', 'fast', 'normal'] as const) {
+      const p = CUSTOM_GRID_PRESETS[name]
+      if (
+        p.spacingXDeg === g.spacingXDeg &&
+        p.spacingYDeg === g.spacingYDeg &&
+        p.extentXDeg === g.extentXDeg &&
+        p.extentYDeg === g.extentYDeg
+      ) {
+        return name
+      }
+    }
+    return 'manual'
+  }, [settings.customGrid])
+
+  const setStaticGridPattern = (pattern: StaticGridPattern) =>
+    update('staticGridPattern', pattern)
+
+  const setCustomGrid = (grid: CustomGridParams) => update('customGrid', grid)
+
+  /** Apply a named preset to the custom-grid params. */
+  const pickCustomPreset = (name: CustomGridPresetName | 'manual') => {
+    if (name === 'manual') return // no-op; user edits fields directly
+    setCustomGrid({ ...CUSTOM_GRID_PRESETS[name] })
+  }
+
+  /** Numeric-field edit helper with inline clamping so a user can't
+   *  type an extent below the half-spacing (which would generate zero
+   *  points) or above the rendered preview's max eccentricity. */
+  const updateCustomField = (field: keyof CustomGridParams, value: number) => {
+    if (!Number.isFinite(value) || value <= 0 || value > 90) return
+    setCustomGrid({ ...settings.customGrid, [field]: value })
+  }
+
+  const customPreviewPoints = useMemo(
+    () => generateCustomGrid(settings.customGrid, 'right'),
+    [settings.customGrid],
+  )
+
   return (
     <div className="bg-surface/60 border border-white/[0.06] rounded-2xl">
       <button
@@ -90,26 +152,94 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal' }: Props) {
           id="advanced-settings-body"
           className="px-4 pb-4 pt-1 space-y-4 text-xs text-zinc-400 border-t border-white/[0.04]"
         >
-          {/* Catch-trial cadence */}
-          <div className="space-y-1">
-            <label htmlFor="adv-catch" className="block text-zinc-300">
-              Catch-trial cadence
-              <span className="ml-1 text-zinc-500 font-normal">
-                (1 blindspot trial every N presentations)
-              </span>
+          {/* Pre-test position screen — shows the HeadGuide profile and
+              the "sit X cm from the screen, cover Y eye" prompt. On by
+              default because the visual is the clearest way to convey
+              the intended posture. */}
+          <div>
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={settings.showPositionGuide}
+                onChange={e => update('showPositionGuide', e.target.checked)}
+                className="w-3.5 h-3.5 rounded accent-indigo-400"
+              />
+              <span className="text-zinc-300">Show position guide before test</span>
             </label>
-            <input
-              id="adv-catch"
-              type="number"
-              min={1}
-              max={50}
-              value={settings.catchTrialEveryN}
-              onChange={e => {
-                const n = Number(e.target.value)
-                if (Number.isInteger(n) && n >= 1 && n <= 50) update('catchTrialEveryN', n)
-              }}
-              className="w-24 px-2 py-1 rounded bg-base border border-white/[0.08] font-mono text-white"
-            />
+          </div>
+
+          {/* Initial blindspot position check — separate from the guide
+              above. Off by default because the dot-check adds a second
+              screen and is most useful for clinic / study workflows. */}
+          <div>
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={settings.initialBlindspotCheck}
+                onChange={e => update('initialBlindspotCheck', e.target.checked)}
+                className="w-3.5 h-3.5 rounded accent-indigo-400"
+              />
+              <span className="text-zinc-300">Blindspot check before test</span>
+            </label>
+          </div>
+
+          {/* Reaction-time calibration — off by default. The Goldmann
+              test reaction-corrects stimulus positions using the median
+              of a 5-trial RT measurement, but for most users the
+              fallback default (CALIBRATION.DEFAULT_REACTION_TIME_MS) is
+              close enough that the extra calibration step felt like
+              friction without a meaningful accuracy gain. Opt in here
+              for users who want the personalised compensation. Has no
+              effect on the static test (which doesn't reaction-correct
+              positions and always skips this step). */}
+          <div>
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={settings.measureReactionTime}
+                onChange={e => update('measureReactionTime', e.target.checked)}
+                className="w-3.5 h-3.5 rounded accent-indigo-400"
+              />
+              <span className="text-zinc-300">Measure my reaction time (Goldmann only)</span>
+            </label>
+            <p className="mt-1 pl-5 text-[11px] leading-relaxed text-zinc-500">
+              Adds a 5-trial reaction-time test to the calibration. When off, a default reaction time is used.
+            </p>
+          </div>
+
+          {/* Blindspot catch trials */}
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={settings.catchTrialsEnabled}
+                onChange={e => update('catchTrialsEnabled', e.target.checked)}
+                className="w-3.5 h-3.5 rounded accent-indigo-400"
+              />
+              <span className="text-zinc-300">Blindspot catch trials</span>
+            </label>
+            {settings.catchTrialsEnabled && (
+              <div className="space-y-1 pl-5">
+                <label htmlFor="adv-catch" className="block text-zinc-400">
+                  Cadence
+                  <span className="ml-1 text-zinc-500 font-normal">
+                    (1 blindspot trial every N presentations)
+                  </span>
+                </label>
+                <input
+                  id="adv-catch"
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={settings.catchTrialEveryN}
+                  onChange={e => {
+                    const n = Number(e.target.value)
+                    if (Number.isInteger(n) && n >= 1 && n <= 50) update('catchTrialEveryN', n)
+                  }}
+                  className="w-24 px-2 py-1 rounded bg-base border border-white/[0.08] font-mono text-white"
+                />
+              </div>
+            )}
           </div>
 
           {/* Fixation-alert duration */}
@@ -148,40 +278,140 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal' }: Props) {
             />
           </div>
 
-          {/* Speed preset */}
-          <div className="space-y-2">
-            <label className="flex items-center gap-2 text-zinc-300">
-              <input
-                type="checkbox"
-                checked={settings.speedPreset.override}
-                onChange={e => toggleSpeedOverride(e.target.checked)}
-                className="accent-amber-500"
-              />
-              Override speed-preset timings
-              <span className="text-zinc-500 font-normal">(static test only)</span>
-            </label>
+          {/* Speed preset — static test only. Goldmann uses a different
+              pacing model (block-sequence shortening) that doesn't read
+              these stimulus/response/gap fields, so hiding them prevents
+              the setting from looking live when it has no effect. */}
+          {showStaticOnly && (
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-zinc-300">
+                <input
+                  type="checkbox"
+                  checked={settings.speedPreset.override}
+                  onChange={e => toggleSpeedOverride(e.target.checked)}
+                  className="accent-amber-500"
+                />
+                Override speed-preset timings
+              </label>
 
-            <div className="grid grid-cols-2 gap-2 pl-6">
-              {(['stimulusMs', 'responseMs', 'gapMinMs', 'gapMaxMs'] as const).map(f => (
-                <label key={f} className="space-y-1">
-                  <span className="block text-zinc-400 text-[11px]">{f}</span>
+              <div className="grid grid-cols-2 gap-2 pl-6">
+                {(['stimulusMs', 'responseMs', 'gapMinMs', 'gapMaxMs'] as const).map(f => (
+                  <label key={f} className="space-y-1">
+                    <span className="block text-zinc-400 text-[11px]">{f}</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={5000}
+                      step={10}
+                      value={settings.speedPreset[f]}
+                      disabled={!settings.speedPreset.override}
+                      onChange={e => {
+                        const n = Number(e.target.value)
+                        if (Number.isInteger(n) && n >= 0 && n <= 5000) updateSpeedField(f, n)
+                      }}
+                      className="w-full px-2 py-1 rounded bg-base border border-white/[0.08] font-mono text-white disabled:opacity-50"
+                    />
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Static grid pattern + parameter-driven custom generator —
+              static test only. The Goldmann kinetic test doesn't use a
+              discrete grid, so this section would be meaningless for it. */}
+          {showStaticOnly && (
+          <fieldset className="space-y-2 pt-2 border-t border-white/[0.04]">
+            <legend className="text-zinc-300">Static grid pattern</legend>
+            <div className="flex gap-3 pt-1 flex-wrap">
+              {(['24-2', '30-2', '10-2', 'custom'] as const).map(p => (
+                <label key={p} className="flex items-center gap-1.5">
                   <input
-                    type="number"
-                    min={0}
-                    max={5000}
-                    step={10}
-                    value={settings.speedPreset[f]}
-                    disabled={!settings.speedPreset.override}
-                    onChange={e => {
-                      const n = Number(e.target.value)
-                      if (Number.isInteger(n) && n >= 0 && n <= 5000) updateSpeedField(f, n)
-                    }}
-                    className="w-full px-2 py-1 rounded bg-base border border-white/[0.08] font-mono text-white disabled:opacity-50"
+                    type="radio"
+                    name="adv-grid-pattern"
+                    value={p}
+                    checked={settings.staticGridPattern === p}
+                    onChange={() => setStaticGridPattern(p)}
+                    className="accent-amber-500"
                   />
+                  {p === 'custom' ? 'Custom' : p}
                 </label>
               ))}
             </div>
-          </div>
+            <p className="text-[11px] text-zinc-500 pl-0">
+              24-2 / 30-2 / 10-2 are the standard clinical grids. Custom uses a
+              parameter-driven generator with configurable spacing and extent.
+            </p>
+
+            {settings.staticGridPattern === 'custom' && (
+              <div className="space-y-3 pt-2 border-t border-white/[0.03]">
+                <div className="flex items-center gap-2">
+                  <label htmlFor="adv-custom-preset" className="text-zinc-300">
+                    Grid preset
+                  </label>
+                  <select
+                    id="adv-custom-preset"
+                    value={currentCustomPreset}
+                    onChange={e => pickCustomPreset(e.target.value as CustomGridPresetName | 'manual')}
+                    className="bg-base border border-white/[0.08] rounded px-2 py-1 text-white"
+                  >
+                    <option value="screening">Screening (48 pts · 7.5° × 6° · ±22.5° × ±24°)</option>
+                    <option value="fast">Fast (6° spacing, ±24°)</option>
+                    <option value="normal">Normal (4° spacing, ±20°)</option>
+                    <option value="manual">Manual</option>
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 pl-0">
+                  {(['spacingXDeg', 'spacingYDeg', 'extentXDeg', 'extentYDeg'] as const).map(f => (
+                    <label key={f} className="space-y-1">
+                      <span className="block text-zinc-400 text-[11px]">
+                        {f.replace('Deg', '')} (°)
+                      </span>
+                      <input
+                        type="number"
+                        min={0.5}
+                        max={90}
+                        step={0.5}
+                        value={settings.customGrid[f]}
+                        disabled={currentCustomPreset !== 'manual'}
+                        onChange={e => updateCustomField(f, Number(e.target.value))}
+                        className="w-full px-2 py-1 rounded bg-base border border-white/[0.08] font-mono text-white disabled:opacity-50"
+                      />
+                    </label>
+                  ))}
+                </div>
+
+                <div className="flex items-start gap-4">
+                  <SensitivityFieldPreview
+                    points={customPreviewPoints}
+                    maxEccentricityDeg={Math.max(
+                      settings.customGrid.extentXDeg,
+                      settings.customGrid.extentYDeg,
+                    ) + 4}
+                    size={180}
+                    caption="Preview (right eye)"
+                  />
+                  <div className="space-y-1 text-[11px] text-zinc-400 pt-4">
+                    <div>
+                      <span className="text-zinc-300 font-mono">
+                        {countCustomGridPoints(settings.customGrid)}
+                      </span>{' '}
+                      test locations
+                    </div>
+                    <div>
+                      Coverage ±{settings.customGrid.extentXDeg}° × ±
+                      {settings.customGrid.extentYDeg}°
+                    </div>
+                    <div>
+                      Spacing {settings.customGrid.spacingXDeg}° × {settings.customGrid.spacingYDeg}°
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </fieldset>
+          )}
 
           {/* Background shade */}
           <fieldset className="space-y-1">

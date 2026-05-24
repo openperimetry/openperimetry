@@ -1,37 +1,54 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import type { CalibrationData, StoredEye, TestPoint, TestResult, StimulusKey } from '../types'
+import type { CalibrationData, ResultQualityMetrics, StoredEye, TestPoint, TestResult, StimulusKey } from '../types'
 import { STIMULI, ISOPTER_ORDER } from '../types'
 import { VisualFieldMap } from './VisualFieldMap'
 import { calcIsopterAreas } from '../isopterCalc'
+import { detectTruncatedIsopters } from '../goldmannCoverage'
 import { Interpretation } from './Interpretation'
 import { VisionSimulator } from './VisionSimulator'
-import { saveResult, saveSurvey, hasSurveyForResult, getDeviceId } from '../storage'
-import { trackEvent } from '../api'
+import { saveResult, saveSurvey, hasSurveyForResult, hasBeenPromptedForFeedback, markFeedbackPrompted, getDeviceId, getDeviceInfo } from '../storage'
+import { useAuth } from '../AuthContext'
+import { trackEvent, trackEventBeacon, shareAnonymousVFResult } from '../api'
 import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { ScenarioOverlay } from './ScenarioOverlay'
 import { PostTestSurvey } from './PostTestSurvey'
 import type { SurveyResponse } from './PostTestSurvey'
 import { ClinicalDisclaimer } from './ClinicalDisclaimer'
+import { SavePrompt } from './SavePrompt'
+import { WhatsAppShareButton } from './WhatsAppShareButton'
+import { APP_DOMAIN } from '../branding'
 import { GOLDMANN } from '../constants'
 import { degToPx } from '../geometry'
 import { stimulusDisplayColor } from '../stimulusDisplay'
 import { blindspotLocation } from '../blindspot'
 import { useAdvancedSettings } from '../advancedSettings'
+import { PositionCheckOverlay } from './PositionCheckOverlay'
+import { useStudyMode } from '../studyMode'
+import {
+  buildNativeProvenance,
+  buildProtocolSnapshot,
+  buildQualityMetrics,
+  buildStudyEventMeta,
+  buildStudyMetadata,
+  captureDeviceMetadata,
+} from '../resultMetadata'
 
 // ---------- constants ----------
 const BASE_MERIDIANS = Array.from({ length: 12 }, (_, i) => i * 30)
 const FINE_MERIDIANS = Array.from({ length: 24 }, (_, i) => i * 15) // every 15° for central
 
-// Speed presets: normal vs fast
+// Goldmann pace presets. "normal" is the shorter clinical-screening
+// pace (the default); "slow" preserves the older longer timing /
+// 24-meridian I2e pass.
 const SPEED_PRESETS = {
-  normal: {
+  slow: {
     stimulus: 3,
     medium: 2,
     slow: 1.5,
     preDelayMin: 1200,
     preDelayMax: 2800,
   },
-  fast: {
+  normal: {
     stimulus: 6,
     medium: 4,
     slow: 3,
@@ -42,7 +59,11 @@ const SPEED_PRESETS = {
 
 const { MIN_RESPONSE_MS, BOUNDARY_OFFSET_DEG, ADAPTIVE_THRESHOLD_DEG, OUTLIER_FACTOR } = GOLDMANN
 
-type Phase = 'countdown' | 'interstitial' | 'wait' | 'moving' | 'paused' | 'results'
+// 'position-check' is a one-shot pre-flight fired on the first countdown
+// request (see startCountdown + positionCheckDoneRef). It's not reached on
+// later interstitials; after the patient passes it, we drop into 'countdown'
+// and the rest of the state machine proceeds normally.
+type Phase = 'position-check' | 'countdown' | 'interstitial' | 'wait' | 'moving' | 'paused' | 'results'
 
 interface TestTask {
   meridianDeg: number
@@ -64,7 +85,11 @@ interface PhaseBlock {
   fixation?: FixationOffset // if set, fixation moves from center
 }
 
-export type SpeedMode = 'normal' | 'fast'
+export type SpeedMode = 'slow' | 'normal'
+
+/** localStorage flag so "already shared" state survives a page reload. Same
+ *  convention as StaticTest — mirrors `vfc-shared-result-<id>`. */
+const sharedFlagKey = (resultId: string) => `vfc-shared-result-${resultId}`
 
 interface Props {
   eye: StoredEye
@@ -73,7 +98,7 @@ interface Props {
   onDone: () => void
   /** If set, called with raw results when test finishes — skips results screen */
   onComplete?: (points: TestPoint[]) => void
-  /** Speed preset: 'normal' (default) or 'fast' (higher speed, shorter delays, fewer phases) */
+  /** Speed preset: 'normal' (default) or 'slow'. */
   speedMode?: SpeedMode
 }
 
@@ -433,28 +458,80 @@ function edgeEccentricityDeg(
   return tMin / pixelsPerDegree
 }
 
-export function GoldmannTest({ eye, calibration, extendedField, onDone, onComplete, speedMode = 'normal' }: Props) {
+// Mobile keyboard-less devices have no Space/Esc key, so those copy
+// strings are clutter on phones. Computed once per module load —
+// orientation doesn't change whether the device has a hardware
+// keyboard.
+const isMobileDevice = typeof navigator !== 'undefined'
+  && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+  && navigator.maxTouchPoints > 0
+
+export function GoldmannTest({ eye, calibration, extendedField, onDone, onComplete, speedMode: initialSpeedMode = 'normal' }: Props) {
+  const { user, syncResults } = useAuth()
+  // Local mirror of the speedMode prop so the patient can switch between
+  // normal/fast mid-test from the pause screen. Only affects values read
+  // dynamically each render — preDelay range + outer-isopter sweep speed.
+  // Task-level baked speeds (phase6 I2e at sp.medium, boundary tracing at
+  // sp.slow) were frozen at block-build time and stay on whichever preset
+  // was active then; the trade-off buys a simple switch without a live
+  // block-rebuild that could stomp in-progress state.
+  const [speedMode, setSpeedMode] = useState<SpeedMode>(initialSpeedMode)
   const sp = SPEED_PRESETS[speedMode]
+  // Mirror speedMode into a ref so the abort-tracking cleanup effect can
+  // read the current value without having speedMode in its dep list —
+  // which would re-run the effect (firing a spurious test_aborted in its
+  // cleanup) every time the patient flips the pause-screen toggle.
+  const speedModeRef = useRef<SpeedMode>(speedMode)
+  useEffect(() => {
+    speedModeRef.current = speedMode
+    // If the running task uses a preset-driven speed (no baked override),
+    // update the live speed refs so the dot immediately reflects the new
+    // preset when the user resumes after changing speed in the pause menu.
+    if (!currentTaskHasBakedSpeedRef.current) {
+      const newSp = SPEED_PRESETS[speedMode]
+      currentSpeedRef.current = newSp.stimulus
+      currentSlowSpeedRef.current = currentTaskIsExtendedBlockRef.current
+        ? newSp.stimulus
+        : Math.max(newSp.slow, newSp.stimulus * 0.5)
+    }
+  }, [speedMode])
   // Advanced settings — user-adjustable overrides. Kinetic tests only use a
   // subset: catch-trial cadence, fixation alert, and background shade.
   // SpeedPresetOverride is Static-only (different shape from Goldmann's
   // kinetic speed preset) and is not consulted here.
   const advanced = useAdvancedSettings()
+  const studyMode = useStudyMode()
   const bgClass =
     advanced.backgroundShade === 'light'
       ? 'bg-gray-400'
       : advanced.backgroundShade === 'medium'
         ? 'bg-gray-700'
         : 'bg-gray-950'
-  // Calibration already covers the pre-test summary and "Start test" gesture,
-  // so we open directly on the first-block interstitial (head silhouette +
-  // fixation dot + tap-to-begin hint). The ref defaults handle counter reset.
-  const [phase, setPhase] = useState<Phase>('interstitial')
+  // Open on the pre-flight position screen. It shows a HeadGuide profile
+  // + "I'm ready" button, optionally followed by a blindspot dot check
+  // (gated on `initialBlindspotCheck`), before dropping the user into
+  // the first-block interstitial ("Ready to map III4e…"). Either
+  // `showPositionGuide` or `initialBlindspotCheck` opens this phase;
+  // when both are off we jump straight to the interstitial.
+  const showPrePhase = advanced.showPositionGuide || advanced.initialBlindspotCheck
+  const [phase, setPhase] = useState<Phase>(
+    showPrePhase ? 'position-check' : 'interstitial',
+  )
   const [countdown, setCountdown] = useState(3)
   const [results, setResults] = useState<TestPoint[]>([])
   const [savedId, setSavedId] = useState<string | null>(null)
+  // Keep the built TestResult around after handleSave so we can retry
+  // persistence if the user signs in *after* finishing the test. The
+  // initial saveResult call will have no-op'd for anonymous users.
+  const lastResultRef = useRef<TestResult | null>(null)
   const [surveyDone, setSurveyDone] = useState(false)
   const [showVisionSim, setShowVisionSim] = useState(false)
+  const [shareState, setShareState] = useState<'idle' | 'sharing' | 'shared' | 'error'>('idle')
+  // Active-prompt feedback modal — fires once per device, on either
+  // Done or Export PDF, whichever they hit first. `'done'` also runs
+  // handleDone() on close; `'pdf'` just closes the modal in place so
+  // the user keeps seeing the downloaded results screen.
+  const [feedbackTrigger, setFeedbackTrigger] = useState<'done' | 'pdf' | null>(null)
 
   // Phase blocks
   const [blocks, setBlocks] = useState<PhaseBlock[]>([])
@@ -480,7 +557,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   const respondedRef = useRef(false)
   const rafRef = useRef(0)
   const lastTimeRef = useRef(0)
-  const phaseRef = useRef<Phase>('interstitial')
+  const phaseRef = useRef<Phase>(showPrePhase ? 'position-check' : 'interstitial')
   const currentMeridianRef = useRef(0)
   const currentStimulusRef = useRef<StimulusKey>('III4e')
   const resultsRef = useRef<TestPoint[]>([])
@@ -497,6 +574,11 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // the plausible boundary region the user actually needs time to react in.
   const currentRampStartRef = useRef(0)
   const currentSlowSpeedRef = useRef<number>(sp.slow)
+  // Track whether the running task used a preset-driven speed (vs a baked
+  // per-task override) and whether it's an extended block, so that a
+  // pause-screen speed toggle can update the live refs immediately.
+  const currentTaskHasBakedSpeedRef = useRef(false)
+  const currentTaskIsExtendedBlockRef = useRef(false)
 
   // Catch-trial + reliability-index tracking. Every Nth real-task start the
   // loop flashes a static V4e stimulus at the anatomical blindspot — a
@@ -515,13 +597,16 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   const isiActiveRef = useRef(false)
   const catchStimulusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const catchResponseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Pre-stimulus delay timer. Tracked so pause() can cancel it — otherwise
+  // the delayed "start moving" callback still fires while the user is on
+  // the paused screen, which pops a stimulus back onto the test surface.
+  const preDelayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showFixationLossAlert, setShowFixationLossAlert] = useState(false)
 
   const { pixelsPerDegree, maxEccentricityDeg, brightnessFloor, reactionTimeMs } = calibration
-  const isMobileTest = calibration.viewingDistanceCm <= 15
-  const fixDotSize = isMobileTest ? 'w-[2px] h-[2px]' : 'w-3 h-3'
-  const fixDotOffset = isMobileTest ? -1 : -6
-  const fixDotRestPx = isMobileTest ? 2 : 8
+  const fixDotSize = 'w-3 h-3'
+  const fixDotOffset = -6
+  const fixDotRestPx = 8
   const fixDotRestOffset = -(fixDotRestPx / 2)
 
   // Initialize blockMaxEcc on first render
@@ -582,7 +667,8 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       })),
     }
 
-    // Fast mode: keep all isopters but use 12 meridians for I2e instead of 24
+    // Normal mode: keep all isopters but use 12 meridians for I2e instead of 24.
+    // Slow mode preserves the older 24-meridian I2e pass.
     const phase6Fast: PhaseBlock = {
       label: 'Central sensitivity',
       description: 'Mapping I2e — small dim stimulus',
@@ -590,10 +676,10 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
         meridianDeg: m, stimulus: 'I2e' as const, speed: sp.medium,
       })),
     }
-    // Normal: ~84 stimuli, ~15 min. Fast: ~60 stimuli + higher speed + shorter delay → ~5 min.
-    let allBlocks = speedMode === 'fast'
-      ? [phase1, phase3, phase4, phase5, phase6Fast]
-      : [phase1, phase3, phase4, phase5, phase6]
+    // Slow: ~84 stimuli, ~15 min. Normal: ~60 stimuli + higher speed + shorter delay -> ~5 min.
+    let allBlocks = speedMode === 'slow'
+      ? [phase1, phase3, phase4, phase5, phase6]
+      : [phase1, phase3, phase4, phase5, phase6Fast]
 
     // Append extended-field passes if enabled
     if (extendedField) {
@@ -844,7 +930,9 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
 
       rafRef.current = requestAnimationFrame(animate)
     },
-    [pixelsPerDegree, brightnessFloor, recordPoint],
+    // `calibration` is passed whole to degToPx so sphericityCorrection is
+    // respected; `pixelsPerDegree` would be redundant alongside it.
+    [brightnessFloor, recordPoint, calibration],
   )
 
   // ---------- present blindspot catch trial ----------
@@ -901,11 +989,16 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
 
   // ---------- start current task ----------
   function startCurrentTask() {
+    // Read the preset through speedModeRef (not the closed-over `sp`) so a
+    // pause-screen speed change applies on resume. resume() is a useCallback
+    // with [] deps that captures the initial-render's startCurrentTask, which
+    // would otherwise close over the initial-render's `sp`.
+    const sp = SPEED_PRESETS[speedModeRef.current]
     // Catch-trial injection. Count real-task starts (not catch trials) and
     // every CATCH_TRIAL_EVERY_N presentations flash a blindspot probe first.
     // resumingFromCatchRef guards the recursive call from presentCatchTrial's
     // resolve path so we don't loop catch-trial → catch-trial → ...
-    if (!resumingFromCatchRef.current) {
+    if (!resumingFromCatchRef.current && advanced.catchTrialsEnabled) {
       presentCountRef.current += 1
       if (
         presentCountRef.current > 0
@@ -925,6 +1018,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
 
     currentMeridianRef.current = task.meridianDeg
     currentStimulusRef.current = task.stimulus
+    currentTaskHasBakedSpeedRef.current = task.speed != null
     currentSpeedRef.current = task.speed ?? sp.stimulus
 
     // Compute the screen-edge distance for this meridian — used as the fallback
@@ -948,6 +1042,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     // and must not drive the adaptive start — fall back to edgeEcc instead.
     const currentBlock = blocksRef.current[blockIdxRef.current]
     const isExtendedBlock = currentBlock?.fixation != null
+    currentTaskIsExtendedBlockRef.current = isExtendedBlock
     const adaptiveStart = isExtendedBlock
       ? edgeEcc
       : adaptiveStartEccentricity(
@@ -997,7 +1092,12 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     isiActiveRef.current = true
 
     const delay = sp.preDelayMin + Math.random() * (sp.preDelayMax - sp.preDelayMin)
-    setTimeout(() => {
+    preDelayTimeoutRef.current = setTimeout(() => {
+      preDelayTimeoutRef.current = null
+      // Guard against a race where the user paused between scheduling the
+      // pre-delay and the timer firing. Without this the stimulus would
+      // visibly start moving across the paused-screen overlay.
+      if (phaseRef.current === 'paused') return
       if (respondedRef.current) return
       phaseRef.current = 'moving'
       movingStartRef.current = performance.now()
@@ -1006,7 +1106,13 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       if (!startedTrackedRef.current) {
         startedTrackedRef.current = true
         testStartedAtRef.current = Date.now()
-        trackEvent('test_started', getDeviceId(), { testType: 'goldmann', eye, speedMode }).catch(() => {})
+        trackEvent('test_started', getDeviceId(), {
+          testType: 'goldmann',
+          eye,
+          speedMode,
+          ...getDeviceInfo(),
+          ...buildStudyEventMeta(studyMode),
+        }).catch(() => {})
       }
       rafRef.current = requestAnimationFrame(animate)
     }, delay)
@@ -1088,6 +1194,24 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     const cur = phaseRef.current
     if (cur === 'wait' || cur === 'moving' || cur === 'interstitial') {
       cancelAnimationFrame(rafRef.current)
+      // Cancel every in-flight timer that could surface a stimulus after
+      // the pause overlay appears. resume() re-enters via startCurrentTask
+      // so none of this state needs preserving.
+      if (preDelayTimeoutRef.current) {
+        clearTimeout(preDelayTimeoutRef.current)
+        preDelayTimeoutRef.current = null
+      }
+      if (catchStimulusTimeoutRef.current) {
+        clearTimeout(catchStimulusTimeoutRef.current)
+        catchStimulusTimeoutRef.current = null
+      }
+      if (catchResponseTimeoutRef.current) {
+        clearTimeout(catchResponseTimeoutRef.current)
+        catchResponseTimeoutRef.current = null
+      }
+      // If the user paused mid catch-trial, reset the flag so resume()
+      // doesn't route a fresh response into catch-trial bookkeeping.
+      isCatchTrialRef.current = false
       if (stimulusRef.current) stimulusRef.current.style.opacity = '0'
       pauseResumeRef.current = cur
       setPhase('paused')
@@ -1146,6 +1270,44 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     onDone()
   }
 
+  // Done button on the post-test results screen — if the user hasn't
+  // been prompted for feedback yet on this device, pop the modal
+  // first and run handleDone() after they submit/skip. Otherwise just
+  // exit immediately. Marking prompted on open (not on submit) so
+  // closing the tab mid-modal still counts as "asked once".
+  const handleDoneFromResults = () => {
+    if (savedId && !surveyDone && !hasSurveyForResult(savedId) && !hasBeenPromptedForFeedback()) {
+      markFeedbackPrompted()
+      setFeedbackTrigger('done')
+      return
+    }
+    handleDone()
+  }
+
+  // PDF export wrapped with the same one-shot prompt. PDF still
+  // downloads immediately; modal pops after so the user isn't blocked.
+  const exportPdfAndMaybePrompt = (result: TestResult) => {
+    exportTrackedResultPDF(result)
+    if (savedId && !surveyDone && !hasSurveyForResult(savedId) && !hasBeenPromptedForFeedback()) {
+      markFeedbackPrompted()
+      setFeedbackTrigger('pdf')
+    }
+  }
+
+  const closeFeedbackModal = () => {
+    const trigger = feedbackTrigger
+    setFeedbackTrigger(null)
+    if (trigger === 'done') handleDone()
+  }
+
+  const handleFeedbackSubmit = (response: SurveyResponse) => {
+    if (savedId) {
+      saveSurvey(savedId, response)
+      setSurveyDone(true)
+    }
+    closeFeedbackModal()
+  }
+
   // ---------- fullscreen ----------
   // iPhone Safari does not support requestFullscreen() on arbitrary elements
   // (only iPadOS/Android/desktop do). For iPhone we fall back to a tiny
@@ -1188,6 +1350,14 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     setCountdown(3)
   }
 
+  // Position check fires first, before any isopter-named interstitial. On
+  // pass we drop the user into the first-block "Ready to map III4e" screen
+  // (with the head silhouette + tap-to-begin hint) — from there the normal
+  // interstitial→countdown flow runs.
+  const handlePositionCheckPass = () => {
+    setPhase('interstitial')
+  }
+
   useEffect(() => {
     if (phase !== 'countdown') return
     if (countdown <= 0) {
@@ -1199,22 +1369,74 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, countdown])
 
+  // Set true once a test_aborted event has been dispatched (via either
+  // pagehide beacon or React-unmount cleanup) so the other path doesn't
+  // fire a duplicate. Tab close typically triggers pagehide before the
+  // React tree teardown runs, so without this flag we'd emit two aborts
+  // for one session.
+  const abortDispatchedRef = useRef(false)
+
+  const buildAbortMeta = useCallback((via: 'unmount' | 'pagehide'): Record<string, string> => {
+    const consolidated = consolidatePoints(resultsRef.current)
+    const durationSeconds = getTestDurationSeconds()
+    const catchTrials = catchTrialRef.current
+    return {
+      testType: 'goldmann', eye, phase: phaseRef.current,
+      speedMode: speedModeRef.current,
+      extendedField: extendedField ? '1' : '0',
+      points: String(consolidated.length),
+      detected: String(consolidated.filter(p => p.detected).length),
+      catchTrialsPresented: String(catchTrials.length),
+      catchTrialsFalsePositive: String(catchTrials.filter(c => c.detected).length),
+      falsePositiveIsiPresses: String(fpIsiPressesRef.current),
+      truePositiveResponses: String(truePositivesRef.current),
+      abortVia: via,
+      ...getDeviceInfo(),
+      ...buildStudyEventMeta(studyMode),
+      ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
+    }
+  }, [eye, extendedField, getTestDurationSeconds, studyMode])
+
+  // pagehide fires on tab close, hard navigation away, and bfcache eviction
+  // — none of which trigger React unmount. Without this listener those
+  // sessions would never produce a test_aborted event. Beacon delivery via
+  // fetch+keepalive so the request survives the tearing-down document.
+  useEffect(() => {
+    const onPageHide = () => {
+      if (abortDispatchedRef.current) return
+      if (!startedTrackedRef.current || completedTrackedRef.current) return
+      abortDispatchedRef.current = true
+      trackEventBeacon('test_aborted', getDeviceId(), buildAbortMeta('pagehide'))
+    }
+    window.addEventListener('pagehide', onPageHide)
+    return () => window.removeEventListener('pagehide', onPageHide)
+  }, [buildAbortMeta])
+
   // ---------- cleanup ----------
+  // All refs read in this cleanup (catchTrialRef, resultsRef, phaseRef,
+  // fpIsiPressesRef, truePositivesRef, startedTrackedRef, completedTrackedRef)
+  // are DATA refs — arrays and scalars we mutate imperatively for live-update
+  // semantics. They are NOT React-managed DOM nodes, so the exhaustive-deps
+  // rule's "copy ref.current at setup time" guidance is actively wrong here:
+  // we explicitly want the *final* values at unmount (e.g. all catch trials
+  // actually presented before the abort), not whatever was in the refs when
+  // this effect was installed on mount (empty arrays, phase 'idle', etc.).
   useEffect(() => {
     return () => {
       cancelAnimationFrame(rafRef.current)
-      if (startedTrackedRef.current && !completedTrackedRef.current) {
-        const consolidated = consolidatePoints(resultsRef.current)
-        const durationSeconds = getTestDurationSeconds()
-        trackEvent('test_aborted', getDeviceId(), {
-          testType: 'goldmann', eye, phase: phaseRef.current,
-          points: String(consolidated.length),
-          detected: String(consolidated.filter(p => p.detected).length),
-          ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
-        }).catch(() => {})
+      if (
+        startedTrackedRef.current
+        && !completedTrackedRef.current
+        && !abortDispatchedRef.current
+      ) {
+        abortDispatchedRef.current = true
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        trackEvent('test_aborted', getDeviceId(), buildAbortMeta('unmount')).catch(() => {})
       }
     }
-  }, [eye, getTestDurationSeconds])
+    // speedMode read via ref so toggling it mid-test doesn't re-run this
+    // effect (which would spuriously fire test_aborted in its cleanup).
+  }, [buildAbortMeta])
 
   // Fire test_completed when results screen is reached
   useEffect(() => {
@@ -1222,14 +1444,22 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       completedTrackedRef.current = true
       const consolidated = consolidatePoints(results)
       const durationSeconds = getTestDurationSeconds()
+      const catchTrials = catchTrialRef.current
       trackEvent('test_completed', getDeviceId(), {
         testType: 'goldmann', eye,
+        speedMode,
+        extendedField: extendedField ? '1' : '0',
         points: String(consolidated.length),
         detected: String(consolidated.filter(p => p.detected).length),
+        catchTrialsPresented: String(catchTrials.length),
+        catchTrialsFalsePositive: String(catchTrials.filter(c => c.detected).length),
+        falsePositiveIsiPresses: String(fpIsiPressesRef.current),
+        truePositiveResponses: String(truePositivesRef.current),
+        ...buildStudyEventMeta(studyMode),
         ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
       }).catch(() => {})
     }
-  }, [phase, eye, results, getTestDurationSeconds])
+  }, [phase, eye, results, getTestDurationSeconds, speedMode, extendedField, studyMode])
 
   // ---------- save ----------
   const handleSave = () => {
@@ -1241,6 +1471,12 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       falsePositiveIsiPresses: fpIsiPressesRef.current,
       truePositiveResponses: truePositivesRef.current,
     }
+    const qualityMetrics: ResultQualityMetrics = {
+      catchTrialsPresented: reliabilityIndices.catchTrialsPresented,
+      catchTrialsFalsePositive: reliabilityIndices.catchTrialsFalsePositive,
+      falsePositiveIsiPresses: reliabilityIndices.falsePositiveIsiPresses,
+      truePositiveResponses: reliabilityIndices.truePositiveResponses,
+    }
     const result: TestResult = {
       id: crypto.randomUUID(),
       eye,
@@ -1251,9 +1487,80 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       testType: 'goldmann',
       durationSeconds: getTestDurationSeconds(),
       reliabilityIndices,
+      protocol: buildProtocolSnapshot({
+        studyMode,
+        testType: 'goldmann',
+        testMode: 'suprathreshold',
+        speedMode,
+        extendedField,
+        advancedSettings: advanced,
+      }),
+      ...(buildStudyMetadata(studyMode) ? { study: buildStudyMetadata(studyMode) } : {}),
+      device: captureDeviceMetadata(),
+      provenance: buildNativeProvenance(),
+      ...(buildQualityMetrics(qualityMetrics) ? { qualityMetrics: buildQualityMetrics(qualityMetrics) } : {}),
     }
+    lastResultRef.current = result
     saveResult(result)
     setSavedId(result.id)
+    if (localStorage.getItem(sharedFlagKey(result.id)) === '1') {
+      setShareState('shared')
+    }
+  }
+
+  // If the user signs in after finishing the test (via the SavePrompt on
+  // the results screen), retry persistence so the just-completed run ends
+  // up on their new account. saveResult is idempotent by id — dedup in
+  // storage.ts protects against duplicate inserts if this effect and the
+  // initial handleSave both fire with persistence on.
+  useEffect(() => {
+    if (!user || !lastResultRef.current) return
+    saveResult(lastResultRef.current)
+    syncResults()
+  }, [user, syncResults])
+
+  /** Anonymous upload — opt-in, fires only when the user taps the
+   *  "Share anonymous result" button on the results screen. Payload is
+   *  the full TestResult JSON; storage key on the server is the device
+   *  UUID, not an account. Persists a localStorage flag so a page reload
+   *  doesn't offer the same result twice. Mirrors StaticTest's handler. */
+  const handleShareAnonymous = async () => {
+    if (!savedId || shareState === 'sharing' || shareState === 'shared') return
+    setShareState('sharing')
+    const consolidated = consolidatePoints(results)
+    const catchTrials = catchTrialRef.current
+    const reliabilityIndices = {
+      catchTrialsPresented: catchTrials.length,
+      catchTrialsFalsePositive: catchTrials.filter(c => c.detected).length,
+      falsePositiveIsiPresses: fpIsiPressesRef.current,
+      truePositiveResponses: truePositivesRef.current,
+    }
+    const result: TestResult = {
+      id: savedId,
+      eye,
+      date: new Date().toISOString(),
+      points: consolidated,
+      isopterAreas: calcIsopterAreas(consolidated),
+      calibration,
+      testType: 'goldmann',
+      durationSeconds: getTestDurationSeconds(),
+      reliabilityIndices,
+    }
+    try {
+      await shareAnonymousVFResult(
+        {
+          id: result.id,
+          eye: result.eye,
+          date: result.date,
+          data: JSON.stringify(result),
+        },
+        getDeviceId(),
+      )
+      localStorage.setItem(sharedFlagKey(result.id), '1')
+      setShareState('shared')
+    } catch {
+      setShareState('error')
+    }
   }
 
   // HeadGuide is now a shared component (./HeadGuide.tsx).
@@ -1268,8 +1575,8 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   const flashFixation = (color: string, durationMs: number) => {
     const dot = fixationDotRef.current
     if (!dot) return
-    const flashSize = isMobileTest ? 3 : 12
-    const restSize = isMobileTest ? 3 : 8
+    const flashSize = 12
+    const restSize = 8
     const flashOff = -(flashSize / 2)
     const restOff = -(restSize / 2)
     const fx = fixationRef.current.x
@@ -1292,6 +1599,18 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   }
 
   // ==================== RENDER ====================
+
+  if (phase === 'position-check') {
+    return (
+      <PositionCheckOverlay
+        eye={eye}
+        calibration={calibration}
+        onPass={handlePositionCheckPass}
+        runBlindspotCheck={advanced.initialBlindspotCheck}
+        headGuideMode={isMobileDevice ? 'phone' : 'desktop'}
+      />
+    )
+  }
 
   if (phase === 'countdown') {
     return (
@@ -1334,12 +1653,43 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
           <h1 className="text-2xl font-semibold">Paused</h1>
           <p className="text-gray-400 text-sm">{completedTasks} of {totalTasks} points completed</p>
 
-          {/* Progress bar */}
+          {/* Progress bar — teal signals forward motion (owned by teal in
+              this app's palette; amber is for selection/primary-action). */}
           <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
             <div
-              className="h-full bg-blue-600 transition-all duration-300"
+              className="h-full bg-teal transition-all duration-300"
               style={{ width: `${progressPct}%` }}
             />
+          </div>
+
+          {/* Speed toggle — applies on resume. Future tasks picked up by
+              startCurrentTask use the new preset's pre-delay and outer-
+              sweep speed. Already-baked task speeds (phase6 I2e, boundary
+              tracing) keep their build-time values. */}
+          <div className="pt-1">
+            <p className="text-[11px] uppercase tracking-[0.2em] text-gray-500 mb-2">
+              Test speed
+            </p>
+            <div className="flex gap-2" role="radiogroup" aria-label="Test speed">
+              {(['slow', 'normal'] as const).map(mode => (
+                <button
+                  key={mode}
+                  role="radio"
+                  aria-checked={speedMode === mode}
+                  onClick={() => setSpeedMode(mode)}
+                  className={`flex-1 py-2 rounded-lg text-sm font-medium border transition-colors ${
+                    speedMode === mode
+                      ? 'bg-teal/15 border-teal/40 text-teal'
+                      : 'bg-white/[0.02] border-white/[0.08] text-gray-400 hover:text-gray-200 hover:bg-white/[0.05]'
+                  }`}
+                >
+                  {mode === 'slow' ? 'Slow' : 'Normal'}
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-gray-600 mt-2 font-mono">
+              stim {sp.stimulus}°/s · delay {sp.preDelayMin}–{sp.preDelayMax} ms
+            </p>
           </div>
 
           <div className="space-y-3 pt-2">
@@ -1351,14 +1701,12 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
             </button>
             <button
               onClick={() => {
-                // Save partial results and exit
-                const consolidated = consolidatePoints(results)
-                if (consolidated.length > 0) {
-                  exitFullscreen()
-      setPhase('results')
-                } else {
-                  handleDone()
-                }
+                // Always transition to the results phase — if the user hit
+                // "view results" they shouldn't be silently dropped back on
+                // the home screen. The results render handles the empty
+                // case with its own "no measurements yet" state.
+                exitFullscreen()
+                setPhase('results')
               }}
               className="w-full py-3 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm text-gray-300 transition-colors"
             >
@@ -1368,13 +1716,15 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
               onClick={handleDone}
               className="text-gray-500 hover:text-gray-300 text-sm"
             >
-              Quit without saving
+              Quit without viewing results
             </button>
           </div>
 
-          <p className="text-xs text-gray-600">
-            Press <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-xs">Esc</kbd> or <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-xs">Space</kbd> to resume
-          </p>
+          {!isMobileDevice && (
+            <p className="text-xs text-gray-600">
+              Press <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-xs">Esc</kbd> or <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-xs">Space</kbd> to resume
+            </p>
+          )}
         </div>
       </div>
     )
@@ -1564,11 +1914,18 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
         >
           <p style={{ fontSize: 11, color: '#a1a1aa', marginBottom: 4 }}>
             {currentBlockIdx + 1}/{blocks.length} — {completedTasks}/{totalTasks} pts
+            {' · '}
+            <span style={{ color: speedMode === 'slow' ? '#a1a1aa' : '#c8902a' }}>
+              {speedMode === 'slow' ? 'Slow' : 'Normal'} speed
+            </span>
           </p>
           <h2 style={{ fontSize: 14, fontWeight: 500, color: '#ffffff' }} aria-live="polite">{block?.label}</h2>
           <p style={{ color: '#d4d4d8', fontSize: 12, marginTop: 4 }}>{block?.description}</p>
           <p style={{ color: '#a1a1aa', fontSize: 11, marginTop: 12 }}>
-            Press <kbd style={{ padding: '2px 6px', background: '#27272a', color: '#e4e4e7', borderRadius: 4, fontSize: 11 }}>Space</kbd> or tap
+            {isMobileDevice
+              ? 'Tap when you see the stimulus'
+              : <>Press <kbd style={{ padding: '2px 6px', background: '#27272a', color: '#e4e4e7', borderRadius: 4, fontSize: 11 }}>Space</kbd> or tap</>
+            }
           </p>
         </div>
       </div>
@@ -1593,16 +1950,42 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     if (!savedId && consolidated.length > 0) {
       handleSave()
     }
+
+    // User stopped before any meridian recorded a response — show a
+    // dedicated empty state rather than a blank field map.
+    if (consolidated.length === 0) {
+      return (
+        <div className={`min-h-screen ${bgClass} text-white p-6 overflow-y-auto`}>
+          <main className="max-w-lg mx-auto space-y-6 pb-12 text-center">
+            <h1 className="text-2xl font-semibold">Results</h1>
+            <p className="text-sm text-gray-400">
+              Goldmann kinetic perimetry · {eye === 'right' ? <abbr title="Oculus Dexter">OD</abbr> : <abbr title="Oculus Sinister">OS</abbr>}
+            </p>
+            <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-4 text-sm text-zinc-300 space-y-2 text-left">
+              <p className="font-medium text-zinc-100">No measurements yet</p>
+              <p className="text-zinc-400 leading-relaxed">
+                You stopped the test before any moving stimulus was
+                detected, so there's nothing to plot. Restart the test and
+                {isMobileDevice ? ' tap' : ' press Space (or tap)'} as soon as the stimulus appears.
+              </p>
+            </div>
+            <button
+              onClick={handleDone}
+              className="w-full py-3 btn-primary rounded-xl font-medium text-white"
+            >
+              Back to home
+            </button>
+          </main>
+        </div>
+      )
+    }
+
     return (
       <div className={`min-h-screen ${bgClass} text-white p-6 overflow-y-auto`}>
         <main className="max-w-lg mx-auto space-y-6 pb-12">
           <h1 className="text-2xl font-semibold text-center">Results</h1>
           <p className="text-center text-xs text-gray-500">Goldmann kinetic perimetry · {eye === 'right' ? <abbr title="Oculus Dexter">OD</abbr> : <abbr title="Oculus Sinister">OS</abbr>}</p>
-          {savedId && (
-            <p className="text-center text-green-400 text-xs">
-              Saved automatically — this result is now available on the Results page.
-            </p>
-          )}
+          {savedId && <SavePrompt />}
           <VisualFieldMap
             points={standardPoints}
             eye={eye}
@@ -1611,6 +1994,27 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
             calibration={calibration}
             enableVerify
           />
+          {(() => {
+            const truncated = detectTruncatedIsopters(standardPoints, maxEccentricityDeg)
+            if (truncated.length === 0) return null
+            return (
+              <div className="text-xs text-amber-400 space-y-1">
+                <p className="font-medium">Some isopter boundaries were not reached</p>
+                <ul className="list-disc list-inside space-y-0.5 text-amber-300/80">
+                  {truncated.map(t => (
+                    <li key={t.stimulus}>
+                      {t.stimulus}: extends to <strong>at least {t.maxEccentricityReached.toFixed(0)}°</strong>{' '}
+                      in {t.truncatedMeridianCount} meridian{t.truncatedMeridianCount === 1 ? '' : 's'} — true
+                      boundary lies beyond the screen.
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-amber-300/70">
+                  Sit closer to the screen (and recalibrate) to assess the full field.
+                </p>
+              </div>
+            )
+          })()}
           {/* Area summary */}
           <div className="grid grid-cols-2 gap-2 text-sm">
             {ISOPTER_ORDER.map(key => {
@@ -1683,6 +2087,49 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
             <p className="text-center text-green-400 text-xs">Thank you for your feedback!</p>
           )}
 
+          {/* Anonymous share — opt-in only. Same device-UUID convention as
+              anonymous surveys; see StaticTest for the original wording. */}
+          {savedId && (
+            <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs text-zinc-400 space-y-2">
+              {shareState === 'idle' && (
+                <>
+                  <p className="leading-relaxed">
+                    Help improve the tool: share this result anonymously.
+                    Only the point data, calibration, and a random device ID
+                    are uploaded — no name, email, or IP.
+                  </p>
+                  <button
+                    onClick={handleShareAnonymous}
+                    className="w-full py-2 bg-gray-800 hover:bg-gray-700 rounded-md text-sm text-gray-200 transition-colors"
+                  >
+                    Share anonymous result
+                  </button>
+                </>
+              )}
+              {shareState === 'sharing' && (
+                <p className="text-center text-gray-300">Uploading…</p>
+              )}
+              {shareState === 'shared' && (
+                <p className="text-center text-green-400">
+                  Shared — thank you, this helps a lot.
+                </p>
+              )}
+              {shareState === 'error' && (
+                <div className="space-y-1">
+                  <p className="text-center text-red-300">
+                    Upload failed. No data was sent.
+                  </p>
+                  <button
+                    onClick={() => setShareState('idle')}
+                    className="w-full py-1.5 bg-gray-800 hover:bg-gray-700 rounded-md text-xs text-gray-200 transition-colors"
+                  >
+                    Try again
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="flex gap-3">
             <button
               onClick={() => {
@@ -1697,20 +2144,40 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
 	                  testType: 'goldmann',
 	                  durationSeconds: getTestDurationSeconds(),
 	                }
-                exportTrackedResultPDF(result)
+                exportPdfAndMaybePrompt(result)
               }}
               className="flex-1 py-3 btn-primary rounded-xl font-medium text-white"
             >
               Export PDF
             </button>
             <button
-              onClick={handleDone}
+              onClick={handleDoneFromResults}
               className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 rounded-lg font-medium transition-colors"
             >
               Done
             </button>
           </div>
+          <WhatsAppShareButton
+            message={`I just took a free Goldmann visual-field self-test on ${APP_DOMAIN} (${eye === 'right' ? 'right eye / OD' : 'left eye / OS'}). Try it yourself:`}
+          />
         </main>
+
+        {feedbackTrigger && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Quick feedback"
+            onClick={closeFeedbackModal}
+          >
+            <div className="w-full max-w-md" onClick={e => e.stopPropagation()}>
+              <PostTestSurvey
+                onSubmit={handleFeedbackSubmit}
+                onSkip={closeFeedbackModal}
+              />
+            </div>
+          </div>
+        )}
       </div>
     )
   }
@@ -1724,7 +2191,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       aria-label="Visual field test in progress — press Space or tap when you see the stimulus"
     >
       {/* Progress ring around fixation dot */}
-      {totalTasks > 0 && !isMobileTest && (
+      {totalTasks > 0 && (
         <svg
           className="absolute pointer-events-none"
           style={{
@@ -1772,10 +2239,22 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
 
       {/* Removed bottom HUD — it was distracting near the fixation point */}
 
-      {/* Fixation-loss alert: fires when patient responds to a blindspot catch trial */}
+      {/* Fixation-loss alert: fires when patient responds to a blindspot catch trial.
+          Positioned just below the fixation dot (≈35 px ≈ 1.5° at typical viewing
+          distance) so it lands in foveal/parafoveal view instead of off-screen
+          peripherally — the patient is fixating on the yellow dot, so a peripheral
+          warning is the one place they definitely can't read. Follows the fixation
+          offset used in extended-field mode so it stays anchored to the dot. */}
       {showFixationLossAlert && (
         <div
-          className="absolute top-[60%] left-1/2 -translate-x-1/2 px-6 py-3 bg-orange-600 text-white rounded-lg font-semibold text-lg shadow-xl pointer-events-none z-30"
+          className="absolute px-4 py-2 bg-orange-600 text-white rounded-lg font-semibold text-sm shadow-xl pointer-events-none z-30 whitespace-nowrap"
+          style={{
+            top: '50%',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            marginLeft: fixationXY.x,
+            marginTop: 30 + fixationXY.y,
+          }}
           role="alert"
           aria-live="polite"
         >

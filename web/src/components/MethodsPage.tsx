@@ -46,18 +46,18 @@ function buildSpeedPresetRows(): Row[] {
   const p = SPEED_PRESETS
   return [
     {
-      param: 'Stimulus on (relaxed/normal/fast)',
-      value: `${p.relaxed.stimulusMs} / ${p.normal.stimulusMs} / ${p.fast.stimulusMs} ms`,
+      param: 'Stimulus on (relaxed/slow/normal)',
+      value: `${p.relaxed.stimulusMs} / ${p.slow.stimulusMs} / ${p.normal.stimulusMs} ms`,
       meaning: 'How long each dot is shown.',
     },
     {
-      param: 'Response window (relaxed/normal/fast)',
-      value: `${p.relaxed.responseMs} / ${p.normal.responseMs} / ${p.fast.responseMs} ms`,
+      param: 'Response window (relaxed/slow/normal)',
+      value: `${p.relaxed.responseMs} / ${p.slow.responseMs} / ${p.normal.responseMs} ms`,
       meaning: 'Time after stimulus offset still counted as a hit.',
     },
     {
-      param: 'Inter-stimulus gap (relaxed/normal/fast)',
-      value: `${p.relaxed.gapMinMs}–${p.relaxed.gapMaxMs} / ${p.normal.gapMinMs}–${p.normal.gapMaxMs} / ${p.fast.gapMinMs}–${p.fast.gapMaxMs} ms`,
+      param: 'Inter-stimulus gap (relaxed/slow/normal)',
+      value: `${p.relaxed.gapMinMs}–${p.relaxed.gapMaxMs} / ${p.slow.gapMinMs}–${p.slow.gapMaxMs} / ${p.normal.gapMinMs}–${p.normal.gapMaxMs} ms`,
       meaning: 'Random pause before the next dot (jittered to prevent anticipation).',
     },
   ]
@@ -120,17 +120,6 @@ const GOLDMANN_LOGIC_ROWS: Row[] = [
   { param: 'Outlier factor',     value: '0.40',      meaning: 'A point deviating ≥40% from its neighbors\u2019 average is automatically retested.' },
 ]
 
-const RING_ROWS: Row[] = [
-  { param: 'Expansion step',  value: '0.5°',          meaning: 'Eccentricity increment per scroll tick or arrow press.' },
-  { param: 'Sector gap',      value: '4°',            meaning: 'Angular gap between adjacent sectors so each is independently mapped.' },
-  { param: 'Default sectors', value: '8',             meaning: 'Default 45°-wide pie sectors. Presets: 4 / 8 / 12 / 24.' },
-  { param: 'V4e thickness',   value: '1.5°',          meaning: 'Arc band width — wider for larger Goldmann V stimulus.' },
-  { param: 'III4e thickness', value: '0.7°',          meaning: 'Arc band width for bright medium stimulus.' },
-  { param: 'III2e thickness', value: '0.5°',          meaning: 'Arc band width for dim medium stimulus.' },
-  { param: 'I4e thickness',   value: '0.35°',         meaning: 'Arc band width for bright small stimulus.' },
-  { param: 'I2e thickness',   value: '0.25°',         meaning: 'Arc band width for dim small stimulus.' },
-]
-
 const STATIC_ROWS: Row[] = [
   { param: 'Default points per level', value: '100',       meaning: 'Target hexagonal grid density per isopter level.' },
   { param: 'Min eccentricity',         value: '1.5°',      meaning: 'Skip the central fixation area (keeps the dot from being mistaken for a stimulus).' },
@@ -152,17 +141,16 @@ const CALIB_ROWS: Row[] = [
   { param: 'RT delay window',      value: '1500–3500 ms', meaning: 'Random delay before the dot appears in each RT trial.' },
   { param: 'RT compensation',      value: '3 × medianRT', meaning: 'At 3°/s, every recorded eccentricity is shifted outward by the distance the stimulus moved during the user\u2019s reaction time.' },
   { param: 'Brightness floor',     value: '~0.04 default', meaning: 'Minimum visible opacity, calibrated per device. Effective minimum is floor × 1.5.' },
-  { param: 'Fixation offset',      value: '20% (10% mobile)', meaning: 'Fixation dot is shifted toward the nasal side so the temporal field gets maximum screen coverage.' },
+  { param: 'Fixation offset',      value: '20% of screenW', meaning: 'Fixation dot is shifted toward the nasal side so the temporal field gets maximum screen coverage.' },
 ]
 
 const MAPPING_ROWS: Row[] = [
-  { param: 'Pixels per mm',    value: 'cardPx ÷ 85.6 mm', meaning: 'Derived from the on-screen credit-card alignment. Mobile mode replaces this with a 10 mm calibration bar.' },
+  { param: 'Pixels per mm',    value: 'cardPx ÷ 85.6 mm', meaning: 'Derived from the on-screen credit-card alignment.' },
   { param: 'Pixels per degree', value: 'pxPerMm × distanceCm × 10 × tan(1°)', meaning: 'Small-angle conversion. At a 50 cm viewing distance, 1° of visual angle ≈ 8.7 mm on the screen.' },
   { param: 'Fixation X (right eye)', value: 'screenW / 2 − offset', meaning: 'Fixation dot is shifted toward the nasal side so the temporal field gets the most screen room.' },
   { param: 'Fixation X (left eye)',  value: 'screenW / 2 + offset', meaning: 'Mirrored offset for the left eye.' },
   { param: 'Fixation Y',       value: 'screenH / 2',  meaning: 'Vertically centred — superior and inferior fields share the screen evenly.' },
-  { param: 'Offset magnitude (desktop)', value: '20% of screenW', meaning: 'Default nasal shift on a normal screen.' },
-  { param: 'Offset magnitude (mobile)',  value: '10% of screenW', meaning: 'Smaller shift on phones; the screen is too narrow to spend more on offset.' },
+  { param: 'Offset magnitude',  value: '20% of screenW', meaning: 'Default nasal shift so the temporal field (most affected in RP) gets the most screen room.' },
   { param: 'Max eccentricity',  value: 'max(left, right, top, bottom) / pxPerDeg', meaning: 'Largest angular distance from fixation to any screen edge. This is the radius the perimetry chart uses.' },
   { param: 'Per-meridian limit', value: 'edgeDistance(angle) / pxPerDeg', meaning: 'Each meridian gets its own ceiling — a stimulus on the temporal axis can travel further than one on the vertical axis.' },
   { param: 'Stimulus position', value: 'fixation + ecc × pxPerDeg × (cos θ, −sin θ)', meaning: 'Polar-to-Cartesian, with screen-Y inverted because the SVG/DOM Y axis grows downward.' },
@@ -254,15 +242,8 @@ export function MethodsPage({ onBack }: Props) {
         </Section>
 
         <Section
-          title="Ring test"
-          intro="A user-controlled variant: you expand a thin ring outward yourself (scroll, drag, or arrow keys) while fixating, and tap the moment it disappears or reappears. The field is divided into pie sectors so each is mapped independently — useful for irregular scotomas. There is no reaction-time component."
-        >
-          <ParamTable rows={RING_ROWS} />
-        </Section>
-
-        <Section
           title="Static test"
-          intro="Adaptive static perimetry over a hexagonal grid that gets denser toward fixation. Dots flash at random positions for a fixed window; you press as soon as you see one. Each level reuses the unseen-zone map from the previous level so dim stimuli aren't wasted on already-dead retina."
+          intro="Threshold static perimetry on the HFA 24-2 clinical grid (or 30-2 / 10-2 / Custom). Dots flash briefly at known positions; you press as soon as you see one. A per-location 4-2 dB adaptive staircase narrows down your threshold at each point."
         >
           <ParamTable rows={STATIC_ROWS} />
         </Section>
@@ -445,9 +426,9 @@ export function MethodsPage({ onBack }: Props) {
                   <td className="px-4 py-2 text-zinc-400">Inadequate for one-time home screen</td>
                 </tr>
                 <tr className="bg-white/[0.04] font-semibold">
-                  <td className="px-4 py-2 text-accent">{APP_NAME}</td>
+                  <td className="px-4 py-2 text-accent">this website</td>
                   <td className="px-4 py-2 text-zinc-300">Web — any browser</td>
-                  <td className="px-4 py-2 text-zinc-300">Kinetic + static + ring</td>
+                  <td className="px-4 py-2 text-zinc-300">Kinetic + static</td>
                   <td className="px-4 py-2 text-zinc-300">Not yet validated against a clinical perimeter</td>
                 </tr>
               </tbody>

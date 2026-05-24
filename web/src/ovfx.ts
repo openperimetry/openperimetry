@@ -1,7 +1,19 @@
 // OVFX (Open Visual Field eXchange) v0.4.0 import/export.
 // Spec: https://github.com/openperimetry/ovfx-spec
 
-import type { CalibrationData, StimulusKey, StoredEye, TestPoint, TestResult, TestType } from './types'
+import type {
+  CalibrationData,
+  ResultDeviceMetadata,
+  ResultProtocolSnapshot,
+  ResultProvenanceMetadata,
+  ResultQualityMetrics,
+  ResultStudyMetadata,
+  StimulusKey,
+  StoredEye,
+  TestPoint,
+  TestResult,
+  TestType,
+} from './types'
 import { ISOPTER_ORDER, STIMULI } from './types'
 import { formatEyeLabel } from './eyeLabels'
 import { APP_NAME, APP_URL, APP_VERSION } from './branding'
@@ -74,6 +86,14 @@ interface OvfxSoftware {
   url?: string
 }
 
+interface OvfxOpenPerimetryExtension {
+  protocol?: ResultProtocolSnapshot
+  study?: ResultStudyMetadata
+  device?: ResultDeviceMetadata
+  provenance?: ResultProvenanceMetadata
+  qualityMetrics?: ResultQualityMetrics
+}
+
 export interface OvfxDocument {
   ovfxVersion: string
   id: string
@@ -100,25 +120,29 @@ export interface OvfxDocument {
   }
   isopters?: OvfxIsopter[]
   software?: OvfxSoftware
+  extensions?: {
+    openperimetry?: OvfxOpenPerimetryExtension
+  }
 }
 
 // ── Conversion helpers ──────────────────────────────────────────────────────
 
 const TEST_TYPE_TO_OVFX: Record<TestType, OvfxTestKind> = {
   goldmann: 'kinetic',
-  ring: 'ring',
   static: 'static',
 }
 
-const OVFX_TO_TEST_TYPE: Record<OvfxTestKind, TestType> = {
+// Ring was dropped from the UI but still exists in the OVFX spec. Import
+// falls through to `null` for ring documents so the caller can reject them
+// with a clear error rather than silently coercing into the wrong kind.
+const OVFX_TO_TEST_TYPE: Record<OvfxTestKind, TestType | null> = {
   kinetic: 'goldmann',
-  ring: 'ring',
+  ring: null,
   static: 'static',
 }
 
 const TEST_STRATEGY: Record<TestType, string> = {
   goldmann: 'kinetic',
-  ring: 'ring-sector',
   // Default for static is suprathreshold; threshold mode overrides to
   // 'threshold' per-result in exportToOvfx.
   static: 'suprathreshold',
@@ -223,6 +247,9 @@ export function exportToOvfx(result: TestResult): OvfxDocument {
       type: ovfxKind,
       eye: result.eye,
       strategy,
+      ...(result.durationSeconds != null ? { durationSeconds: result.durationSeconds } : {}),
+      ...(result.protocol?.extendedField != null ? { extendedField: result.protocol.extendedField } : {}),
+      ...(result.protocol?.staticGridPattern ? { pattern: result.protocol.staticGridPattern } : {}),
       ...(result.binocularGroup ? { binocularGroup: result.binocularGroup } : {}),
     },
     calibration: {
@@ -241,6 +268,20 @@ export function exportToOvfx(result: TestResult): OvfxDocument {
   // Reliability indices passthrough — emit when present on the result.
   if (result.reliabilityIndices != null) {
     doc.reliabilityIndices = { ...result.reliabilityIndices }
+    const { catchTrialsPresented, catchTrialsFalsePositive, falsePositiveIsiPresses, truePositiveResponses } = result.reliabilityIndices
+    const reliability: OvfxReliability = {}
+    if (catchTrialsPresented > 0) {
+      reliability.fixationLossRate = catchTrialsFalsePositive / catchTrialsPresented
+      reliability.fixationMethod = 'blindspot-catch'
+    }
+    const falsePositiveDenominator = catchTrialsFalsePositive + falsePositiveIsiPresses + truePositiveResponses
+    if (falsePositiveDenominator > 0) {
+      reliability.falsePositiveRate =
+        (catchTrialsFalsePositive + falsePositiveIsiPresses) / falsePositiveDenominator
+    }
+    if (Object.keys(reliability).length > 0) {
+      doc.reliability = reliability
+    }
   }
 
   // Precomputed isopter areas are informative — include them when we have
@@ -251,6 +292,16 @@ export function exportToOvfx(result: TestResult): OvfxDocument {
     if (area != null) isopters.push({ stimulusKey: key, areaSqDeg: area })
   }
   if (isopters.length > 0) doc.isopters = isopters
+
+  const extension: OvfxOpenPerimetryExtension = {}
+  if (result.protocol) extension.protocol = { ...result.protocol }
+  if (result.study) extension.study = { ...result.study }
+  if (result.device) extension.device = { ...result.device }
+  if (result.provenance) extension.provenance = { ...result.provenance }
+  if (result.qualityMetrics) extension.qualityMetrics = { ...result.qualityMetrics }
+  if (Object.keys(extension).length > 0) {
+    doc.extensions = { openperimetry: extension }
+  }
 
   return doc
 }
@@ -335,7 +386,12 @@ export function importFromOvfx(doc: OvfxDocument): TestResult {
     screenHeightPx: screen.screenHeightPx,
   }
 
-  const testType: TestType = OVFX_TO_TEST_TYPE[doc.test.type]
+  const testType = OVFX_TO_TEST_TYPE[doc.test.type]
+  if (testType == null) {
+    throw new OvfxImportError(
+      `OVFX documents of kind "${doc.test.type}" are not supported by this build (only "kinetic" and "static").`,
+    )
+  }
   // iemdr stores single-eye results only — a 'both' document would need
   // splitting, which we can't do without per-point eye provenance. Reject.
   if (doc.test.eye === 'both') {
@@ -370,6 +426,23 @@ export function importFromOvfx(doc: OvfxDocument): TestResult {
     : testType === 'static'
       ? ('suprathreshold' as const)
       : undefined
+  const opExt = doc.extensions?.openperimetry
+  const protocol: ResultProtocolSnapshot | undefined =
+    opExt?.protocol != null
+      ? { ...opExt.protocol }
+      : {
+          testType,
+          ...(testMode ? { testMode } : {}),
+          ...(doc.test.extendedField != null ? { extendedField: doc.test.extendedField } : {}),
+          ...(doc.test.pattern ? { staticGridPattern: doc.test.pattern } : {}),
+        }
+  const provenance: ResultProvenanceMetadata = {
+    source: 'ovfx-import',
+    sourceDocumentId: doc.id,
+    importedAt: new Date().toISOString(),
+    ...(doc.software?.version ? { sourceSoftwareVersion: doc.software.version } : {}),
+    ...(doc.software?.name ? { sourceSoftwareName: doc.software.name } : {}),
+  }
 
   return {
     id: crypto.randomUUID(),
@@ -380,8 +453,14 @@ export function importFromOvfx(doc: OvfxDocument): TestResult {
     calibration,
     testType,
     ...(testMode ? { testMode } : {}),
+    ...(doc.test.durationSeconds != null ? { durationSeconds: doc.test.durationSeconds } : {}),
     ...(doc.test.binocularGroup ? { binocularGroup: doc.test.binocularGroup } : {}),
     ...(doc.reliabilityIndices != null ? { reliabilityIndices: { ...doc.reliabilityIndices } } : {}),
+    ...(protocol ? { protocol } : {}),
+    ...(opExt?.study ? { study: { ...opExt.study } } : {}),
+    ...(opExt?.device ? { device: { ...opExt.device } } : {}),
+    provenance,
+    ...(opExt?.qualityMetrics ? { qualityMetrics: { ...opExt.qualityMetrics } } : {}),
   }
 }
 

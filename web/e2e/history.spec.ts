@@ -13,8 +13,8 @@ test.describe('History Page', () => {
   test('shows empty state when no results', async ({ page, seedResults }) => {
     await seedResults([])
     await page.goto('/')
-    // History button should not be visible
-    await expect(page.getByRole('button', { name: /Results/ })).not.toBeVisible()
+    await page.getByRole('button', { name: /Results/ }).click()
+    await expect(page.getByText('No results yet')).toBeVisible()
   })
 
   test('shows results list grouped by eye', async ({ page, seedResults }) => {
@@ -26,11 +26,11 @@ test.describe('History Page', () => {
     await expect(page.getByRole('button', { name: /OS \(Left\).*deg²/ })).toBeVisible()
   })
 
-  test('shows local storage warning when not logged in', async ({ page, seedResults }) => {
+  test('does not show local storage warning while signed in', async ({ page, seedResults }) => {
     await seedResults([createTestResult()])
     await page.goto('/')
     await page.getByRole('button', { name: /Results/ }).click()
-    await expect(page.getByText('Results stored locally only')).toBeVisible()
+    await expect(page.getByText('Results stored locally only')).toHaveCount(0)
   })
 
   test('navigates to result detail view', async ({ page, seedResults }) => {

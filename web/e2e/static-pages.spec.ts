@@ -6,19 +6,6 @@ test.describe('Static Pages', () => {
     await page.goto('/')
   })
 
-  test('About page shows author info and images', async ({ page }) => {
-    await page.getByRole('navigation').getByRole('button', { name: 'About' }).click()
-    await expect(page.getByRole('heading', { level: 1 })).toHaveText('About')
-    await expect(page.getByText('Daniël Tom')).toBeVisible()
-    // Images have alt text
-    const images = page.getByRole('img')
-    const count = await images.count()
-    for (let i = 0; i < count; i++) {
-      const alt = await images.nth(i).getAttribute('alt')
-      expect(alt).toBeTruthy()
-    }
-  })
-
   test('Privacy page shows policy sections', async ({ page }) => {
     await page.getByRole('navigation').getByRole('button', { name: 'Privacy' }).click()
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Privacy Policy')

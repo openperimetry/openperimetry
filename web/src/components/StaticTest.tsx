@@ -1,70 +1,112 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import type { CalibrationData, StoredEye, TestPoint, TestResult, StimulusKey } from '../types'
-import { STIMULI, ISOPTER_ORDER } from '../types'
-import { VisualFieldMap } from './VisualFieldMap'
+/**
+ * Static perimetry — HFA-style threshold test.
+ *
+ * Runs a 4-2 dB staircase at every location of a standard clinical grid
+ * (24-2 by default; 30-2 or 10-2 selectable in advanced settings) and
+ * returns a per-point threshold map.
+ *
+ * Design notes:
+ *
+ * - **No more hex grid.** The earlier revision built its own density-
+ *   weighted hex grid and ran a V4e→I2e Goldmann sweep on top. That
+ *   combination was non-standard and, crucially, put lots of points out
+ *   in the far periphery where RP users can't see anything — the first
+ *   round of the test felt like "I'm blind, this app is broken". The
+ *   HFA 24-2 pattern is the clinical standard for exactly this reason:
+ *   every point is inside a healthy eye's reliable detection range.
+ *
+ * - **Start bright, walk dimmer.** `PRIOR_DB = 0` (full brightness) at
+ *   every location. First presentation is obviously visible on any
+ *   consumer screen; the staircase walks dimmer from there. Clinical
+ *   HFAs start near 25 dB, but they run on calibrated bowls with known
+ *   luminance; we can't rely on that on an uncalibrated LCD.
+ *
+ * - **Rescue trial after 5 consecutive misses.** Round-robin scheduling
+ *   means peripheral points (where RP loss concentrates) get painted in
+ *   runs; five straight misses is demoralising and the user starts to
+ *   doubt the test. When the counter hits 5, the next presentation is
+ *   forced to a central pending point at V4e (largest Goldmann size) and
+ *   full brightness. Almost guaranteed to be seen; the outcome does NOT
+ *   feed any staircase (would corrupt the dB estimate). Purely a morale
+ *   anchor.
+ *
+ * - **Feedback on fixation.** Red flash on miss, green on seen. RP users
+ *   can't read top-of-screen text while fixating — the coloured
+ *   fixation dot is the entire status UI during the run.
+ */
+
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import type { CalibrationData, ResultQualityMetrics, StoredEye, TestPoint, TestResult } from '../types'
+import { STIMULI } from '../types'
 import { SensitivityMap } from './SensitivityMap'
-import { deriveDbFromSuprathreshold, dbToOpacity } from '../sensitivity'
-import { initStaircase, stepStaircase, type StaircaseState } from '../staircase'
-import { calcIsopterAreas } from '../isopterCalc'
-import { Interpretation } from './Interpretation'
+import { SavePrompt } from './SavePrompt'
+import { WhatsAppShareButton } from './WhatsAppShareButton'
+import { APP_DOMAIN } from '../branding'
+import { dbToOpacity } from '../sensitivity'
+import {
+  initStaircase,
+  stepStaircase,
+  type StaircaseState,
+} from '../staircase'
 import { VisionSimulator } from './VisionSimulator'
-import { saveResult, saveSurvey, hasSurveyForResult, getDeviceId } from '../storage'
-import { trackEvent } from '../api'
+import { saveResult, saveSurvey, hasSurveyForResult, hasBeenPromptedForFeedback, markFeedbackPrompted, getDeviceId, getDeviceInfo } from '../storage'
+import { useAuth } from '../AuthContext'
+import { trackEvent, trackEventBeacon, shareAnonymousVFResult } from '../api'
 import { exportTrackedResultPDF } from '../pdfExportTracking'
-import { ScenarioOverlay } from './ScenarioOverlay'
 import { PostTestSurvey } from './PostTestSurvey'
 import type { SurveyResponse } from './PostTestSurvey'
 import { ClinicalDisclaimer } from './ClinicalDisclaimer'
+import { ScenarioOverlay } from './ScenarioOverlay'
+import { calcIsopterAreas } from '../isopterCalc'
 import { STATIC_TEST } from '../constants'
 import { formatEyeLabel } from '../eyeLabels'
 import { HeadGuide } from './HeadGuide'
 import { degToPx } from '../geometry'
-import { blindspotLocation } from '../blindspot'
 import { stimulusDisplayColor } from '../stimulusDisplay'
-import {
-  SPEED_PRESETS,
-  type SpeedPresetName,
-} from '../testDefaults'
-import type { SpeedMode } from './GoldmannTest'
+import { SPEED_PRESETS } from '../testDefaults'
 import { useAdvancedSettings } from '../advancedSettings'
+import { useStudyMode } from '../studyMode'
+import {
+  getStaticGrid,
+  type GridPoint,
+  type StaticGridPattern,
+} from '../grids'
+import { summarizeThresholdPoints, thresholdSummaryToMeta } from '../thresholdSummary'
+import { PositionCheckOverlay } from './PositionCheckOverlay'
+import {
+  buildNativeProvenance,
+  buildProtocolSnapshot,
+  buildQualityMetrics,
+  buildStudyEventMeta,
+  buildStudyMetadata,
+  captureDeviceMetadata,
+} from '../resultMetadata'
 
-// ---------- constants ----------
-const DENSITY_EXPONENT = 1.5      // >1 = denser near center (Goldmann bowl → flat projection)
-const { MIN_RESPONSE_MS, MIN_ECCENTRICITY_DEG, MAX_TESTABLE_ECCENTRICITY_DEG, BURST_STAGGER_MS } = STATIC_TEST
+const { MIN_RESPONSE_MS } = STATIC_TEST
 
-type SpeedSetting = SpeedPresetName
+/** Trigger a rescue trial after this many consecutive unseen presentations. */
+const RESCUE_AFTER_MISSES = 5
 
-// Max eccentricity fraction per stimulus level.
-// Dim stimuli are mildly capped below full field — the tail-end periphery
-// is rarely sensitive enough for I2e even in normal eyes — but the cap is
-// now gentle enough to cover the healthy detection range (I2e typically
-// reaches ~22–28° in normally-sighted users, well inside 0.85 × maxEcc for
-// a 30°+ field). Earlier values (0.65/0.75/0.85) were tuned for RP-style
-// severe constriction and cut ~50% of the I2e area on healthy users.
-// The unseen-zone exclusion still skips known-dead areas regardless.
-const LEVEL_MAX_ECCENTRICITY_FRAC: Record<string, number> = {
-  'V4e': 1.0,     // full field
-  'III4e': 1.0,
-  'III2e': 0.95,
-  'I4e': 0.90,
-  'I2e': 0.85,
-}
+/** Starting dB for every staircase. 0 = maximum on-screen brightness. */
+const PRIOR_DB = 0
 
-type Phase = 'instructions' | 'countdown' | 'testing' | 'retest' | 'level-done' | 'paused' | 'results'
+/** localStorage key guarding against double-upload of an anonymous share. */
+const sharedFlagKey = (resultId: string) => `vfc-shared-result-${resultId}`
 
-type PointStatus = 'seen' | 'unseen'
+// 'position-check' is a one-shot pre-flight fired when the user taps Ready
+// in the instructions phase. The patient has just read the sitting
+// instructions (HeadGuide + "cover your X eye, sit at Y cm"), so the
+// check runs without any additional navigation and a pass lands them
+// straight in the countdown.
+type Phase = 'instructions' | 'position-check' | 'countdown' | 'testing' | 'paused' | 'results'
 
-interface GridPoint {
-  xDeg: number
-  yDeg: number
-  key: string
-}
-
-interface TestedPoint extends GridPoint {
-  status: PointStatus
-  stimulus: StimulusKey
-  responseTimeMs?: number
-}
+// Mobile keyboard-less devices don't have a Space key, so the
+// "press Space" copy in the instructions and pause screens is just
+// noise there. Computed once at module load — orientation doesn't
+// change whether the device has a hardware keyboard.
+const isMobileDevice = typeof navigator !== 'undefined'
+  && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+  && navigator.maxTouchPoints > 0
 
 interface Props {
   eye: StoredEye
@@ -72,149 +114,35 @@ interface Props {
   extendedField: boolean
   onDone: () => void
   onComplete?: (points: TestPoint[]) => void
-  /**
-   * Home-page speed preset. 'fast' → 50 points, 'normal' → 100 points.
-   * Stimulus-timing speed always defaults to 'normal' here and is only
-   * adjusted via the in-test speed selector.
-   */
-  speedMode?: SpeedMode
+  /** Timing preset selected from the home-screen toggle. Defaults to
+   *  'normal' (the faster pace — the new default). 'slow' uses longer
+   *  timings and more staircase reversals. An explicit Advanced
+   *  Settings speed-preset override still wins over this prop. */
+  speedMode?: 'normal' | 'slow'
 }
 
-/** Map home-page speed preset → static test point count. */
-function hexagonsForSpeed(mode: SpeedMode): number {
-  return mode === 'fast' ? 50 : 100
-}
-
-// ---------- utility functions ----------
-
-function round2(n: number): number {
-  return Math.round(n * 100) / 100
-}
-
-function shuffle<T>(arr: T[]): T[] {
-  const a = [...arr]
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1))
-    ;[a[i], a[j]] = [a[j], a[i]]
-  }
-  return a
-}
-
-function pointKey(xDeg: number, yDeg: number): string {
-  return `${round2(xDeg)},${round2(yDeg)}`
-}
-
-/**
- * Generate density-weighted hex grid.
- * Uses a power-law radial transform: uniform hex grid in "compressed" space
- * is expanded outward, producing dense coverage near fixation and sparser
- * at the periphery — like projecting the Goldmann bowl onto a flat surface.
- */
-function generateHexGrid(maxRadiusDeg: number, spacingDeg: number, exponent: number = 1): GridPoint[] {
-  const points: GridPoint[] = []
-  const seen = new Set<string>()
-  const rowHeight = spacingDeg * Math.sqrt(3) / 2
-  const maxRows = Math.ceil(maxRadiusDeg / rowHeight)
-  const maxCols = Math.ceil(maxRadiusDeg / spacingDeg)
-
-  for (let row = -maxRows; row <= maxRows; row++) {
-    const uy = row * rowHeight
-    const offset = (Math.abs(row) % 2 !== 0) ? spacingDeg / 2 : 0
-    for (let col = -maxCols; col <= maxCols; col++) {
-      const ux = col * spacingDeg + offset
-      const uDist = Math.sqrt(ux * ux + uy * uy)
-      if (uDist > maxRadiusDeg) continue
-
-      let x: number, y: number
-      if (exponent === 1 || uDist < 0.01) {
-        // Uniform grid (or origin)
-        x = round2(ux)
-        y = round2(uy)
-      } else {
-        // Power-law: expand radial distance
-        const vDist = maxRadiusDeg * Math.pow(uDist / maxRadiusDeg, exponent)
-        const angle = Math.atan2(uy, ux)
-        x = round2(vDist * Math.cos(angle))
-        y = round2(vDist * Math.sin(angle))
-      }
-
-      const dist = Math.sqrt(x * x + y * y)
-      if (dist < MIN_ECCENTRICITY_DEG) continue
-
-      const key = pointKey(x, y)
-      if (seen.has(key)) continue // skip duplicates from rounding
-      seen.add(key)
-      points.push({ xDeg: x, yDeg: y, key })
-    }
-  }
-  return points
-}
-
-/**
- * Find nearby tested points within a search radius.
- * Works with any point distribution (uniform or density-weighted).
- */
-function findNearbyTested(
-  point: { xDeg: number; yDeg: number },
-  tested: Map<string, TestedPoint>,
-  maxDist: number,
-  stimulusKey?: StimulusKey,
-): TestedPoint[] {
-  const nearby: TestedPoint[] = []
-  const maxDist2 = maxDist * maxDist
-  for (const [, tp] of tested) {
-    if (stimulusKey && tp.stimulus !== stimulusKey) continue
-    const dx = tp.xDeg - point.xDeg
-    const dy = tp.yDeg - point.yDeg
-    const d2 = dx * dx + dy * dy
-    if (d2 > 0.01 && d2 <= maxDist2) {
-      nearby.push(tp)
-    }
-  }
-  return nearby
-}
-
-/** Check if a point is within screen bounds */
-function isOnScreen(xDeg: number, yDeg: number, pxPerDeg: number, fixX: number): boolean {
-  const px = window.innerWidth / 2 + fixX + xDeg * pxPerDeg
-  const py = window.innerHeight / 2 - yDeg * pxPerDeg
-  const margin = 20
-  return px >= margin && px <= window.innerWidth - margin && py >= margin && py <= window.innerHeight - margin
-}
-
-/** Convert scatter points to TestPoint[] for results */
-function scatterToTestPoints(points: Map<string, TestedPoint>): TestPoint[] {
-  const result: TestPoint[] = []
-  for (const [, tp] of points) {
-    const ecc = Math.sqrt(tp.xDeg * tp.xDeg + tp.yDeg * tp.yDeg)
-    const meridian = ((Math.atan2(tp.yDeg, tp.xDeg) * 180 / Math.PI) + 360) % 360
-    result.push({
-      meridianDeg: meridian,
-      eccentricityDeg: ecc,
-      rawEccentricityDeg: ecc,
-      detected: tp.status === 'seen',
-      stimulus: tp.stimulus,
-    })
-  }
-  return result
-}
-
-export function StaticTest({ eye, calibration, extendedField, onDone, onComplete, speedMode = 'normal' }: Props) {
+export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = 'normal' }: Props) {
+  const { user, syncResults } = useAuth()
   const { pixelsPerDegree, maxEccentricityDeg, fixationOffsetPx } = calibration
-  const isMobileTest = calibration.viewingDistanceCm <= 15
-  // Fixation dot sizing — explicit px so countdown and test phases match and so
-  // the initial render doesn't start at the desktop size and then snap smaller
-  // after the first flashFixation() call.
-  const fixDotRestPx = isMobileTest ? 2 : 8
+
+  // Fixation-dot sizing — fixed px so the countdown dot and the test-phase
+  // dot match size, and the first flashFixation() call doesn't visibly
+  // resize it.
+  const fixDotRestPx = 8
   const fixDotRestOffset = -(fixDotRestPx / 2)
-  const fixDotSize = isMobileTest ? 'w-[2px] h-[2px]' : 'w-3 h-3'
-  const fixDotOffset = isMobileTest ? -1 : -6
+  const fixDotSize = 'w-3 h-3'
+  const fixDotOffset = -6
 
   // ---------- advanced settings ----------
-  // User-adjustable overrides for catch-trial cadence, alert duration/text,
-  // speed-preset timings, and background shade. Defaults to DEFAULT_ADVANCED_SETTINGS.
   const advanced = useAdvancedSettings()
-  // Map background shade to the background class used on every phase shell.
+  const studyMode = useStudyMode()
+  const gridPattern: StaticGridPattern = advanced.staticGridPattern
+  const customGrid = advanced.customGrid
+  // Ref mirror so tracking callbacks (unmount cleanup, async trackEvent)
+  // can read the grid pattern without adding it to their deps and causing
+  // spurious re-runs.
+  const gridPatternRef = useRef<StaticGridPattern>(gridPattern)
+  useEffect(() => { gridPatternRef.current = gridPattern }, [gridPattern])
   const bgClass =
     advanced.backgroundShade === 'light'
       ? 'bg-gray-400'
@@ -222,100 +150,113 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
         ? 'bg-gray-700'
         : 'bg-gray-950'
 
-  // ---------- configurable settings (shown on instructions screen) ----------
-  // Point count is derived from the home-page speed preset; the in-test
-  // precision/speed selectors were removed, so these are fixed for the run.
-  const targetHexagons = hexagonsForSpeed(speedMode)
-  const speed: SpeedSetting = 'normal'
-  const [thresholdMode, setThresholdMode] = useState(false)
-  // If the user enabled the advanced-settings speed-preset override, its
-  // timings win over the selected built-in preset. Otherwise fall through
-  // to SPEED_PRESETS[speed].
+  // Speed preset for stimulus timing. Advanced-settings override wins
+  // for the four timing fields; `reversalsRequired` is always taken
+  // from the home-screen speed toggle because the override UI does not
+  // expose it (clinical-reliability knob, not a pacing knob).
   const sp = advanced.speedPreset.override
     ? {
         stimulusMs: advanced.speedPreset.stimulusMs,
         responseMs: advanced.speedPreset.responseMs,
         gapMinMs: advanced.speedPreset.gapMinMs,
         gapMaxMs: advanced.speedPreset.gapMaxMs,
+        reversalsRequired: SPEED_PRESETS[speedMode].reversalsRequired,
       }
-    : SPEED_PRESETS[speed]
+    : SPEED_PRESETS[speedMode]
 
-  // Fixation position
   const fixationXY = { x: fixationOffsetPx, y: 0 }
 
-  // ---------- phase state ----------
+  // ---------- grid coverage ----------
+  // The HFA grids are defined in visual-angle degrees (±27° for 24-2,
+  // ±30° for 30-2, ±10° for 10-2). When `maxEccentricityDeg` — the field
+  // actually reachable on the calibrated screen at the current viewing
+  // distance — is smaller than the grid's outermost radius, those outer
+  // locations cannot be presented. Filter them out rather than firing
+  // stimuli off-screen (which would otherwise converge to a bogus "not
+  // seen" for the patient).
+  const gridCoverage = useMemo(() => {
+    const fullGrid = getStaticGrid(
+      gridPattern,
+      eye,
+      gridPattern === 'custom' ? customGrid : undefined,
+    )
+    const fitting = fullGrid.filter(p => {
+      const r = Math.sqrt(p.xDeg * p.xDeg + p.yDeg * p.yDeg)
+      return r <= maxEccentricityDeg
+    })
+    return {
+      totalLocations: fullGrid.length,
+      grid: fitting,
+      dropped: fullGrid.length - fitting.length,
+    }
+  }, [gridPattern, eye, customGrid, maxEccentricityDeg])
+
+  // ---------- phase ----------
   const [phase, setPhase] = useState<Phase>('instructions')
   const [countdown, setCountdown] = useState(3)
   const phaseRef = useRef<Phase>('instructions')
+  useEffect(() => { phaseRef.current = phase }, [phase])
+  const pausedPhaseRef = useRef<Phase>('testing')
 
   // ---------- test state ----------
-  const testedPointsRef = useRef<Map<string, TestedPoint>>(new Map())
-  const [visiblePoints, setVisiblePoints] = useState<TestedPoint[]>([])
-  const [totalPoints, setTotalPoints] = useState(0)
-  const [remainingCount, setRemainingCount] = useState(0)
-  // Threshold mode only: count stimulus presentations, so the in-test progress
-  // counter advances on every trial (not just when a full 4-2 staircase for a
-  // location finishes — which can take ~50 s when round-robining across all
-  // locations). `remainingCount` reflects pending staircases (good for the ring
-  // fraction once points start completing), but we want a numerator that moves
-  // from the very first trial. Expected ~5 presentations per location, so the
-  // denominator for display is `totalPoints * 5`.
-  const [thresholdTrialsDone, setThresholdTrialsDone] = useState(0)
-
-  // Grid spacing (calculated to get ~TARGET_HEXAGONS points)
-  const gridSpacingRef = useRef(5)
-
-  // Stimulus queue
+  const gridRef = useRef<GridPoint[]>([])
   const queueRef = useRef<GridPoint[]>([])
-  const currentPointRef = useRef<GridPoint | null>(null)
-
-  // Burst mode
-  const batchPointsRef = useRef<GridPoint[]>([])
-  const verifyQueueRef = useRef<GridPoint[]>([])
-
-  // Catch-trial tracking
-  const isCatchTrialRef = useRef(false)
-  const catchTrialRef = useRef<Array<{ detected: boolean }>>([])
-  const truePositivesRef = useRef(0)
-  const [showFixationLossAlert, setShowFixationLossAlert] = useState(false)
-
-  // ISI false-positive tracking
-  const isiActiveRef = useRef(false)
-  const fpIsiPressesRef = useRef(0)
-
-  // Stimulus level progression
-  const [currentStimulusIdx, setCurrentStimulusIdx] = useState(0)
-  const currentStimulusRef = useRef<StimulusKey>(ISOPTER_ORDER[0])
-
-  // Threshold mode (4-2 dB staircase per location)
   const staircasesRef = useRef<Map<string, StaircaseState>>(new Map())
-  const thresholdModeRef = useRef(false)
+  const currentPointRef = useRef<GridPoint | null>(null)
   const currentStaircaseKeyRef = useRef<string | null>(null)
   const thresholdResultsRef = useRef<TestPoint[]>([])
 
-  // Timing
-  const stimulusShownRef = useRef(false)
+  // Progress: total points + number of staircases still running. Updated
+  // as staircases finish so the ring animates smoothly.
+  const [totalPoints, setTotalPoints] = useState(0)
+  const [, setRemainingCount] = useState(0)
+  // Trial counter exists only to trigger a re-render each presentation —
+  // the progress ring reads its real value from `staircasesRef`.
+  const [trialsDone, setTrialsDone] = useState(0)
+
+  // Rescue-trial state.
+  const consecutiveMissesRef = useRef(0)
+  const rescueTrialRef = useRef(false)
+  // Count of rescue trials actually fired — surfaced in telemetry meta so
+  // we can tell whether morale-anchor trials are kicking in a lot (bad
+  // sign: test is demoralising) vs. rarely (fine).
+  const rescueFiredRef = useRef(0)
+
+  // ---------- timing / DOM ----------
   const stimulusStartRef = useRef(0)
   const respondedRef = useRef(false)
   const delayTimeoutRef = useRef<ReturnType<typeof setTimeout>>(0 as unknown as ReturnType<typeof setTimeout>)
   const hideTimeoutRef = useRef<ReturnType<typeof setTimeout>>(0 as unknown as ReturnType<typeof setTimeout>)
   const responseTimeoutRef = useRef<ReturnType<typeof setTimeout>>(0 as unknown as ReturnType<typeof setTimeout>)
 
-  // DOM refs
   const fixationDotRef = useRef<HTMLDivElement>(null)
   const stimulusRef = useRef<HTMLDivElement>(null)
-  const stimulus2Ref = useRef<HTMLDivElement>(null)
 
-  // Results
+  // ISI (false-positive) guard: pressing during the gap between stimuli.
+  const isiActiveRef = useRef(false)
+  const fpIsiPressesRef = useRef(0)
+
+  // ---------- results ----------
   const [results, setResults] = useState<TestPoint[]>([])
   const [savedId, setSavedId] = useState<string | null>(null)
+  // Keep the built TestResult around so we can retry persistence if the
+  // user signs in *after* finishing the test. saveResult no-ops for
+  // anonymous users.
+  const lastResultRef = useRef<TestResult | null>(null)
   const [showVisionSim, setShowVisionSim] = useState(false)
   const [surveyDone, setSurveyDone] = useState(false)
+  // Active-prompt feedback modal — fires once per device, on either
+  // Done or Export PDF. `'done'` runs handleDone() on close; `'pdf'`
+  // closes the modal in place so the user keeps seeing the results.
+  const [feedbackTrigger, setFeedbackTrigger] = useState<'done' | 'pdf' | null>(null)
+  // Anonymous-share state for the opt-in "Share to help improve" button.
+  // Separate from `savedId` (local save) — "shared" means uploaded to the
+  // server for maintainer debugging, which is opt-in and privacy-policy-
+  // gated. Persisted in localStorage so a refresh doesn't re-offer a
+  // result that's already been uploaded.
+  const [shareState, setShareState] = useState<'idle' | 'sharing' | 'shared' | 'error'>('idle')
 
-  // Paused state tracking
-  const pausedPhaseRef = useRef<Phase>('testing')
-
-  // Tracking-event lifecycle (start fires on first stimulus, not button click)
+  // ---------- tracking ----------
   const startedTrackedRef = useRef(false)
   const completedTrackedRef = useRef(false)
   const testStartedAtRef = useRef<number | null>(null)
@@ -324,221 +265,68 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     return startedAt == null ? undefined : Math.max(0, Math.round((Date.now() - startedAt) / 1000))
   }, [])
 
-  // Update phaseRef when phase changes
-  useEffect(() => {
-    phaseRef.current = phase
-  }, [phase])
-
-  // Mirror thresholdMode state into a ref so static callbacks (presentNext
-  // family, handleResponse, finishTest) can read the live value without
-  // becoming stale through closure capture.
-  useEffect(() => {
-    thresholdModeRef.current = thresholdMode
-  }, [thresholdMode])
-
-  // Helper to clear all timeouts
+  // ---------- helpers ----------
   const clearAllTimeouts = useCallback(() => {
     clearTimeout(delayTimeoutRef.current)
     clearTimeout(hideTimeoutRef.current)
     clearTimeout(responseTimeoutRef.current)
   }, [])
 
-  // ---------- get max screen extent ----------
-  // Clamped to a realistic visual-field ceiling. Without clamping, short viewing
-  // distances (phone mode at a few cm) produce 200°+ extents and the hex grid
-  // generator overshoots the target point count by 3–4×.
-  const getMaxExtentDeg = useCallback(() => {
-    const halfW = window.innerWidth / 2
-    const halfH = window.innerHeight / 2
-    const raw = Math.max(
-      (halfW + Math.abs(fixationXY.x)) / pixelsPerDegree,
-      halfH / pixelsPerDegree,
-    )
-    return extendedField ? raw : Math.min(MAX_TESTABLE_ECCENTRICITY_DEG, raw)
-  }, [pixelsPerDegree, fixationXY.x, extendedField])
-
-  // ---------- get full screen area in deg² ----------
-  // Clamp each axis to 2× the testable eccentricity so we don't feed an inflated
-  // area to the spacing estimator when the screen subtends more than the cap.
-  const getScreenAreaDeg2 = useCallback(() => {
-    const maxAxis = MAX_TESTABLE_ECCENTRICITY_DEG * 2
-    const wDeg = (window.innerWidth - 40) / pixelsPerDegree
-    const hDeg = (window.innerHeight - 40) / pixelsPerDegree
-    const screenWidthDeg = extendedField ? wDeg : Math.min(maxAxis, wDeg)
-    const screenHeightDeg = extendedField ? hDeg : Math.min(maxAxis, hDeg)
-    return screenWidthDeg * screenHeightDeg
-  }, [pixelsPerDegree, extendedField])
-
-  // Store the spacing used for each stimulus level (for proper exclusion radii)
-  const levelSpacingRef = useRef<Map<StimulusKey, number>>(new Map())
-
-  // Store the current grid for overlay visualization
-  const currentGridRef = useRef<GridPoint[]>([])
-  const [showGrid, setShowGrid] = useState(false)
-
-  // ---------- check if a point falls inside an unseen zone ----------
-  const isInUnseenZone = useCallback((xDeg: number, yDeg: number, unseenPoints: TestedPoint[]): boolean => {
-    for (const u of unseenPoints) {
-      // Use the exclusion radius from the level that determined this point unseen
-      const levelSpacing = levelSpacingRef.current.get(u.stimulus) ?? 5
-      const pad = levelSpacing * 0.45
-      const dx = xDeg - u.xDeg
-      const dy = yDeg - u.yDeg
-      if (dx * dx + dy * dy <= pad * pad) return true
-    }
-    return false
-  }, [])
-
-  // ---------- generate and filter grid at a given spacing ----------
-  const generateFilteredGrid = useCallback((spacingDeg: number, maxExtentDeg: number, unseenZonePoints: TestedPoint[], maxEccDeg?: number): GridPoint[] => {
-    const grid = generateHexGrid(maxExtentDeg, spacingDeg, DENSITY_EXPONENT)
-    return grid.filter(p => {
-      if (maxEccDeg && Math.sqrt(p.xDeg * p.xDeg + p.yDeg * p.yDeg) > maxEccDeg) return false
-      if (!isOnScreen(p.xDeg, p.yDeg, pixelsPerDegree, fixationXY.x)) return false
-      if (unseenZonePoints.length > 0 && isInUnseenZone(p.xDeg, p.yDeg, unseenZonePoints)) return false
-      return true
-    })
-  }, [isInUnseenZone, pixelsPerDegree, fixationXY.x])
-
-  // ---------- initialize grid for a stimulus level ----------
-  const initGrid = useCallback((stimulusKey: StimulusKey) => {
-    const maxExtentDeg = getMaxExtentDeg()
-    const currentIdx = ISOPTER_ORDER.indexOf(stimulusKey)
-    const tested = testedPointsRef.current
-
-    // Dimmer/smaller stimuli aren't detectable in the far periphery — limit eccentricity
-    const eccFrac = LEVEL_MAX_ECCENTRICITY_FRAC[stimulusKey] ?? 1.0
-    const levelMaxEcc = maxExtentDeg * eccFrac
-
-    // Collect all unseen points from brighter (or equal) stimulus levels — these zones are dead
-    const unseenZonePoints: TestedPoint[] = []
-    for (const [, tp] of tested) {
-      if (tp.status === 'unseen') {
-        const tpIdx = ISOPTER_ORDER.indexOf(tp.stimulus)
-        if (tpIdx <= currentIdx) unseenZonePoints.push(tp)
-      }
-    }
-
-    // Estimate seen fraction from previous levels for better initial spacing
-    const totalTested = tested.size
-    const totalUnseen = unseenZonePoints.length
-    const seenFraction = totalTested > 0 ? Math.max(0.1, 1 - totalUnseen / Math.max(totalTested, 1)) : 1
-
-    // Initial spacing estimate: account for seen fraction and reduced eccentricity
-    const fullArea = getScreenAreaDeg2()
-    const effectiveArea = fullArea * seenFraction * eccFrac * eccFrac
-    const initSpacing = Math.sqrt(effectiveArea * 2 / (Math.sqrt(3) * targetHexagons))
-
-    // Spacing bounds scale with the field so the loop can actually converge for
-    // very large fields (phone mode) without getting pinned to a hard max.
-    const minSpacing = 1
-    const maxSpacing = Math.max(12, maxExtentDeg / 3)
-
-    // Iteratively adjust spacing until filtered count ≈ targetHexagons
-    let spacing = Math.max(minSpacing, Math.min(maxSpacing, initSpacing))
-    let filtered = generateFilteredGrid(spacing, maxExtentDeg, unseenZonePoints, levelMaxEcc)
-    const tolerance = Math.max(5, targetHexagons * 0.1) // within 10%
-
-    for (let iter = 0; iter < 12; iter++) {
-      const count = filtered.length
-      if (count === 0) { spacing *= 0.7; filtered = generateFilteredGrid(spacing, maxExtentDeg, unseenZonePoints, levelMaxEcc); continue }
-      if (Math.abs(count - targetHexagons) <= tolerance) break
-      // Damped ratio adjustment to avoid oscillation
-      const rawRatio = Math.sqrt(count / targetHexagons)
-      const ratio = 1 + (rawRatio - 1) * 0.6
-      spacing = Math.max(minSpacing, Math.min(maxSpacing, spacing * ratio))
-      filtered = generateFilteredGrid(spacing, maxExtentDeg, unseenZonePoints, levelMaxEcc)
-    }
-
-    gridSpacingRef.current = round2(spacing)
-    levelSpacingRef.current.set(stimulusKey, round2(spacing))
-    currentGridRef.current = filtered
-
-    // Clear old test entries for the points we're about to test at this level
-    for (const p of filtered) {
-      const existing = tested.get(p.key)
-      if (existing && existing.stimulus !== stimulusKey) {
-        tested.delete(p.key)
-      }
-    }
-    setVisiblePoints(Array.from(tested.values()))
-
-    const shuffled = shuffle(filtered)
-    queueRef.current = shuffled
-    verifyQueueRef.current = []
-    setTotalPoints(shuffled.length)
-    setRemainingCount(shuffled.length)
-    currentStimulusRef.current = stimulusKey
-  }, [getMaxExtentDeg, getScreenAreaDeg2, generateFilteredGrid, targetHexagons])
-
-  // ---------- show/hide stimulus ----------
-  // Core helper: show stimulus at (xDeg, yDeg) using an explicit stim key.
-  const showStimulusAt = useCallback((xDeg: number, yDeg: number, stimKey: StimulusKey, overrideOpacity?: number) => {
-    const el = stimulusRef.current
-    if (!el) return
-    const stim = STIMULI[stimKey]
-    const sizePx = Math.max(4, Math.round(degToPx(stim.sizeDeg, calibration)))
-    const screenX = fixationXY.x + degToPx(xDeg, calibration)
-    const screenY = fixationXY.y - degToPx(yDeg, calibration)
-    el.style.width = `${sizePx}px`
-    el.style.height = `${sizePx}px`
-    el.style.marginLeft = `${-sizePx / 2 + screenX}px`
-    el.style.marginTop = `${-sizePx / 2 + screenY}px`
-    el.style.backgroundColor = stimulusDisplayColor(stimKey)
-    el.style.opacity = `${overrideOpacity ?? stim.intensityFrac}`
-    stimulusShownRef.current = true
-  }, [pixelsPerDegree, fixationXY.x, fixationXY.y])
-
-  const showStimulus = useCallback((xDeg: number, yDeg: number) => {
-    showStimulusAt(xDeg, yDeg, currentStimulusRef.current)
-  }, [showStimulusAt])
-
-  const showStimulus2 = useCallback((xDeg: number, yDeg: number) => {
-    const el = stimulus2Ref.current
-    if (!el) return
-    const stim = STIMULI[currentStimulusRef.current]
-    const sizePx = Math.max(4, Math.round(degToPx(stim.sizeDeg, calibration)))
-    const screenX = fixationXY.x + degToPx(xDeg, calibration)
-    const screenY = fixationXY.y - degToPx(yDeg, calibration)
-    el.style.width = `${sizePx}px`
-    el.style.height = `${sizePx}px`
-    el.style.marginLeft = `${-sizePx / 2 + screenX}px`
-    el.style.marginTop = `${-sizePx / 2 + screenY}px`
-    el.style.backgroundColor = stimulusDisplayColor(currentStimulusRef.current)
-    el.style.opacity = `${stim.intensityFrac}`
-  }, [pixelsPerDegree, fixationXY.x, fixationXY.y])
+  /** Show a stimulus at (xDeg, yDeg) with the given size (in degrees) and
+   *  opacity. Size is used directly rather than via a STIMULI key because
+   *  rescue trials need a different size than the III4e staircase. */
+  const showStimulus = useCallback(
+    (xDeg: number, yDeg: number, sizeDeg: number, opacity: number) => {
+      const el = stimulusRef.current
+      if (!el) return
+      const sizePx = Math.max(4, Math.round(degToPx(sizeDeg, calibration)))
+      const screenX = fixationXY.x + degToPx(xDeg, calibration)
+      const screenY = fixationXY.y - degToPx(yDeg, calibration)
+      el.style.width = `${sizePx}px`
+      el.style.height = `${sizePx}px`
+      el.style.marginLeft = `${-sizePx / 2 + screenX}px`
+      el.style.marginTop = `${-sizePx / 2 + screenY}px`
+      // White stimulus — the Goldmann size/opacity encode the level, colour
+      // stays constant.
+      el.style.backgroundColor = stimulusDisplayColor('III4e')
+      el.style.opacity = `${opacity}`
+    },
+    // calibration stability is sufficient for this ref-only writer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pixelsPerDegree, fixationXY.x, fixationXY.y],
+  )
 
   const hideStimulus = useCallback(() => {
     const el = stimulusRef.current
     if (el) el.style.opacity = '0'
-    const el2 = stimulus2Ref.current
-    if (el2) el2.style.opacity = '0'
-    stimulusShownRef.current = false
   }, [])
 
-  // ---------- flash fixation ----------
-  const flashFixation = useCallback((color: string, durationMs: number) => {
-    const dot = fixationDotRef.current
-    if (!dot) return
-    const flashSize = isMobileTest ? 4 : 12
-    const restSize = fixDotRestPx
-    const flashOff = -(flashSize / 2)
-    const restOff = fixDotRestOffset
-    dot.style.backgroundColor = color
-    dot.style.width = `${flashSize}px`
-    dot.style.height = `${flashSize}px`
-    dot.style.marginLeft = `${flashOff + fixationXY.x}px`
-    dot.style.marginTop = `${flashOff + fixationXY.y}px`
-    setTimeout(() => {
-      dot.style.backgroundColor = '#fbbf24'
-      dot.style.width = `${restSize}px`
-      dot.style.height = `${restSize}px`
-      dot.style.marginLeft = `${restOff + fixationXY.x}px`
-      dot.style.marginTop = `${restOff + fixationXY.y}px`
-    }, durationMs)
-  }, [fixationXY.x, fixationXY.y, isMobileTest, fixDotRestPx, fixDotRestOffset])
+  /** Flash the fixation dot a colour and snap it back to amber. Used for
+   *  seen (green) / unseen (red) / false-positive (red, longer) feedback. */
+  const flashFixation = useCallback(
+    (color: string, durationMs: number) => {
+      const dot = fixationDotRef.current
+      if (!dot) return
+      const flashSize = 12
+      const restSize = fixDotRestPx
+      const flashOff = -(flashSize / 2)
+      const restOff = fixDotRestOffset
+      dot.style.backgroundColor = color
+      dot.style.width = `${flashSize}px`
+      dot.style.height = `${flashSize}px`
+      dot.style.marginLeft = `${flashOff + fixationXY.x}px`
+      dot.style.marginTop = `${flashOff + fixationXY.y}px`
+      setTimeout(() => {
+        dot.style.backgroundColor = '#fbbf24'
+        dot.style.width = `${restSize}px`
+        dot.style.height = `${restSize}px`
+        dot.style.marginLeft = `${restOff + fixationXY.x}px`
+        dot.style.marginTop = `${restOff + fixationXY.y}px`
+      }, durationMs)
+    },
+    [fixationXY.x, fixationXY.y, fixDotRestPx, fixDotRestOffset],
+  )
 
-  // ---------- record threshold-mode result ----------
   const recordThresholdPoint = useCallback((point: GridPoint, thresholdDb: number) => {
     const ecc = Math.sqrt(point.xDeg * point.xDeg + point.yDeg * point.yDeg)
     const meridian = ((Math.atan2(point.yDeg, point.xDeg) * 180 / Math.PI) + 360) % 360
@@ -558,507 +346,223 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     return pending
   }, [])
 
-  // ---------- record result ----------
-  const recordResult = useCallback((point: GridPoint, seen: boolean, responseTimeMs?: number) => {
-    const tp: TestedPoint = {
-      ...point,
-      status: seen ? 'seen' : 'unseen',
-      stimulus: currentStimulusRef.current,
-      responseTimeMs,
-    }
-    testedPointsRef.current.set(point.key, tp)
-    setVisiblePoints(Array.from(testedPointsRef.current.values()))
-    setRemainingCount(queueRef.current.filter(p => !testedPointsRef.current.has(p.key)).length + verifyQueueRef.current.length)
-  }, [])
-
-  // ---------- find isolated unseen dots (suspicious - 0 unseen neighbors) ----------
-  const findIsolatedUnseen = useCallback(() => {
-    const tested = testedPointsRef.current
-    const searchRadius = gridSpacingRef.current * 2.5 // generous for density-weighted grids
-    const isolated: GridPoint[] = []
-
-    for (const [, point] of tested) {
-      if (point.status !== 'unseen') continue
-      if (point.stimulus !== currentStimulusRef.current) continue
-
-      const nearby = findNearbyTested(point, tested, searchRadius, currentStimulusRef.current)
-      const hasUnseenNeighbor = nearby.some(n => n.status === 'unseen')
-
-      if (!hasUnseenNeighbor) {
-        isolated.push(point)
-      }
-    }
-    return isolated
-  }, [])
-
   // ---------- fullscreen ----------
-  // iPhone Safari does not support requestFullscreen() on arbitrary elements
-  // (only iPadOS/Android/desktop do). For iPhone we fall back to a tiny
-  // scrollTo nudge which convinces Safari to auto-hide its address bar in
-  // landscape. Users who install as a PWA get the fullest experience thanks
-  // to the apple-mobile-web-app-capable meta tag in index.html.
   const enterFullscreen = useCallback(() => {
     try {
       const el = document.documentElement as HTMLElement & {
         webkitRequestFullscreen?: () => Promise<void>
       }
-      if (el.requestFullscreen) {
-        el.requestFullscreen().catch(() => {})
-      } else if (el.webkitRequestFullscreen) {
-        el.webkitRequestFullscreen()
-      }
+      if (el.requestFullscreen) el.requestFullscreen().catch(() => {})
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen()
     } catch { /* not supported */ }
-    // Nudge iPhone Safari to hide the URL bar on each entry.
-    if (typeof window !== 'undefined') {
-      window.scrollTo(0, 1)
-    }
+    if (typeof window !== 'undefined') window.scrollTo(0, 1)
   }, [])
+
   const exitFullscreen = useCallback(() => {
     try {
       const doc = document as Document & {
         webkitFullscreenElement?: Element | null
         webkitExitFullscreen?: () => Promise<void>
       }
-      if (doc.fullscreenElement && doc.exitFullscreen) {
-        doc.exitFullscreen().catch(() => {})
-      } else if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
-        doc.webkitExitFullscreen()
-      }
+      if (doc.fullscreenElement && doc.exitFullscreen) doc.exitFullscreen().catch(() => {})
+      else if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) doc.webkitExitFullscreen()
     } catch { /* not supported */ }
   }, [])
 
-  // ---------- finish test ----------
+  // ---------- finish ----------
   const finishTest = useCallback(() => {
     exitFullscreen()
-    const testPoints = thresholdModeRef.current
-      ? [...thresholdResultsRef.current]
-      : scatterToTestPoints(testedPointsRef.current)
-    setResults(testPoints)
+    setResults([...thresholdResultsRef.current])
     setPhase('results')
   }, [exitFullscreen])
 
-  // ---------- go to cleanup or next level ----------
-  const advanceToNextLevel = useCallback(() => {
-    const nextIdx = ISOPTER_ORDER.indexOf(currentStimulusRef.current) + 1
-    if (nextIdx < ISOPTER_ORDER.length) {
-      setCurrentStimulusIdx(nextIdx)
-      currentStimulusRef.current = ISOPTER_ORDER[nextIdx]
-      setPhase('level-done')
-      exitFullscreen()
-    } else {
-      finishTest()
+  // ---------- pick rescue point ----------
+  /** Random pending point from the inner ~40% by eccentricity. Central
+   *  points are likely inside RP-preserved vision so the rescue flash
+   *  feels like a win; picking randomly within that inner band stops the
+   *  rescue from always landing on the same 1–2 dots and giving the game
+   *  away. Falls back to any pending point if the inner band is empty. */
+  const RESCUE_INNER_FRACTION = 0.4
+  const pickRescuePendingPoint = useCallback((): GridPoint | null => {
+    const pending: Array<{ p: GridPoint; ecc: number }> = []
+    for (const p of gridRef.current) {
+      const s = staircasesRef.current.get(p.key)
+      if (!s || s.done) continue
+      pending.push({ p, ecc: Math.hypot(p.xDeg, p.yDeg) })
     }
-  }, [exitFullscreen, finishTest])
-
-  const goToCleanupOrNextLevel = useCallback(() => {
-    hideStimulus()
-    clearAllTimeouts()
-    advanceToNextLevel()
-  }, [hideStimulus, clearAllTimeouts, advanceToNextLevel])
-
-  // ---------- pick a distant point for burst pairing ----------
-  const pickDistantPoint = useCallback((first: GridPoint, queue: GridPoint[]): GridPoint | null => {
-    let bestIdx = -1
-    let bestScore = 0
-    for (let i = 0; i < Math.min(queue.length, 20); i++) {
-      const p = queue[i]
-      if (testedPointsRef.current.has(p.key)) continue
-      const dx = p.xDeg - first.xDeg
-      const dy = p.yDeg - first.yDeg
-      const dist = Math.sqrt(dx * dx + dy * dy)
-      const diffQuadrant = (Math.sign(p.xDeg) !== Math.sign(first.xDeg)) || (Math.sign(p.yDeg) !== Math.sign(first.yDeg))
-      const score = dist + (diffQuadrant ? 20 : 0)
-      if (score > bestScore) {
-        bestScore = score
-        bestIdx = i
-      }
-    }
-    if (bestIdx >= 0 && bestScore > 8) {
-      const [picked] = queue.splice(bestIdx, 1)
-      return picked
-    }
-    return null
+    if (pending.length === 0) return null
+    pending.sort((a, b) => a.ecc - b.ecc)
+    const innerCount = Math.max(1, Math.round(pending.length * RESCUE_INNER_FRACTION))
+    const inner = pending.slice(0, innerCount)
+    return inner[Math.floor(Math.random() * inner.length)].p
   }, [])
-
-  // Counter to interleave verify points among regular presentations
-  const presentCountRef = useRef(0)
-
-  // Stable ref to presentNext so presentCatchTrial can call it without a
-  // circular useCallback dependency.
-  const presentNextRef = useRef<(() => void) | null>(null)
-
-  // ---------- catch-trial presentation ----------
-  const presentCatchTrial = useCallback(() => {
-    // Present a bright V4e stimulus at the anatomical blindspot. A patient
-    // fixating correctly will NOT see it; detection is a fixation-loss signal.
-    const bs = blindspotLocation(eye)
-    const bsRad = (bs.meridianDeg * Math.PI) / 180
-    const bsXDeg = bs.eccentricityDeg * Math.cos(bsRad)
-    const bsYDeg = bs.eccentricityDeg * Math.sin(bsRad)
-
-    isCatchTrialRef.current = true
-    respondedRef.current = false
-    // Use a sentinel GridPoint so currentPointRef is non-null (handleResponse guard)
-    const catchPoint: GridPoint = { xDeg: bsXDeg, yDeg: bsYDeg, key: '__catch__' }
-    currentPointRef.current = catchPoint
-    batchPointsRef.current = []
-
-    const delay = sp.gapMinMs + Math.random() * (sp.gapMaxMs - sp.gapMinMs)
-    delayTimeoutRef.current = setTimeout(() => {
-      if (phaseRef.current !== 'testing' && phaseRef.current !== 'retest') return
-      isiActiveRef.current = false
-      showStimulusAt(bsXDeg, bsYDeg, 'V4e')
-      stimulusStartRef.current = performance.now()
-      hideTimeoutRef.current = setTimeout(() => hideStimulus(), sp.stimulusMs)
-      responseTimeoutRef.current = setTimeout(() => {
-        if (!respondedRef.current && currentPointRef.current === catchPoint) {
-          hideStimulus()
-          // Miss: patient correctly did not see the catch trial
-          catchTrialRef.current.push({ detected: false })
-          isCatchTrialRef.current = false
-          currentPointRef.current = null
-          isiActiveRef.current = true
-          presentNextRef.current?.()
-        }
-      }, sp.responseMs)
-    }, delay)
-    isiActiveRef.current = true
-  }, [eye, showStimulusAt, hideStimulus, sp.gapMinMs, sp.gapMaxMs, sp.stimulusMs, sp.responseMs])
 
   // ---------- present next stimulus ----------
   const presentNext = useCallback(() => {
-    if (phaseRef.current !== 'testing' && phaseRef.current !== 'retest') return
-
-    isiActiveRef.current = false
-    presentCountRef.current++
-
-    // Every Nth presentation, inject a blindspot catch trial
-    if (presentCountRef.current % advanced.catchTrialEveryN === 0) {
-      presentCatchTrial()
-      return
-    }
-
-    // Every 3rd presentation, take from verify queue if available (single dot, no burst)
-    if (verifyQueueRef.current.length > 0 && presentCountRef.current % 3 === 0) {
-      let verifyPoint: GridPoint | undefined
-      while (verifyQueueRef.current.length > 0) {
-        const candidate = verifyQueueRef.current.shift()!
-        if (!testedPointsRef.current.has(candidate.key)) {
-          verifyPoint = candidate
-          break
-        }
-      }
-      if (verifyPoint) {
-        batchPointsRef.current = []
-        currentPointRef.current = verifyPoint
-        respondedRef.current = false
-        const theVerifyPoint = verifyPoint
-        const delay = sp.gapMinMs + Math.random() * (sp.gapMaxMs - sp.gapMinMs)
-        delayTimeoutRef.current = setTimeout(() => {
-          if (phaseRef.current !== 'testing' && phaseRef.current !== 'retest') return
-          isiActiveRef.current = false
-          showStimulus(theVerifyPoint.xDeg, theVerifyPoint.yDeg)
-          stimulusStartRef.current = performance.now()
-          hideTimeoutRef.current = setTimeout(() => hideStimulus(), sp.stimulusMs)
-          responseTimeoutRef.current = setTimeout(() => {
-            if (!respondedRef.current && currentPointRef.current === theVerifyPoint) {
-              hideStimulus()
-              recordResult(theVerifyPoint, false)
-              flashFixation('#ef4444', 200)
-              isiActiveRef.current = true
-              presentNext()
-            }
-          }, sp.responseMs)
-        }, delay)
-        isiActiveRef.current = true
-        return
-      }
-    }
-
-    const queue = queueRef.current
-
-    // Skip already-tested points
-    while (queue.length > 0 && testedPointsRef.current.has(queue[0].key)) {
-      queue.shift()
-    }
-
-    if (queue.length === 0) {
-      // Check if verify queue still has items
-      if (verifyQueueRef.current.length > 0) {
-        presentCountRef.current = 2 // force verify on next call
-        presentNext()
-        return
-      }
-      // Queue exhausted
-      if (phaseRef.current === 'testing') {
-        // Check for isolated unseen dots — retest them
-        const isolated = findIsolatedUnseen()
-        if (isolated.length > 0) {
-          // Remove from tested and re-queue
-          for (const p of isolated) {
-            testedPointsRef.current.delete(p.key)
-          }
-          setVisiblePoints(Array.from(testedPointsRef.current.values()))
-          queueRef.current = shuffle(isolated)
-          setRemainingCount(isolated.length)
-          setPhase('retest')
-          phaseRef.current = 'retest'
-          const delay = sp.gapMinMs + Math.random() * (sp.gapMaxMs - sp.gapMinMs)
-          delayTimeoutRef.current = setTimeout(presentNext, delay)
-          isiActiveRef.current = true
-          return
-        }
-        goToCleanupOrNextLevel()
-        return
-      }
-      // Retest phase done
-      goToCleanupOrNextLevel()
-      return
-    }
-
-    // Get next point
-    const point = queue.shift()!
-    currentPointRef.current = point
-    respondedRef.current = false
-    batchPointsRef.current = [point]
-
-    // BURST MODE: during testing (not retest), pair with a distant second point
-    let burstPoint: GridPoint | null = null
-    if (phaseRef.current === 'testing' && queue.length >= 2) {
-      burstPoint = pickDistantPoint(point, queue)
-      if (burstPoint) {
-        batchPointsRef.current = [point, burstPoint]
-      }
-    }
-
-    const delay = sp.gapMinMs + Math.random() * (sp.gapMaxMs - sp.gapMinMs)
-    const thePoint = point
-    const theBurstPoint = burstPoint
-    const theBatch = [...batchPointsRef.current]
-
-    delayTimeoutRef.current = setTimeout(() => {
-      if (phaseRef.current !== 'testing' && phaseRef.current !== 'retest') return
-
-      isiActiveRef.current = false
-      showStimulus(thePoint.xDeg, thePoint.yDeg)
-      stimulusStartRef.current = performance.now()
-
-      if (theBurstPoint) {
-        // BURST: show second dot with stagger
-        setTimeout(() => {
-          showStimulus2(theBurstPoint.xDeg, theBurstPoint.yDeg)
-        }, BURST_STAGGER_MS)
-
-        hideTimeoutRef.current = setTimeout(() => {
-          hideStimulus()
-        }, sp.stimulusMs + BURST_STAGGER_MS)
-
-        responseTimeoutRef.current = setTimeout(() => {
-          if (!respondedRef.current && currentPointRef.current === thePoint) {
-            hideStimulus()
-            // Neither dot seen — mark both unseen
-            for (const bp of theBatch) {
-              recordResult(bp, false)
-            }
-            flashFixation('#ef4444', 200)
-            isiActiveRef.current = true
-            presentNext()
-          }
-        }, sp.responseMs + BURST_STAGGER_MS)
-      } else {
-        // Single dot
-        hideTimeoutRef.current = setTimeout(() => hideStimulus(), sp.stimulusMs)
-        responseTimeoutRef.current = setTimeout(() => {
-          if (!respondedRef.current && currentPointRef.current === thePoint) {
-            hideStimulus()
-            recordResult(thePoint, false)
-            flashFixation('#ef4444', 200)
-            isiActiveRef.current = true
-            presentNext()
-          }
-        }, sp.responseMs)
-      }
-    }, delay)
-    isiActiveRef.current = true
-  }, [showStimulus, showStimulus2, hideStimulus, recordResult, flashFixation, pickDistantPoint, findIsolatedUnseen, goToCleanupOrNextLevel, presentCatchTrial, sp.gapMaxMs, sp.gapMinMs, sp.responseMs, sp.stimulusMs, advanced.catchTrialEveryN])
-
-  // Keep the stable ref up to date so presentCatchTrial can call presentNext
-  // without a circular useCallback dependency.
-  presentNextRef.current = presentNext
-
-  // ---------- present next stimulus (threshold mode) ----------
-  // Round-robin through the staircases, presenting the next pending location.
-  // Catch trials and burst pairing are intentionally skipped — the staircase
-  // already presents each point ~6 times and reliability monitoring for
-  // threshold mode can be added later.
-  const presentNextThreshold = useCallback(() => {
     if (phaseRef.current !== 'testing') return
     isiActiveRef.current = false
 
-    const queue = queueRef.current
+    // Rescue trial?
+    const rescue = consecutiveMissesRef.current >= RESCUE_AFTER_MISSES
+
     let point: GridPoint | null = null
-    while (queue.length > 0) {
-      const candidate = queue.shift()!
-      const state = staircasesRef.current.get(candidate.key)
-      if (state && !state.done) {
-        point = candidate
-        // Re-queue at the end so we round-robin until every staircase finishes.
-        queue.push(candidate)
-        break
+    let sizeDeg: number
+    let opacity: number
+
+    if (rescue) {
+      point = pickRescuePendingPoint()
+      if (!point) {
+        // No pending points: we're done.
+        finishTest()
+        return
       }
-    }
-    if (!point) {
-      // All staircases done — go straight to results (no isopter progression
-      // in threshold mode).
-      finishTest()
-      return
+      // V4e at full brightness — largest Goldmann size, max opacity. This
+      // trial's outcome is NOT fed to any staircase (see response handler).
+      rescueTrialRef.current = true
+      rescueFiredRef.current += 1
+      sizeDeg = STIMULI['V4e'].sizeDeg
+      opacity = 1
+    } else {
+      rescueTrialRef.current = false
+      // Round-robin through pending staircases.
+      const queue = queueRef.current
+      while (queue.length > 0) {
+        const candidate = queue.shift()!
+        const state = staircasesRef.current.get(candidate.key)
+        if (state && !state.done) {
+          point = candidate
+          queue.push(candidate) // re-queue at back
+          break
+        }
+      }
+      if (!point) {
+        finishTest()
+        return
+      }
+      const state = staircasesRef.current.get(point.key)
+      if (!state) return
+      sizeDeg = STIMULI['III4e'].sizeDeg
+      opacity = dbToOpacity(state.currentDb)
     }
 
-    // Already validated in the while loop above, but re-fetch so TS has the narrow.
-    const state = staircasesRef.current.get(point.key)
-    if (!state) return
-    const opacity = dbToOpacity(state.currentDb)
     currentPointRef.current = point
     currentStaircaseKeyRef.current = point.key
     respondedRef.current = false
-    batchPointsRef.current = []
 
-    const delay = sp.gapMinMs + Math.random() * (sp.gapMaxMs - sp.gapMinMs)
     const thePoint = point
+    const theSize = sizeDeg
+    const theOpacity = opacity
+    const theRescue = rescueTrialRef.current
+    const delay = sp.gapMinMs + Math.random() * (sp.gapMaxMs - sp.gapMinMs)
+
     delayTimeoutRef.current = setTimeout(() => {
       if (phaseRef.current !== 'testing') return
       isiActiveRef.current = false
-      showStimulusAt(thePoint.xDeg, thePoint.yDeg, 'III4e', opacity)
+      showStimulus(thePoint.xDeg, thePoint.yDeg, theSize, theOpacity)
       stimulusStartRef.current = performance.now()
-      // Advance the trial counter so the on-screen progress text moves on
-      // every presentation (staircases take several trials each to finish).
-      setThresholdTrialsDone(n => n + 1)
+      setTrialsDone(n => n + 1)
       hideTimeoutRef.current = setTimeout(() => hideStimulus(), sp.stimulusMs)
       responseTimeoutRef.current = setTimeout(() => {
         if (!respondedRef.current && currentStaircaseKeyRef.current === thePoint.key) {
           hideStimulus()
-          // Timeout = unseen
-          const s = staircasesRef.current.get(thePoint.key)
-          if (!s) return
-          const next = stepStaircase(s, false)
-          staircasesRef.current.set(thePoint.key, next)
-          if (next.done && next.thresholdDb != null) {
-            recordThresholdPoint(thePoint, next.thresholdDb)
+          flashFixation('#ef4444', 200)
+          if (theRescue) {
+            // Rescue miss: unusual, but don't feed the staircase. Reset
+            // the streak regardless so we don't loop rescues forever.
+            consecutiveMissesRef.current = 0
+            rescueTrialRef.current = false
+          } else {
+            consecutiveMissesRef.current += 1
+            const s = staircasesRef.current.get(thePoint.key)
+            if (!s) return
+            const next = stepStaircase(s, false)
+            staircasesRef.current.set(thePoint.key, next)
+            if (next.done && next.thresholdDb != null) {
+              recordThresholdPoint(thePoint, next.thresholdDb)
+            }
+            setRemainingCount(countPendingStaircases())
           }
-          setRemainingCount(countPendingStaircases())
           isiActiveRef.current = true
-          presentNextThreshold()
+          presentNext()
         }
       }, sp.responseMs)
     }, delay)
     isiActiveRef.current = true
-  }, [showStimulusAt, hideStimulus, finishTest, recordThresholdPoint, countPendingStaircases, sp.gapMaxMs, sp.gapMinMs, sp.responseMs, sp.stimulusMs])
+  }, [
+    pickRescuePendingPoint,
+    finishTest,
+    showStimulus,
+    hideStimulus,
+    flashFixation,
+    recordThresholdPoint,
+    countPendingStaircases,
+    sp.gapMaxMs,
+    sp.gapMinMs,
+    sp.responseMs,
+    sp.stimulusMs,
+  ])
 
-  // Dispatcher: pick the right scheduler based on test mode.
-  const dispatchNext = useCallback(() => {
-    if (thresholdModeRef.current) presentNextThreshold()
-    else presentNext()
-  }, [presentNext, presentNextThreshold])
-
-  // ---------- handle response ----------
+  // ---------- response handler ----------
   const handleResponse = useCallback(() => {
-    if (phaseRef.current !== 'testing' && phaseRef.current !== 'retest') return
+    if (phaseRef.current !== 'testing') return
     if (respondedRef.current || !currentPointRef.current) return
     if (stimulusStartRef.current === 0) return
 
-    // Threshold mode: simple seen/unseen → step the matching staircase.
-    // No burst, no verify queue, no catch trials. Must run before the
-    // burst-aware response window check below (which adds BURST_STAGGER_MS).
-    if (thresholdModeRef.current) {
-      const elapsedT = performance.now() - stimulusStartRef.current
-      if (elapsedT > sp.responseMs) return
-      respondedRef.current = true
-      if (elapsedT < MIN_RESPONSE_MS) {
-        // False-positive guard: ignore but don't penalize the staircase.
-        flashFixation('#ef4444', 300)
-        clearAllTimeouts()
-        hideStimulus()
-        fpIsiPressesRef.current += 1
-        isiActiveRef.current = true
-        setTimeout(() => presentNextThreshold(), 500)
-        return
-      }
-      flashFixation('#3b82f6', 150)
+    const elapsed = performance.now() - stimulusStartRef.current
+    if (elapsed > sp.responseMs) return
+    respondedRef.current = true
+
+    if (elapsed < MIN_RESPONSE_MS) {
+      // Too fast — likely a false positive. Count it, ignore, don't step
+      // the staircase, don't reset the rescue counter (the trial didn't
+      // complete normally).
+      flashFixation('#ef4444', 300)
       clearAllTimeouts()
       hideStimulus()
+      fpIsiPressesRef.current += 1
+      isiActiveRef.current = true
+      setTimeout(() => presentNext(), 500)
+      return
+    }
+
+    flashFixation('#22c55e', 150)
+    clearAllTimeouts()
+    hideStimulus()
+
+    if (rescueTrialRef.current) {
+      // Rescue seen — morale restored, continue. Do NOT step any
+      // staircase; the opacity we showed wasn't the staircase's value.
+      consecutiveMissesRef.current = 0
+      rescueTrialRef.current = false
+    } else {
+      consecutiveMissesRef.current = 0
       const key = currentStaircaseKeyRef.current
       const state = key != null ? staircasesRef.current.get(key) : undefined
       if (key != null && state) {
         const next = stepStaircase(state, true)
         staircasesRef.current.set(key, next)
         if (next.done && next.thresholdDb != null) {
-          const point = currentGridRef.current.find(p => p.key === key)
+          const point = gridRef.current.find(p => p.key === key)
           if (point) recordThresholdPoint(point, next.thresholdDb)
         }
         setRemainingCount(countPendingStaircases())
       }
-      truePositivesRef.current += 1
-      isiActiveRef.current = true
-      presentNextThreshold()
-      return
     }
-
-    const elapsed = performance.now() - stimulusStartRef.current
-    if (elapsed > sp.responseMs + BURST_STAGGER_MS) return
-
-    respondedRef.current = true
-
-    if (elapsed < MIN_RESPONSE_MS) {
-      flashFixation('#ef4444', 300)
-      for (const bp of batchPointsRef.current) {
-        queueRef.current.push(bp)
-      }
-      batchPointsRef.current = []
-      clearAllTimeouts()
-      hideStimulus()
-      isiActiveRef.current = true
-      setTimeout(() => presentNext(), 500)
-      return
-    }
-
-    flashFixation('#3b82f6', 150)
-    clearAllTimeouts()
-    hideStimulus()
-
-    // Catch-trial response: patient reported seeing blindspot stimulus (fixation loss)
-    if (isCatchTrialRef.current) {
-      catchTrialRef.current.push({ detected: true })
-      // Fixation-loss alert — inform the patient they looked away. A
-      // setting of 0 ms disables the overlay entirely (advanced setting).
-      if (advanced.fixationAlertMs > 0) {
-        setShowFixationLossAlert(true)
-        window.setTimeout(() => setShowFixationLossAlert(false), advanced.fixationAlertMs)
-      }
-      isCatchTrialRef.current = false
-      currentPointRef.current = null
-      isiActiveRef.current = true
-      presentNext()
-      return
-    }
-
-    // Burst: don't know which was seen — verify each individually
-    if (batchPointsRef.current.length > 1) {
-      verifyQueueRef.current = [...batchPointsRef.current]
-      batchPointsRef.current = []
-      isiActiveRef.current = true
-      presentNext()
-      return
-    }
-
-    truePositivesRef.current += 1
-    recordResult(currentPointRef.current, true, elapsed)
     isiActiveRef.current = true
     presentNext()
-  }, [flashFixation, hideStimulus, recordResult, presentNext, presentNextThreshold, recordThresholdPoint, countPendingStaircases, clearAllTimeouts, sp.responseMs, advanced.fixationAlertMs])
+  }, [
+    flashFixation,
+    hideStimulus,
+    clearAllTimeouts,
+    presentNext,
+    recordThresholdPoint,
+    countPendingStaircases,
+    sp.responseMs,
+  ])
 
-  // ---------- pause/resume ----------
+  // ---------- pause / resume ----------
   const pauseTest = useCallback(() => {
-    if (phaseRef.current === 'testing' || phaseRef.current === 'retest') {
+    if (phaseRef.current === 'testing') {
       pausedPhaseRef.current = phaseRef.current
       clearAllTimeouts()
       hideStimulus()
@@ -1071,22 +575,15 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
     setPhase(resumePhase)
     phaseRef.current = resumePhase
     enterFullscreen()
-    setTimeout(() => dispatchNext(), 1000)
-  }, [dispatchNext, enterFullscreen])
+    setTimeout(() => presentNext(), 1000)
+  }, [presentNext, enterFullscreen])
 
-  // ---------- keyboard/touch handling ----------
+  // ---------- keyboard + pointer ----------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (phaseRef.current === 'testing' || phaseRef.current === 'retest') {
-          pauseTest()
-        } else if (phaseRef.current === 'paused') {
-          resume()
-        }
-        return
-      }
-      if (e.key === 'g' || e.key === 'G') {
-        setShowGrid(prev => !prev)
+        if (phaseRef.current === 'testing') pauseTest()
+        else if (phaseRef.current === 'paused') resume()
         return
       }
       if (e.key === ' ' || e.key === 'Enter') {
@@ -1117,57 +614,49 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   // ---------- start test ----------
   const startTest = useCallback(() => {
     enterFullscreen()
-    testedPointsRef.current.clear()
-    setVisiblePoints([])
-    // Reset catch-trial and reliability counters
-    catchTrialRef.current = []
-    truePositivesRef.current = 0
-    isCatchTrialRef.current = false
-    presentCountRef.current = 0
-    isiActiveRef.current = false
-    fpIsiPressesRef.current = 0
     staircasesRef.current.clear()
     thresholdResultsRef.current = []
-    setThresholdTrialsDone(0)
-    if (thresholdMode) {
-      thresholdModeRef.current = true
-      // One hex grid, Goldmann III, no isopter progression. Coarser spacing
-      // than suprathreshold because each location takes ~3-6 presentations.
-      const maxExtent = getMaxExtentDeg()
-      const screenArea = getScreenAreaDeg2()
-      const targetCount = Math.max(20, Math.round(targetHexagons / 3))
-      const spacing = Math.sqrt(screenArea * 2 / (Math.sqrt(3) * targetCount))
-      const grid = generateHexGrid(maxExtent, spacing, DENSITY_EXPONENT)
-        .filter(p => isOnScreen(p.xDeg, p.yDeg, pixelsPerDegree, fixationXY.x))
-      currentGridRef.current = grid
-      // Prior seed: clinical convention is ~25 dB (HFA normal midpoint), but
-      // that assumes a calibrated 31.5-asb bowl. On a consumer LCD with a
-      // near-black background the 25-dB stimulus (opacity ≈ 0.003) is below
-      // practical visibility — and because the staircase round-robins across
-      // ~30 points, each location only steps once per full cycle (~50 s), so
-      // the user sees nothing for ages and the test feels broken. Seeding at
-      // 10 dB (opacity 0.1) puts the first presentation at an obviously-
-      // visible intensity on a dark screen; the 4-2 dB staircase then walks
-      // to the local threshold in 3-5 presentations per point.
-      const PRIOR_DB = 10
-      for (const p of grid) {
-        staircasesRef.current.set(p.key, initStaircase(PRIOR_DB))
-      }
-      queueRef.current = shuffle(grid)
-      verifyQueueRef.current = []
-      setTotalPoints(grid.length)
-      setRemainingCount(grid.length)
-      setCurrentStimulusIdx(ISOPTER_ORDER.indexOf('III4e'))
-      currentStimulusRef.current = 'III4e'
-    } else {
-      thresholdModeRef.current = false
-      initGrid(ISOPTER_ORDER[0])
-      setCurrentStimulusIdx(0)
-      currentStimulusRef.current = ISOPTER_ORDER[0]
+    consecutiveMissesRef.current = 0
+    rescueTrialRef.current = false
+    rescueFiredRef.current = 0
+    fpIsiPressesRef.current = 0
+    isiActiveRef.current = false
+    setTrialsDone(0)
+
+    // Use the coverage-filtered grid — points outside the calibrated
+    // screen's max eccentricity are already dropped so we never present
+    // stimuli the patient couldn't physically see.
+    const grid = gridCoverage.grid
+    gridRef.current = grid
+    for (const p of grid) {
+      staircasesRef.current.set(p.key, initStaircase(PRIOR_DB, sp.reversalsRequired))
     }
+    // Shuffle so round-robin doesn't crawl row-by-row — distributes trials
+    // across the whole field and avoids long runs at one eccentricity.
+    const shuffled = [...grid]
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]
+    }
+    queueRef.current = shuffled
+    setTotalPoints(grid.length)
+    setRemainingCount(grid.length)
+    // Position check first — runs once per test, immediately after Ready.
+    // Handoff to countdown happens in handlePositionCheckPass below.
+    // Skipped when the advanced toggle is off (default), in which case we
+    // jump straight to the countdown.
+    if (advanced.initialBlindspotCheck) {
+      setPhase('position-check')
+    } else {
+      setPhase('countdown')
+      setCountdown(3)
+    }
+  }, [enterFullscreen, gridCoverage, sp.reversalsRequired, advanced.initialBlindspotCheck])
+
+  const handlePositionCheckPass = useCallback(() => {
     setPhase('countdown')
     setCountdown(3)
-  }, [thresholdMode, initGrid, enterFullscreen, getMaxExtentDeg, getScreenAreaDeg2, targetHexagons, pixelsPerDegree, fixationXY.x])
+  }, [])
 
   // ---------- countdown ----------
   useEffect(() => {
@@ -1178,107 +667,250 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
       if (!startedTrackedRef.current) {
         startedTrackedRef.current = true
         testStartedAtRef.current = Date.now()
-        trackEvent('test_started', getDeviceId(), { testType: 'static', eye }).catch(() => {})
+        trackEvent('test_started', getDeviceId(), {
+          testType: 'static',
+          eye,
+          ...getDeviceInfo(),
+          ...buildStudyEventMeta(studyMode),
+        }).catch(() => {})
       }
-      setTimeout(() => dispatchNext(), 500)
+      setTimeout(() => presentNext(), 500)
       return
     }
     const t = setTimeout(() => setCountdown(c => c - 1), 1000)
     return () => clearTimeout(t)
-  }, [phase, countdown, dispatchNext, eye])
+  }, [phase, countdown, presentNext, eye])
 
-  // ---------- start next level ----------
-  const startNextLevel = useCallback(() => {
-    initGrid(currentStimulusRef.current)
-    enterFullscreen()
-    setPhase('countdown')
-    setCountdown(3)
-  }, [initGrid, enterFullscreen])
+  // Dedupe flag — see GoldmannTest for the full rationale. Both pagehide
+  // (tab close, hard navigate, bfcache) and React unmount can fire; this
+  // ensures only one test_aborted goes out per session.
+  const abortDispatchedRef = useRef(false)
 
-  // ---------- cleanup on unmount ----------
+  const buildAbortMeta = useCallback((via: 'unmount' | 'pagehide'): Record<string, string> => {
+    const durationSeconds = getTestDurationSeconds()
+    const summaryMeta = thresholdSummaryToMeta(
+      summarizeThresholdPoints(thresholdResultsRef.current),
+    )
+    return {
+      testType: 'static', eye, phase: phaseRef.current,
+      testMode: 'threshold',
+      speedMode,
+      gridPattern: gridPatternRef.current,
+      points: String(thresholdResultsRef.current.length),
+      detected: String(thresholdResultsRef.current.length),
+      rescueFired: String(rescueFiredRef.current),
+      fpIsiPresses: String(fpIsiPressesRef.current),
+      abortVia: via,
+      ...getDeviceInfo(),
+      ...buildStudyEventMeta(studyMode),
+      ...summaryMeta,
+      ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
+    }
+  }, [eye, getTestDurationSeconds, speedMode, studyMode])
+
+  // pagehide-driven abort: catches tab close / navigate-away that React
+  // unmount cleanup misses (those tear down the runtime before the cleanup
+  // effect ever runs). Beacon uses fetch+keepalive for survivability.
+  useEffect(() => {
+    const onPageHide = () => {
+      if (abortDispatchedRef.current) return
+      if (!startedTrackedRef.current || completedTrackedRef.current) return
+      abortDispatchedRef.current = true
+      trackEventBeacon('test_aborted', getDeviceId(), buildAbortMeta('pagehide'))
+    }
+    window.addEventListener('pagehide', onPageHide)
+    return () => window.removeEventListener('pagehide', onPageHide)
+  }, [buildAbortMeta])
+
+  // ---------- unmount / completion tracking ----------
   useEffect(() => {
     return () => {
       clearAllTimeouts()
-      if (startedTrackedRef.current && !completedTrackedRef.current) {
-	        // The abort event needs the latest tested-points ref at unmount.
-	        // eslint-disable-next-line react-hooks/exhaustive-deps
-	        const tested = Array.from(testedPointsRef.current.values())
-	        const durationSeconds = getTestDurationSeconds()
-	        trackEvent('test_aborted', getDeviceId(), {
-	          testType: 'static', eye, phase: phaseRef.current,
-	          points: String(tested.length),
-	          detected: String(tested.filter(p => p.status === 'seen').length),
-	          ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
-	        }).catch(() => {})
-	      }
-	    }
-	  }, [clearAllTimeouts, eye, getTestDurationSeconds])
+      if (
+        startedTrackedRef.current
+        && !completedTrackedRef.current
+        && !abortDispatchedRef.current
+      ) {
+        abortDispatchedRef.current = true
+        trackEvent('test_aborted', getDeviceId(), buildAbortMeta('unmount')).catch(() => {})
+      }
+    }
+  }, [clearAllTimeouts, buildAbortMeta])
 
-  // Fire test_completed when results screen is reached
-	  useEffect(() => {
-	    if (phase === 'results' && startedTrackedRef.current && !completedTrackedRef.current) {
-	      completedTrackedRef.current = true
-	      const durationSeconds = getTestDurationSeconds()
-	      trackEvent('test_completed', getDeviceId(), {
-	        testType: 'static', eye,
-	        points: String(results.length),
-	        detected: String(results.filter(p => p.detected).length),
-	        ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
-	      }).catch(() => {})
-	    }
-	  }, [phase, eye, results, getTestDurationSeconds])
+  useEffect(() => {
+    if (phase === 'results' && startedTrackedRef.current && !completedTrackedRef.current) {
+      completedTrackedRef.current = true
+      const durationSeconds = getTestDurationSeconds()
+      const summaryMeta = thresholdSummaryToMeta(summarizeThresholdPoints(results))
+      trackEvent('test_completed', getDeviceId(), {
+        testType: 'static', eye,
+        testMode: 'threshold',
+        speedMode,
+        gridPattern: gridPatternRef.current,
+        points: String(results.length),
+        detected: String(results.length),
+        rescueFired: String(rescueFiredRef.current),
+        fpIsiPresses: String(fpIsiPressesRef.current),
+        ...buildStudyEventMeta(studyMode),
+        ...summaryMeta,
+        ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
+      }).catch(() => {})
+    }
+  }, [phase, eye, results, getTestDurationSeconds, speedMode, studyMode])
 
-  // ---------- wrap onDone ----------
   const handleDone = () => {
     exitFullscreen()
     onDone()
   }
 
-  // ---------- save ----------
+  // Done from the post-test results screen — show the one-shot
+  // feedback modal first if we haven't asked on this device yet.
+  const handleDoneFromResults = () => {
+    if (savedId && !surveyDone && !hasSurveyForResult(savedId) && !hasBeenPromptedForFeedback()) {
+      markFeedbackPrompted()
+      setFeedbackTrigger('done')
+      return
+    }
+    handleDone()
+  }
+
+  const exportPdfAndMaybePrompt = (result: TestResult) => {
+    exportTrackedResultPDF(result)
+    if (savedId && !surveyDone && !hasSurveyForResult(savedId) && !hasBeenPromptedForFeedback()) {
+      markFeedbackPrompted()
+      setFeedbackTrigger('pdf')
+    }
+  }
+
+  const closeFeedbackModal = () => {
+    const trigger = feedbackTrigger
+    setFeedbackTrigger(null)
+    if (trigger === 'done') handleDone()
+  }
+
+  const handleFeedbackSubmit = (response: SurveyResponse) => {
+    if (savedId) {
+      saveSurvey(savedId, response)
+      setSurveyDone(true)
+    }
+    closeFeedbackModal()
+  }
+
   const handleSave = () => {
-    const catchTrials = catchTrialRef.current
-    // Threshold mode doesn't run catch trials, so the reliability fields would
-    // read as "0 false-positives out of 0 presented" and be misread downstream
-    // as perfect reliability. Omit the block entirely in threshold mode.
-    const reliabilityIndices = thresholdMode
-      ? undefined
-      : {
-          catchTrialsPresented: catchTrials.length,
-          catchTrialsFalsePositive: catchTrials.filter((c) => c.detected).length,
-          falsePositiveIsiPresses: fpIsiPressesRef.current,
-          truePositiveResponses: truePositivesRef.current,
-        }
+    // Static points are tagged stimulus='III4e' and `detected=true` for
+    // every location where the staircase converged. Running them through
+    // calcIsopterAreas produces a III4e-equivalent visible-field area so
+    // the ScenarioOverlay (kinetic clinical references keyed on III4e /
+    // V4e areas) has something meaningful to compare against. Previously
+    // we saved isopterAreas={} which made the scenario picker always
+    // land on "Normal" regardless of actual result quality.
+    const qualityMetrics: ResultQualityMetrics = {
+      falsePositiveIsiPresses: fpIsiPressesRef.current,
+      rescueTrialsFired: rescueFiredRef.current,
+      truePositiveResponses: results.length,
+    }
     const result: TestResult = {
       id: crypto.randomUUID(),
       eye,
       date: new Date().toISOString(),
       points: results,
-	      isopterAreas: calcIsopterAreas(results),
-	      calibration,
-	      testType: 'static',
-	      testMode: thresholdMode ? 'threshold' : 'suprathreshold',
-	      durationSeconds: getTestDurationSeconds(),
-      ...(reliabilityIndices ? { reliabilityIndices } : {}),
-	    }
+      isopterAreas: calcIsopterAreas(results),
+      calibration,
+      testType: 'static',
+      testMode: 'threshold',
+      durationSeconds: getTestDurationSeconds(),
+      protocol: buildProtocolSnapshot({
+        studyMode,
+        testType: 'static',
+        testMode: 'threshold',
+        speedMode,
+        staticGridPattern: gridPattern,
+        advancedSettings: advanced,
+      }),
+      ...(buildStudyMetadata(studyMode) ? { study: buildStudyMetadata(studyMode) } : {}),
+      device: captureDeviceMetadata(),
+      provenance: buildNativeProvenance(),
+      ...(buildQualityMetrics(qualityMetrics) ? { qualityMetrics: buildQualityMetrics(qualityMetrics) } : {}),
+      ...(gridCoverage.dropped > 0
+        ? {
+            gridCoverage: {
+              totalLocations: gridCoverage.totalLocations,
+              presentedLocations: gridCoverage.grid.length,
+            },
+          }
+        : {}),
+    }
+    lastResultRef.current = result
     saveResult(result)
     setSavedId(result.id)
+    // If this result was previously shared (unlikely on fresh id, but
+    // harmless to check), skip the offer to re-share.
+    if (localStorage.getItem(sharedFlagKey(result.id)) === '1') {
+      setShareState('shared')
+    }
   }
 
-  // ---------- computed ----------
-  const completedTasks = visiblePoints.length
-  const currentStim = STIMULI[ISOPTER_ORDER[currentStimulusIdx]]
-  const unseenCount = visiblePoints.filter(p => p.status === 'unseen').length
-  const roundDone = Math.max(0, totalPoints - remainingCount)
-  // Threshold-mode progress: each 4-2 dB staircase takes ~5 presentations to
-  // reach the required 2 reversals, so the expected total trial count for a
-  // run is ~5 × totalPoints. Also estimate remaining time from the current
-  // speed preset: each trial is avg(gap) + avg(response) worst-case (timeout
-  // on an unseen), so budget ~half of responseMs on average.
-  const thresholdLocationsDone = roundDone
-  const thresholdEstimatedTrials = totalPoints * 5
-  const avgTrialMs = (sp.gapMinMs + sp.gapMaxMs) / 2 + sp.responseMs * 0.5
-  const thresholdTrialsRemaining = Math.max(0, thresholdEstimatedTrials - thresholdTrialsDone)
-  const thresholdMinutesLeft = Math.max(1, Math.round((thresholdTrialsRemaining * avgTrialMs) / 60000))
+  // If the user signs in after finishing the test (via SavePrompt on the
+  // results screen), retry persistence so the just-completed run lands
+  // on their new account. saveResult is idempotent by id.
+  useEffect(() => {
+    if (!user || !lastResultRef.current) return
+    saveResult(lastResultRef.current)
+    syncResults()
+  }, [user, syncResults])
+
+  /** Anonymous upload — opt-in, fires only when the user taps the
+   *  "Share anonymous result" button on the results screen. Payload is
+   *  the full TestResult JSON; storage key on the server is the device
+   *  UUID, not an account. Persist a localStorage flag so a page reload
+   *  doesn't offer the same result twice. */
+  const handleShareAnonymous = async () => {
+    if (!savedId || shareState === 'sharing' || shareState === 'shared') return
+    setShareState('sharing')
+    const qualityMetrics: ResultQualityMetrics = {
+      falsePositiveIsiPresses: fpIsiPressesRef.current,
+      rescueTrialsFired: rescueFiredRef.current,
+      truePositiveResponses: results.length,
+    }
+    const result: TestResult = {
+      id: savedId,
+      eye,
+      date: new Date().toISOString(),
+      points: results,
+      isopterAreas: calcIsopterAreas(results),
+      calibration,
+      testType: 'static',
+      testMode: 'threshold',
+      durationSeconds: getTestDurationSeconds(),
+      protocol: buildProtocolSnapshot({
+        studyMode,
+        testType: 'static',
+        testMode: 'threshold',
+        speedMode,
+        staticGridPattern: gridPattern,
+        advancedSettings: advanced,
+      }),
+      ...(buildStudyMetadata(studyMode) ? { study: buildStudyMetadata(studyMode) } : {}),
+      device: captureDeviceMetadata(),
+      provenance: buildNativeProvenance(),
+      ...(buildQualityMetrics(qualityMetrics) ? { qualityMetrics: buildQualityMetrics(qualityMetrics) } : {}),
+    }
+    try {
+      await shareAnonymousVFResult(
+        {
+          id: result.id,
+          eye: result.eye,
+          date: result.date,
+          data: JSON.stringify(result),
+        },
+        getDeviceId(),
+      )
+      localStorage.setItem(sharedFlagKey(result.id), '1')
+      setShareState('shared')
+    } catch {
+      setShareState('error')
+    }
+  }
 
   // ==================== RENDER ====================
 
@@ -1290,67 +922,45 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
             {eye === 'right' ? 'Right' : 'Left'} eye — static test
           </h1>
 
-          <HeadGuide eye={eye} viewingDistanceCm={calibration.viewingDistanceCm} />
+          <HeadGuide
+            eye={eye}
+            viewingDistanceCm={calibration.viewingDistanceCm}
+            mode={isMobileDevice ? 'phone' : 'desktop'}
+          />
 
           <div className="text-left space-y-3 text-gray-300">
             <p>1. Cover your <strong>{eye === 'right' ? 'left' : 'right'} eye</strong></p>
             <p>2. Stare at the <span className="text-yellow-400">yellow dot</span> — don't look away</p>
-            <p>3. Dots will <strong>flash briefly</strong> at random positions</p>
+            <p>3. Dots will <strong>flash briefly</strong> at known test positions</p>
             <p>
-              4. Press <kbd className="px-2 py-0.5 bg-gray-800 rounded text-sm">Space</kbd> or{' '}
-              <strong>tap</strong> when you see a dot
+              4. {isMobileDevice ? <><strong>Tap</strong> the screen when you see a dot</> : <>Press <kbd className="px-2 py-0.5 bg-gray-800 rounded text-sm">Space</kbd> or <strong>tap</strong> when you see a dot</>}
             </p>
-            <p>5. Unseen dots stay as <span className="text-red-400">red markers</span> — connected ones form blind spot regions</p>
+            <p>5. It's <em>normal</em> to miss many flashes — that's how the test finds your threshold</p>
           </div>
 
-          <div className="text-xs text-gray-500 bg-gray-900 rounded-lg p-3 text-left space-y-2">
-            <p className="font-medium text-gray-400">How it works:</p>
-            <p>~{targetHexagons} hexagons cover your visual field at each brightness level. Areas you can't see are excluded in later rounds, so the remaining area gets re-tiled with {targetHexagons} fresh points at higher density. Isolated misses are automatically retested.</p>
-          </div>
-
-          {/* Settings — precision and speed are now chosen from the home page
-              (Select test type → Fast/Normal). Only threshold mode remains as
-              an experimental in-test toggle. */}
-          <div className="space-y-3 text-left">
-            <label className="flex items-start gap-2 mt-4 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={thresholdMode}
-                onChange={(e) => setThresholdMode(e.target.checked)}
-                className="mt-1"
-              />
-              <span className="text-sm">
-                <span className="font-medium text-zinc-100">Detailed sensitivity mode (experimental)</span>
-                <span className="block text-zinc-400 mt-0.5">
-                  At each spot we find the dimmest dot you can still see, instead
-                  of just checking a few brightness levels. The result is more
-                  detailed, but it takes a bit longer.
-                </span>
-                {(() => {
-                  // Mirror the grid sizing in startTest so the estimate matches
-                  // what actually gets generated (targetCount = max(20, hexagons/3),
-                  // ~5 trials per location for a 2-reversal 4-2 dB staircase).
-                  const locations = Math.max(20, Math.round(targetHexagons / 3))
-                  const trials = locations * 5
-                  const avgTrialMs = (sp.gapMinMs + sp.gapMaxMs) / 2 + sp.responseMs * 0.5
-                  const minutes = Math.max(1, Math.round((trials * avgTrialMs) / 60000))
-                  return (
-                    <span className="block text-zinc-500 mt-1 text-xs">
-                      About {locations} spots · roughly {minutes} minutes.
-                    </span>
-                  )
-                })()}
-              </span>
-            </label>
-          </div>
-
-          <p className="text-xs text-gray-500">
-            Press <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-[10px] font-mono text-gray-300">Esc</kbd> any time to pause the test or exit.
-          </p>
+          {!isMobileDevice && (
+            <p className="text-xs text-gray-500">
+              Press <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-[10px] font-mono text-gray-300">Esc</kbd> any time to pause the test or exit.
+            </p>
+          )}
 
           <p className="text-xs text-gray-500">
             Self-monitoring tool, not a clinical diagnosis. Always consult your ophthalmologist.
           </p>
+
+          {gridCoverage.dropped > 0 && (
+            <div
+              role="alert"
+              className="text-left text-sm bg-amber-900/30 border border-amber-600/50 rounded-lg px-4 py-3 text-amber-200"
+            >
+              <strong className="block mb-1">Grid not fully covered</strong>
+              At this viewing distance your screen reaches ±{maxEccentricityDeg.toFixed(0)}° eccentricity, so{' '}
+              {gridCoverage.dropped} of {gridCoverage.totalLocations} locations in the{' '}
+              {gridPattern === 'custom' ? 'custom' : `HFA ${gridPattern}`} pattern fall outside the display and will be
+              skipped. Sit closer to the screen (and recalibrate) to cover more of the pattern.
+            </div>
+          )}
+
           <button
             onClick={startTest}
             className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
@@ -1362,6 +972,17 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
           </button>
         </main>
       </div>
+    )
+  }
+
+  if (phase === 'position-check') {
+    return (
+      <PositionCheckOverlay
+        skipPrepare
+        eye={eye}
+        calibration={calibration}
+        onPass={handlePositionCheckPass}
+      />
     )
   }
 
@@ -1397,16 +1018,26 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
   }
 
   if (phase === 'paused') {
+    // Completed so far = number of staircases that already have a
+    // recorded threshold.
+    const done = thresholdResultsRef.current.length
+    const progressPct = totalPoints > 0 ? (done / totalPoints) * 100 : 0
     return (
       <div className={`min-h-screen ${bgClass} text-white flex items-center justify-center select-none p-6`}>
         <main className="text-center space-y-6 max-w-sm w-full">
           <h1 className="text-2xl font-semibold">Paused</h1>
           <p className="text-gray-400 text-sm">
-            {completedTasks} / {totalPoints} tested · {unseenCount} unseen
+            {done} / {totalPoints} points measured
           </p>
-          <p className="text-gray-500 text-xs">
-            Level: {currentStim.label}
-          </p>
+
+          {/* Progress bar — matches GoldmannTest pause screen. Teal owns
+              forward-motion indicators in this app's palette. */}
+          <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-teal transition-all duration-300"
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
 
           <div className="space-y-3 pt-2">
             <button
@@ -1417,147 +1048,27 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
             </button>
             <button
               onClick={() => {
-                const testPoints = scatterToTestPoints(testedPointsRef.current)
-                if (testPoints.length > 0) {
-                  setResults(testPoints)
-                  setPhase('results')
-                } else {
-                  handleDone()
-                }
+                // Always go to the results phase, even when no staircase has
+                // converged yet — otherwise the user thinks "view results"
+                // silently sent them home. The results screen renders an
+                // empty-state when there is nothing to show.
+                setResults([...thresholdResultsRef.current])
+                setPhase('results')
               }}
               className="w-full py-3 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm text-gray-300 transition-colors"
             >
               Stop test &amp; view results
             </button>
             <button onClick={handleDone} className="text-gray-500 hover:text-gray-300 text-sm">
-              Quit without saving
+              Quit without viewing results
             </button>
           </div>
 
-          <p className="text-xs text-gray-600">
-            Press <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-xs">Esc</kbd> or <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-xs">Space</kbd> to resume
-          </p>
-        </main>
-      </div>
-    )
-  }
-
-  if (phase === 'level-done') {
-    const currentIdx = ISOPTER_ORDER.indexOf(currentStimulusRef.current)
-    const nextStim = STIMULI[currentStimulusRef.current]
-    const justDoneKey = currentIdx > 0 ? ISOPTER_ORDER[currentIdx - 1] : currentStimulusRef.current
-    const prevStim = STIMULI[justDoneKey]
-    const levelPoints = Array.from(testedPointsRef.current.values()).filter(p => p.stimulus === justDoneKey)
-    const levelSeen = levelPoints.filter(p => p.status === 'seen').length
-    const levelUnseen = levelPoints.filter(p => p.status === 'unseen').length
-
-    return (
-      <div className={`min-h-screen ${bgClass} text-white p-6 overflow-y-auto`}>
-        <main className="max-w-lg mx-auto space-y-6 pb-12 text-center">
-          <div className="w-16 h-16 mx-auto rounded-full bg-green-600/20 flex items-center justify-center">
-            <svg viewBox="0 0 24 24" className="w-8 h-8 text-green-400" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-              <path d="M5 13l4 4L19 7" />
-            </svg>
-          </div>
-
-          <div className="space-y-2">
-            <h1 className="text-xl font-semibold">{prevStim.label} complete</h1>
-            <p className="text-gray-400 text-sm">
-              {levelPoints.length} points tested · {levelSeen} seen · {levelUnseen} unseen
+          {!isMobileDevice && (
+            <p className="text-xs text-gray-600">
+              Press <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-xs">Esc</kbd> or <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-xs">Space</kbd> to resume
             </p>
-          </div>
-
-          <div className="relative bg-gray-900 rounded-xl overflow-hidden" style={{ aspectRatio: '1' }}>
-            <svg viewBox="0 0 400 400" className="w-full h-full" aria-hidden="true">
-              {[10, 20, 30, 40, 50].filter(r => r <= maxEccentricityDeg).map(r => (
-                <circle
-                  key={r}
-                  cx={200}
-                  cy={200}
-                  r={r * (180 / maxEccentricityDeg)}
-                  fill="none"
-                  stroke="#1e293b"
-                  strokeWidth={0.5}
-                />
-              ))}
-              <line x1={200} y1={20} x2={200} y2={380} stroke="#1e293b" strokeWidth={0.5} />
-              <line x1={20} y1={200} x2={380} y2={200} stroke="#1e293b" strokeWidth={0.5} />
-
-              {Array.from(testedPointsRef.current.values())
-                .filter(p => p.stimulus !== justDoneKey)
-                .map(p => {
-                  const scale = 180 / maxEccentricityDeg
-                  const cx = 200 + p.xDeg * scale
-                  const cy = 200 - p.yDeg * scale
-                  const levelIdx = ISOPTER_ORDER.indexOf(p.stimulus)
-                  const dotR = Math.max(0.6, 2.5 - levelIdx * 0.4)
-                  return (
-                    <circle
-                      key={`prev-${p.key}`}
-                      cx={cx}
-                      cy={cy}
-                      r={dotR}
-                      fill={p.status === 'unseen' ? '#7f1d1d' : (STIMULI[p.stimulus]?.color ?? '#334155')}
-                      opacity={p.status === 'unseen' ? 0.4 : 0.15}
-                    />
-                  )
-                })}
-
-              {levelPoints.map(p => {
-                const scale = 180 / maxEccentricityDeg
-                const cx = 200 + p.xDeg * scale
-                const cy = 200 - p.yDeg * scale
-                return (
-                  <circle
-                    key={p.key}
-                    cx={cx}
-                    cy={cy}
-                    r={3}
-                    fill={p.status === 'unseen' ? '#ef4444' : '#22c55e'}
-                    opacity={p.status === 'unseen' ? 0.85 : 0.55}
-                  />
-                )
-              })}
-
-              <circle cx={200} cy={200} r={3} fill="#fbbf24" />
-            </svg>
-          </div>
-
-          <div className="flex items-center justify-center gap-4 flex-wrap text-xs text-gray-500">
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-green-500" /> Seen
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-red-500" /> Unseen
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-gray-600 opacity-40" /> Previous levels
-            </span>
-          </div>
-
-          <div className="bg-gray-900 rounded-xl p-4 space-y-2 text-sm text-left">
-            <p className="text-gray-400">
-              Next: <span className="text-white font-medium">{nextStim.label}</span>
-              {' '}<span className="text-gray-500">({nextStim.sizeDeg < 0.5 ? 'smaller' : 'standard'} dot, {nextStim.intensityFrac < 1 ? 'dimmer' : 'full brightness'})</span>
-            </p>
-            <p className="text-gray-500 text-xs">
-              Blind spots from brighter levels are excluded. The remaining visible area gets a fresh grid of ~{targetHexagons} points at higher density.
-            </p>
-          </div>
-
-          <button
-            onClick={startNextLevel}
-            className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
-          >
-            Start {nextStim.label}
-          </button>
-
-          <button
-            onClick={() => finishTest()}
-            className="text-gray-500 hover:text-gray-300 text-sm"
-          >
-            Skip remaining levels — view results now
-          </button>
+          )}
         </main>
       </div>
     )
@@ -1569,91 +1080,81 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
       return null
     }
 
-    const areas = calcIsopterAreas(results)
-    const measuredDbPoints = thresholdMode
-      ? results
-          .filter(p => p.thresholdDb != null)
-          .map(p => ({
-            meridianDeg: p.meridianDeg,
-            eccentricityDeg: p.eccentricityDeg,
-            db: p.thresholdDb!,
-          }))
-      : []
+    const measuredDbPoints = results
+      .filter(p => p.thresholdDb != null)
+      .map(p => ({
+        meridianDeg: p.meridianDeg,
+        eccentricityDeg: p.eccentricityDeg,
+        db: p.thresholdDb!,
+      }))
 
     if (!savedId && results.length > 0) {
       handleSave()
+    }
+
+    // User hit "Stop & view results" before any location converged. Rather
+    // than silently redirecting home, explain why there's nothing to show
+    // and give them a clear path back to the home screen.
+    if (measuredDbPoints.length === 0) {
+      return (
+        <div className={`min-h-screen ${bgClass} text-white p-6 overflow-y-auto`}>
+          <main className="max-w-lg mx-auto space-y-6 pb-12 text-center">
+            <h1 className="text-2xl font-semibold">Results</h1>
+            <p className="text-sm text-gray-400">
+              {gridPattern === 'custom' ? 'Custom' : `HFA ${gridPattern}`} · {formatEyeLabel(eye)}
+            </p>
+            <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-4 text-sm text-zinc-300 space-y-2 text-left">
+              <p className="font-medium text-zinc-100">No measurements yet</p>
+              <p className="text-zinc-400 leading-relaxed">
+                The static test needs several responses at each location
+                before it can estimate a threshold. You stopped the test
+                before any location finished, so there's nothing to plot.
+                Restart the test to collect data.
+              </p>
+            </div>
+            <button
+              onClick={handleDone}
+              className="w-full py-3 btn-primary rounded-xl font-medium text-white"
+            >
+              Back to home
+            </button>
+          </main>
+        </div>
+      )
     }
 
     return (
       <div className={`min-h-screen ${bgClass} text-white p-6 overflow-y-auto`}>
         <main className="max-w-lg mx-auto space-y-6 pb-12">
           <h1 className="text-2xl font-semibold text-center">Results</h1>
-          <p className="text-center text-xs text-gray-500">Tom static test · {formatEyeLabel(eye)}</p>
-          {savedId && (
-            <p className="text-center text-green-400 text-xs">
-              Saved automatically — this result is now available on the Results page.
+          <p className="text-center text-xs text-gray-500">
+            {gridPattern === 'custom' ? 'Custom' : `HFA ${gridPattern}`} · {formatEyeLabel(eye)}
+          </p>
+          {savedId && <SavePrompt />}
+          <SensitivityMap
+            points={measuredDbPoints}
+            eye={eye}
+            maxEccentricity={maxEccentricityDeg}
+            size={Math.min(600, window.innerWidth - 48)}
+          />
+          {gridCoverage.dropped > 0 && (
+            <p className="text-center text-xs text-amber-400">
+              Partial grid coverage: {gridCoverage.grid.length} of {gridCoverage.totalLocations} locations
+              presented. Outer points fell outside your screen at this viewing distance.
             </p>
           )}
-          {thresholdMode ? (
-            <SensitivityMap
-              points={measuredDbPoints}
-              eye={eye}
-              maxEccentricity={maxEccentricityDeg}
-              size={Math.min(600, window.innerWidth - 48)}
-              source="measured"
-            />
-          ) : (
-            <VisualFieldMap
-              points={results}
-              eye={eye}
-              maxEccentricity={maxEccentricityDeg}
-              size={Math.min(600, window.innerWidth - 48)}
-              calibration={calibration}
-              enableVerify
-            />
-          )}
-          {!thresholdMode && (
-            <div className="grid grid-cols-2 gap-2 text-sm">
-              {ISOPTER_ORDER.map(key => {
-                const area = areas[key]
-                if (area == null) return null
-                return (
-                  <div key={key} className="bg-gray-900 rounded-lg px-3 py-2 flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: STIMULI[key].color }} />
-                    <span className="text-gray-400">{STIMULI[key].label}</span>
-                    <span className="ml-auto font-mono text-white">{area.toFixed(0)} deg²</span>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-          {!thresholdMode && (
-            <SensitivityMap
-              points={deriveDbFromSuprathreshold(results)}
-              eye={eye}
-              maxEccentricity={maxEccentricityDeg}
-              size={Math.min(600, window.innerWidth - 48)}
-              source="derived"
-            />
-          )}
           <ClinicalDisclaimer variant="results" />
-          {!thresholdMode && (
-            <>
-              <Interpretation
-                points={results}
-                areas={areas}
-                maxEccentricityDeg={maxEccentricityDeg}
-                calibration={calibration}
-                reliabilityIndices={{
-                  catchTrialsPresented: catchTrialRef.current.length,
-                  catchTrialsFalsePositive: catchTrialRef.current.filter(c => c.detected).length,
-                  falsePositiveIsiPresses: fpIsiPressesRef.current,
-                  truePositiveResponses: truePositivesRef.current,
-                }}
-              />
-              <ScenarioOverlay userPoints={results} userAreas={areas} maxEccentricity={maxEccentricityDeg} />
-            </>
-          )}
+          {/* Clinical comparison — parity with Goldmann and binocular
+              results screens. ScenarioOverlay matches on III4e/V4e
+              isopter areas; for static tests we derive a III4e-
+              equivalent area from the detected grid points above (see
+              handleSave) so the picker can pick a meaningful closest
+              reference. */}
+          <ScenarioOverlay
+            userPoints={results}
+            userAreas={calcIsopterAreas(results)}
+            maxEccentricity={maxEccentricityDeg}
+          />
           {!showVisionSim ? (
             <button
               onClick={() => setShowVisionSim(true)}
@@ -1696,6 +1197,50 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
             <p className="text-center text-green-400 text-xs">Thank you for your feedback!</p>
           )}
 
+          {/* Anonymous share — opt-in only. Keeps the "nothing is sent"
+              promise in the privacy policy intact for users who don't tap.
+              Uses the same device UUID convention as anonymous surveys. */}
+          {savedId && (
+            <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs text-zinc-400 space-y-2">
+              {shareState === 'idle' && (
+                <>
+                  <p className="leading-relaxed">
+                    Help improve the tool: share this result anonymously.
+                    Only the point data, calibration, and a random device ID
+                    are uploaded — no name, email, or IP.
+                  </p>
+                  <button
+                    onClick={handleShareAnonymous}
+                    className="w-full py-2 bg-gray-800 hover:bg-gray-700 rounded-md text-sm text-gray-200 transition-colors"
+                  >
+                    Share anonymous result
+                  </button>
+                </>
+              )}
+              {shareState === 'sharing' && (
+                <p className="text-center text-gray-300">Uploading…</p>
+              )}
+              {shareState === 'shared' && (
+                <p className="text-center text-green-400">
+                  Shared — thank you, this helps a lot.
+                </p>
+              )}
+              {shareState === 'error' && (
+                <div className="space-y-1">
+                  <p className="text-center text-red-300">
+                    Upload failed. No data was sent.
+                  </p>
+                  <button
+                    onClick={() => setShareState('idle')}
+                    className="w-full py-1.5 bg-gray-800 hover:bg-gray-700 rounded-md text-xs text-gray-200 transition-colors"
+                  >
+                    Try again
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="flex gap-3">
             <button
               onClick={() => {
@@ -1705,26 +1250,46 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
                   eye,
                   date: new Date().toISOString(),
                   points: results,
-	                  isopterAreas: areas,
-	                  calibration,
-	                  testType: 'static',
-	                  testMode: thresholdMode ? 'threshold' : 'suprathreshold',
-	                  durationSeconds: getTestDurationSeconds(),
-	                }
-                exportTrackedResultPDF(result)
+                  isopterAreas: calcIsopterAreas(results),
+                  calibration,
+                  testType: 'static',
+                  testMode: 'threshold',
+                  durationSeconds: getTestDurationSeconds(),
+                }
+                exportPdfAndMaybePrompt(result)
               }}
               className="flex-1 py-3 btn-primary rounded-xl font-medium text-white"
             >
               Export PDF
             </button>
             <button
-              onClick={handleDone}
+              onClick={handleDoneFromResults}
               className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 rounded-lg font-medium transition-colors"
             >
               Done
             </button>
           </div>
+          <WhatsAppShareButton
+            message={`I just took a free static visual-field self-test on ${APP_DOMAIN} (${eye === 'right' ? 'right eye / OD' : 'left eye / OS'}). Try it yourself:`}
+          />
         </main>
+
+        {feedbackTrigger && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Quick feedback"
+            onClick={closeFeedbackModal}
+          >
+            <div className="w-full max-w-md" onClick={e => e.stopPropagation()}>
+              <PostTestSurvey
+                onSubmit={handleFeedbackSubmit}
+                onSkip={closeFeedbackModal}
+              />
+            </div>
+          </div>
+        )}
       </div>
     )
   }
@@ -1737,62 +1302,60 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
       aria-label={`Visual field test in progress for ${eye} eye. Press Space or tap when you see a dot.`}
       onPointerDown={handlePointerDown}
     >
-      {/* Persistent dots for unseen points */}
-      {visiblePoints.filter(p => p.status === 'unseen').map(p => {
-        const screenX = window.innerWidth / 2 + fixationXY.x + degToPx(p.xDeg, calibration)
-        const screenY = window.innerHeight / 2 + fixationXY.y - degToPx(p.yDeg, calibration)
-
-        return (
-          <div
-            key={p.key}
-            className="absolute rounded-full pointer-events-none"
-            style={{
-              left: screenX - 2,
-              top: screenY - 2,
-              width: 4,
-              height: 4,
-              backgroundColor: '#7f1d1d',
-              opacity: 0.15,
-              zIndex: 4,
-            }}
-          />
+      {/* Fixation-ring progress — the RP user's only in-test UI, so it
+          has to live right next to the fixation dot. We blend two
+          signals so the ring moves from the very first trial instead
+          of sitting at zero until a staircase clocks its first
+          reversal (which for a healthy eye can take ~3 presentations
+          × 54 points of round-robin):
+            • trial-based: trialsDone / (totalPoints × expectedTrials),
+              a smooth "time served" estimate that ticks every flash.
+            • reversal-based: sum of per-staircase reversal fractions
+              (+1 for done), the more accurate signal once walks get
+              going.
+          Taking the max means the bar never goes backwards and always
+          reflects the best available progress measure. Expected trials
+          per point ≈ reversalsRequired + 2 warmup trials (matches the
+          Dzwiniel 4-reversal budget and our Fast 2-reversal preset). */}
+      {totalPoints > 0 && (() => {
+        let doneByReversals = 0
+        for (const s of staircasesRef.current.values()) {
+          doneByReversals += s.done ? 1 : Math.min(1, s.reversals.length / s.reversalsRequired)
+        }
+        const progressByReversals = doneByReversals / Math.max(1, totalPoints)
+        const expectedTrialsPerPoint = sp.reversalsRequired + 2
+        const progressByTrials = Math.min(
+          1,
+          trialsDone / Math.max(1, totalPoints * expectedTrialsPerPoint),
         )
-      })}
-
-      {/* Grid overlay (toggle with G key) */}
-      {showGrid && currentGridRef.current.map(p => {
-        const screenX = window.innerWidth / 2 + fixationXY.x + degToPx(p.xDeg, calibration)
-        const screenY = window.innerHeight / 2 + fixationXY.y - degToPx(p.yDeg, calibration)
-        const isTested = testedPointsRef.current.has(p.key)
-        const tp = testedPointsRef.current.get(p.key)
+        const ringProgress = Math.min(1, Math.max(progressByReversals, progressByTrials))
         return (
-          <div
-            key={`grid-${p.key}`}
-            className="absolute rounded-full pointer-events-none"
+          <svg
+            className="absolute pointer-events-none"
+            aria-hidden="true"
             style={{
-              left: screenX - 1.5,
-              top: screenY - 1.5,
-              width: 3,
-              height: 3,
-              backgroundColor: isTested ? (tp?.status === 'seen' ? '#22c55e' : '#ef4444') : '#334155',
-              opacity: isTested ? 0.3 : 0.15,
-              zIndex: 3,
+              top: '50%',
+              left: '50%',
+              marginLeft: -12 + fixationXY.x,
+              marginTop: -12 + fixationXY.y,
+              width: 24,
+              height: 24,
+              zIndex: 9,
             }}
-          />
+            viewBox="0 0 24 24"
+          >
+            <circle cx={12} cy={12} r={10} fill="none" stroke="#1e293b" strokeWidth={1.5} />
+            <circle
+              cx={12} cy={12} r={10} fill="none" stroke="#22c55e" strokeWidth={1.5}
+              strokeDasharray={`${2 * Math.PI * 10}`}
+              strokeDashoffset={`${2 * Math.PI * 10 * (1 - ringProgress)}`}
+              transform="rotate(-90 12 12)"
+              strokeLinecap="round"
+              opacity={0.55}
+            />
+          </svg>
         )
-      })}
-
-      {/* Phase & progress indicator */}
-      <div
-        className="absolute pointer-events-none text-center"
-        style={{ top: 12, left: '50%', transform: 'translateX(-50%)' }}
-      >
-        <span className="text-xs text-gray-600" aria-live="polite">
-          {thresholdModeRef.current
-            ? `Thresholding · III4e · trial ${thresholdTrialsDone} of ~${thresholdEstimatedTrials} · ~${thresholdMinutesLeft} min left${thresholdLocationsDone > 0 ? ` · ${thresholdLocationsDone}/${totalPoints} locations done` : ''}`
-            : `${phaseRef.current === 'retest' ? '🔄 Retesting suspicious' : 'Testing'} · ${currentStim.label} · ${roundDone}/${totalPoints}${unseenCount > 0 ? ` · ${unseenCount} unseen` : ''}`}{showGrid ? ' · [G] grid' : ''}
-        </span>
-      </div>
+      })()}
 
       {/* Fixation dot */}
       <div
@@ -1810,29 +1373,12 @@ export function StaticTest({ eye, calibration, extendedField, onDone, onComplete
         }}
       />
 
-      {/* Active stimulus dot */}
+      {/* Active stimulus */}
       <div
         ref={stimulusRef}
         className="absolute rounded-full bg-white"
         style={{ top: '50%', left: '50%', width: 6, height: 6, opacity: 0, willChange: 'transform', zIndex: 5 }}
       />
-      {/* Second stimulus dot for burst mode */}
-      <div
-        ref={stimulus2Ref}
-        className="absolute rounded-full bg-white"
-        style={{ top: '50%', left: '50%', width: 6, height: 6, opacity: 0, willChange: 'transform', zIndex: 5 }}
-      />
-
-      {/* Fixation-loss alert: fires when patient responds to a blindspot catch trial */}
-      {showFixationLossAlert && (
-        <div
-          className="absolute top-[60%] left-1/2 -translate-x-1/2 px-6 py-3 bg-orange-600 text-white rounded-lg font-semibold text-lg shadow-xl pointer-events-none z-30"
-          role="alert"
-          aria-live="polite"
-        >
-          {advanced.fixationAlertMessage}
-        </div>
-      )}
     </div>
   )
 }

@@ -1,4 +1,5 @@
 export type Eye = 'left' | 'right' | 'both'
+export type RunSpeedMode = 'slow' | 'normal'
 
 export type StimulusKey = 'V4e' | 'III4e' | 'III2e' | 'I4e' | 'I2e'
 
@@ -57,7 +58,79 @@ export interface TestPoint {
   thresholdDb?: number
 }
 
-export type TestType = 'goldmann' | 'ring' | 'static'
+export type TestType = 'goldmann' | 'static'
+
+export interface ResultProtocolSnapshot {
+  id?: string
+  label?: string
+  version?: string
+  testType: TestType
+  testMode?: 'suprathreshold' | 'threshold'
+  speedMode?: RunSpeedMode
+  extendedField?: boolean
+  staticGridPattern?: string
+  advancedSettingsSnapshot?: Record<string, unknown>
+}
+
+export interface ResultStudyMetadata {
+  studyId: string
+  protocolId?: string
+  protocolVersion?: string
+  siteId?: string
+  participantId: string
+  sessionId: string
+  visitId?: string
+  repeatIndex?: number
+  operatorId?: string
+}
+
+export interface ResultDeviceMetadata {
+  userAgent?: string
+  platform?: string
+  language?: string
+  timezone?: string
+  viewportWidth?: number
+  viewportHeight?: number
+  screenWidth?: number
+  screenHeight?: number
+  pixelRatio?: number
+  fullscreen?: boolean
+}
+
+export interface ResultProvenanceMetadata {
+  source: 'native' | 'ovfx-import'
+  sourceDocumentId?: string
+  importedAt?: string
+  appVersion?: string
+  sourceSoftwareName?: string
+  sourceSoftwareVersion?: string
+}
+
+export interface ResultQualityMetrics {
+  falsePositiveIsiPresses?: number
+  rescueTrialsFired?: number
+  catchTrialsPresented?: number
+  catchTrialsFalsePositive?: number
+  truePositiveResponses?: number
+}
+
+/**
+ * Which result map a renderer should show. Goldmann (kinetic)
+ * produces isopters → draw the visual-field / isopter plot. Static
+ * (threshold or suprathreshold grid) produces per-location sensitivity
+ * → draw the sensitivity heatmap. Legacy results with no `testType`
+ * are treated as Goldmann (the only mode that existed at the time).
+ *
+ * Single-source helper so the in-app result page, the admin modal and
+ * the PDF export all answer the question the same way.
+ */
+export function isGoldmannResult(r: { testType?: TestType; testMode?: 'suprathreshold' | 'threshold' }): boolean {
+  if (r.testType === 'goldmann') return true
+  if (r.testType === 'static') return false
+  // No testType → pre-0.3.0 result. These are all suprathreshold
+  // Goldmann-style sweeps, regardless of testMode.
+  return true
+}
 
 /** Stored test results are always single-eye. Binocular sessions are stored
  *  as TWO TestResults (one per eye) sharing a binocularGroup UUID. The UI
@@ -84,6 +157,18 @@ export interface TestResult {
   durationSeconds?: number
   /** Links two single-eye TestResults from the same binocular session. */
   binocularGroup?: string
+  /** Static-test grid coverage: how many of the pattern's nominal locations
+   *  the calibrated screen could actually present. Omitted on Goldmann
+   *  results and on static results where every location fit on screen.
+   *  Populated when one or more 24-2 / 30-2 / 10-2 points fell outside
+   *  `calibration.maxEccentricityDeg` and were skipped; reports should
+   *  warn that the clinical pattern wasn't fully covered. */
+  gridCoverage?: {
+    /** Number of locations defined by the chosen grid pattern. */
+    totalLocations: number
+    /** Number of locations that were actually presented. */
+    presentedLocations: number
+  }
   /** Reliability Indices recorded during the test, following the nomenclature
    *  of Dzwiniel et al. 2017 (PLoS ONE 12(10):e0186224).
    *
@@ -111,4 +196,9 @@ export interface TestResult {
      *  + truePositiveResponses). */
     truePositiveResponses: number
   }
+  protocol?: ResultProtocolSnapshot
+  study?: ResultStudyMetadata
+  device?: ResultDeviceMetadata
+  provenance?: ResultProvenanceMetadata
+  qualityMetrics?: ResultQualityMetrics
 }

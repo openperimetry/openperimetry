@@ -34,8 +34,16 @@ export const CONTACT_EMAIL = envString(import.meta.env.VITE_CONTACT_EMAIL, SUPPO
 
 /** Version string baked in at build time (CI sets VITE_APP_VERSION from
  *  the git sha or release tag). Used in the OVFX `software.version`
- *  field and in the About page footer. */
+ *  field. */
 export const APP_VERSION = envString(import.meta.env.VITE_APP_VERSION, 'dev')
+
+/** Full git SHA of the currently-deployed build (CI sets this from
+ *  github.sha). Empty string in local dev builds. */
+export const BUILD_SHA = envString(import.meta.env.VITE_BUILD_SHA, '')
+
+/** ISO-8601 timestamp of when the deployed bundle was built. Empty in
+ *  local dev. */
+export const BUILD_TIME = envString(import.meta.env.VITE_BUILD_TIME, '')
 
 /** PDF header tagline, e.g. "Goldmann Kinetic Perimetry Self-Check  |  openperimetry.org". */
 export const PDF_HEADER_TAGLINE = `Goldmann Kinetic Perimetry Self-Check  |  ${APP_DOMAIN}`
@@ -46,19 +54,21 @@ export const TITLE_SUFFIX = ` — ${APP_NAME}`
 /** Whether to show a support-email link. Forks without an address hide it. */
 export const HAS_SUPPORT_EMAIL = SUPPORT_EMAIL.length > 0
 
-/** Show the About page and its menu entry. The hosted instance runs with
- *  VITE_SHOW_ABOUT_PAGE=true so the creator's bio and project backstory
- *  stay visible; the open-source default is false because the page is
- *  inherently single-person and doesn't make sense for generic forks. */
-export const HAS_ABOUT_PAGE =
-  (import.meta.env.VITE_SHOW_ABOUT_PAGE ?? 'false').toLowerCase() === 'true'
-
 /** GitHub repo URL for the "Star on GitHub" link. Empty hides the link. */
 export const GITHUB_URL = envString(
   import.meta.env.VITE_GITHUB_URL,
   'https://github.com/openperimetry/openperimetry',
 )
 export const HAS_GITHUB_LINK = GITHUB_URL.length > 0
+
+/** Repo URL used by the admin build-info card to link a deployed commit
+ *  back to its source. Defaults to {@link GITHUB_URL} so public/forks
+ *  get a sensible link out of the box; private deployments that build
+ *  from a different repo override this via VITE_COMMIT_SOURCE_URL. */
+export const COMMIT_SOURCE_URL = envString(
+  import.meta.env.VITE_COMMIT_SOURCE_URL,
+  GITHUB_URL,
+)
 
 /** Canonical short marketing tagline. */
 export const APP_TAGLINE = 'Free visual field self-test'

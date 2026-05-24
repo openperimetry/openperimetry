@@ -9,7 +9,6 @@ test.describe('Page Navigation', () => {
   })
 
   const navPages = [
-    { button: 'About', title: 'About — Visual Field Check', heading: 'About' },
     { button: 'Contact', title: 'Contact — Visual Field Check', heading: 'Contact' },
     { button: 'Privacy', title: 'Privacy Policy — Visual Field Check', heading: 'Privacy Policy' },
     { button: 'References', title: 'Scientific References — Visual Field Check', heading: 'Scientific References' },
@@ -35,7 +34,7 @@ test.describe('Page Navigation', () => {
 
   test('document title updates on page change', async ({ page }) => {
     await expect(page).toHaveTitle(homeTitle)
-    await page.getByRole('navigation').getByRole('button', { name: 'About' }).click()
-    await expect(page).toHaveTitle('About — Visual Field Check')
+    await page.getByRole('navigation').getByRole('button', { name: 'Contact' }).click()
+    await expect(page).toHaveTitle('Contact — Visual Field Check')
   })
 })

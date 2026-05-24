@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react'
 import type { AuthUser } from './api'
 import * as api from './api'
-import { syncToServer, mergeFromServer } from './storage'
+import { syncToServer, mergeFromServer, setPersistenceEnabled, clearLocalResults } from './storage'
 
 interface AuthContextValue {
   user: AuthUser | null
@@ -9,14 +9,28 @@ interface AuthContextValue {
   login: (email: string, password: string) => Promise<void>
   register: (email: string, displayName: string, password: string) => Promise<void>
   logout: () => Promise<void>
+  deleteAccount: () => Promise<void>
   syncResults: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null)
+  const [user, setUserState] = useState<AuthUser | null>(null)
   const [loading, setLoading] = useState(true)
+
+  // Single entry point for mutating the auth user. Flips the storage
+  // persistence flag synchronously with the React state update so that
+  // child-component effects depending on `user` (e.g. test screens that
+  // re-save their result on login) always observe a consistent
+  // persistenceEnabled before their effect body runs. React commits
+  // effects depth-first — child effects fire before the parent's — so
+  // gating persistence via a sibling useEffect in this provider would
+  // race against those children.
+  const setUser = useCallback((next: AuthUser | null) => {
+    setPersistenceEnabled(!!next)
+    setUserState(next)
+  }, [])
 
   // Check existing session on mount
   useEffect(() => {
@@ -24,7 +38,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .then(res => setUser(res.user))
       .catch(() => setUser(null))
       .finally(() => setLoading(false))
-  }, [])
+  }, [setUser])
 
   const syncResults = useCallback(async () => {
     if (!user) return
@@ -105,6 +119,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const handleLogout = async () => {
     await api.logout()
     setUser(null)
+    // Wipe cached results so the next user on this device starts clean.
+    clearLocalResults()
+  }
+
+  const handleDeleteAccount = async () => {
+    // Server cascades the delete and clears the auth cookie in the same
+    // response, so client-side we just mirror logout: drop the user and
+    // wipe locally cached results.
+    await api.deleteOwnAccount()
+    setUser(null)
+    clearLocalResults()
   }
 
   return (
@@ -114,6 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       login: handleLogin,
       register: handleRegister,
       logout: handleLogout,
+      deleteAccount: handleDeleteAccount,
       syncResults,
     }}>
       {children}

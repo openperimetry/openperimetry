@@ -6,6 +6,8 @@ import {
   SUPPORT_EMAIL,
   CONTACT_RECIPIENT,
   EMAIL_BACKEND,
+  PUBLIC_APP_NAME,
+  PUBLIC_APP_DOMAIN,
 } from './config.js'
 
 const supportEmail = SUPPORT_EMAIL || 'support@example.com'
@@ -55,11 +57,11 @@ async function sendEmail(params: { to: string; subject: string; textBody: string
 
 export async function sendWelcomeEmail(params: { to: string; displayName: string }): Promise<void> {
   const { to, displayName } = params
-  const subject = 'Welcome to Goldmann VF'
+  const subject = `Welcome to ${PUBLIC_APP_NAME}`
   const textBody = [
     `Hi ${displayName},`,
     '',
-    'Welcome to Goldmann VF. Your account has been created and you can now securely save your visual field test results.',
+    `Welcome to ${PUBLIC_APP_DOMAIN}. Your account has been created and you can now securely save your visual field test results.`,
     `Questions? Email us at ${supportEmail}.`,
     '',
     `This email was sent automatically from ${fromEmailAddress}.`,

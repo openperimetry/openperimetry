@@ -191,6 +191,62 @@ describe('OVFX round-trip: catchTrial and reliabilityIndices', () => {
     expect(imported.testMode).toBeUndefined()
   })
 
+  it('round-trips protocol, study, device, provenance, and quality metadata via the extension block', () => {
+    const result = makeResult({
+      durationSeconds: 312,
+      protocol: {
+        id: 'rp-home-v1',
+        label: 'RP home monitor',
+        version: '1.2.0',
+        testType: 'static',
+        testMode: 'threshold',
+        speedMode: 'normal',
+        staticGridPattern: '30-2',
+        advancedSettingsSnapshot: { backgroundShade: 'dark' },
+      },
+      study: {
+        studyId: 'RP-PILOT',
+        protocolId: 'rp-home-v1',
+        protocolVersion: '1.2.0',
+        siteId: 'AUMC',
+        participantId: 'P-001',
+        sessionId: 'S-010',
+        visitId: 'V2',
+        repeatIndex: 2,
+        operatorId: 'tech-7',
+      },
+      device: {
+        viewportWidth: 1440,
+        viewportHeight: 900,
+        pixelRatio: 2,
+        fullscreen: true,
+      },
+      provenance: {
+        source: 'native',
+        appVersion: '0.9.0',
+      },
+      qualityMetrics: {
+        falsePositiveIsiPresses: 3,
+        rescueTrialsFired: 1,
+      },
+    })
+
+    const doc = exportToOvfx(result)
+    expect(doc.test.durationSeconds).toBe(312)
+    expect(doc.test.pattern).toBe('30-2')
+    expect(doc.extensions?.openperimetry?.study?.participantId).toBe('P-001')
+    expect(doc.extensions?.openperimetry?.qualityMetrics?.rescueTrialsFired).toBe(1)
+
+    const imported = importFromOvfx(doc)
+    expect(imported.durationSeconds).toBe(312)
+    expect(imported.protocol?.id).toBe('rp-home-v1')
+    expect(imported.study?.participantId).toBe('P-001')
+    expect(imported.device?.viewportWidth).toBe(1440)
+    expect(imported.qualityMetrics?.rescueTrialsFired).toBe(1)
+    expect(imported.provenance?.source).toBe('ovfx-import')
+    expect(imported.provenance?.sourceDocumentId).toBe('test-uuid-001')
+  })
+
   it('multiple catch-trial points all round-trip correctly', () => {
     const points = [
       makePoint({ meridianDeg: 30, eccentricityDeg: 65, rawEccentricityDeg: 65 }),

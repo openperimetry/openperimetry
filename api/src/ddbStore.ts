@@ -32,6 +32,7 @@ export type AuthUser = {
   email: string
   displayName: string
   isAdmin: boolean
+  isClinician: boolean
   createdAt: string
 }
 
@@ -41,6 +42,7 @@ type UserItem = {
   displayName: string
   passwordHash: string
   isAdmin?: boolean
+  isClinician?: boolean
   resetPasswordTokenHash?: string
   resetPasswordExpiresAt?: string
   createdAt: string
@@ -90,6 +92,7 @@ function mapUser(item: UserItem): AuthUser {
     email: item.email,
     displayName: item.displayName,
     isAdmin: Boolean(item.isAdmin),
+    isClinician: Boolean(item.isClinician),
     createdAt: item.createdAt,
   }
 }
@@ -465,15 +468,49 @@ async function listVFKeysForUser(userId: string): Promise<Record<string, unknown
   return keys
 }
 
+async function listParticipantKeysForUser(userId: string): Promise<Record<string, unknown>[]> {
+  let lastEvaluatedKey: Record<string, unknown> | undefined
+  const keys: Record<string, unknown>[] = []
+
+  do {
+    const response = await ddb.send(
+      new ScanCommand({
+        TableName: DDB_USERS_TABLE,
+        FilterExpression: '#type = :type AND #ownerUserId = :ownerUserId',
+        ExpressionAttributeNames: {
+          '#type': 'type',
+          '#ownerUserId': 'ownerUserId',
+        },
+        ExpressionAttributeValues: {
+          ':type': 'clinical-participant',
+          ':ownerUserId': userId,
+        },
+        ProjectionExpression: 'id',
+        ExclusiveStartKey: lastEvaluatedKey,
+      }),
+    )
+
+    for (const item of response.Items ?? []) {
+      keys.push({ id: item.id })
+    }
+
+    lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined
+  } while (lastEvaluatedKey)
+
+  return keys
+}
+
 export async function deleteUserAccount(userId: string): Promise<void> {
-  const [sessionKeys, vfKeys] = await Promise.all([
+  const [sessionKeys, vfKeys, participantKeys] = await Promise.all([
     listSessionKeysForUser(userId),
     listVFKeysForUser(userId),
+    listParticipantKeysForUser(userId),
   ])
 
   await Promise.all([
     batchDeleteByKeys(DDB_SESSIONS_TABLE, sessionKeys),
     batchDeleteByKeys(DDB_VF_RESULTS_TABLE, vfKeys),
+    batchDeleteByKeys(DDB_USERS_TABLE, participantKeys),
   ])
 
   await ddb.send(new DeleteCommand({ TableName: DDB_USERS_TABLE, Key: { id: userId } }))
@@ -484,6 +521,227 @@ export type VFResultRecord = {
   eye: string
   date: string
   data: string // JSON-encoded full TestResult
+}
+
+export type ClinicalParticipantRecord = {
+  id: string
+  label: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type ClinicScreenRecord = {
+  id: string
+  label: string
+  cardWidthPx: number
+  screenWidthPx: number
+  screenHeightPx: number
+  devicePixelRatio: number
+  viewingDistanceCm: number | null
+  brightnessFloor: number | null
+  savedAt: string
+  isActive: boolean
+}
+
+const EXAMPLE_PARTICIPANT: ClinicalParticipantRecord = {
+  id: 'P-EXAMPLE-001',
+  label: 'Example participant',
+  createdAt: '2026-05-13T00:00:00.000Z',
+  updatedAt: '2026-05-13T00:00:00.000Z',
+}
+
+function participantStorageId(userId: string, participantId: string): string {
+  return `clinical-participant#${userId}#${participantId}`
+}
+
+function mapParticipantItem(item: any): ClinicalParticipantRecord {
+  return {
+    id: item.participantId,
+    label: item.label,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+  }
+}
+
+export async function listClinicalParticipants(userId: string): Promise<ClinicalParticipantRecord[]> {
+  const participants: ClinicalParticipantRecord[] = []
+  let lastEvaluatedKey: Record<string, unknown> | undefined
+
+  do {
+    const response = await ddb.send(new ScanCommand({
+      TableName: DDB_USERS_TABLE,
+      FilterExpression: '#type = :type AND #ownerUserId = :ownerUserId',
+      ExpressionAttributeNames: {
+        '#type': 'type',
+        '#ownerUserId': 'ownerUserId',
+      },
+      ExpressionAttributeValues: {
+        ':type': 'clinical-participant',
+        ':ownerUserId': userId,
+      },
+      ExclusiveStartKey: lastEvaluatedKey,
+    }))
+
+    participants.push(...(response.Items ?? []).map(mapParticipantItem))
+    lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined
+  } while (lastEvaluatedKey)
+
+  if (participants.length > 0) return participants.sort((a, b) => a.id.localeCompare(b.id))
+
+  const example = { ...EXAMPLE_PARTICIPANT }
+  await upsertClinicalParticipant(userId, example)
+  return [example]
+}
+
+export async function upsertClinicalParticipant(
+  userId: string,
+  participant: ClinicalParticipantRecord,
+): Promise<ClinicalParticipantRecord> {
+  const now = nowIso()
+  const createdAt = participant.createdAt || now
+  const updated: ClinicalParticipantRecord = {
+    ...participant,
+    createdAt,
+    updatedAt: now,
+  }
+  await ddb.send(new PutCommand({
+    TableName: DDB_USERS_TABLE,
+    Item: {
+      id: participantStorageId(userId, updated.id),
+      type: 'clinical-participant',
+      ownerUserId: userId,
+      participantId: updated.id,
+      label: updated.label,
+      createdAt: updated.createdAt,
+      updatedAt: updated.updatedAt,
+    },
+  }))
+  return updated
+}
+
+export async function deleteClinicalParticipant(userId: string, participantId: string): Promise<void> {
+  await ddb.send(new DeleteCommand({
+    TableName: DDB_USERS_TABLE,
+    Key: { id: participantStorageId(userId, participantId) },
+  }))
+}
+
+// ── Clinic Screens ──
+//
+// Stored in DDB_USERS_TABLE under `type=clinic-screen` items so the
+// existing scan-by-type pattern can list them per-user. Active selection
+// is stored as an `is_active` flag on the screen item itself; setActive
+// scans the user's screens and toggles the flag in two writes.
+
+function clinicScreenStorageId(userId: string, screenId: string): string {
+  return `clinic-screen#${userId}#${screenId}`
+}
+
+function mapClinicScreenItem(item: any): ClinicScreenRecord {
+  return {
+    id: item.screenId,
+    label: item.label,
+    cardWidthPx: Number(item.cardWidthPx),
+    screenWidthPx: Number(item.screenWidthPx),
+    screenHeightPx: Number(item.screenHeightPx),
+    devicePixelRatio: Number(item.devicePixelRatio),
+    viewingDistanceCm: item.viewingDistanceCm == null ? null : Number(item.viewingDistanceCm),
+    brightnessFloor: item.brightnessFloor == null ? null : Number(item.brightnessFloor),
+    savedAt: item.savedAt,
+    isActive: item.isActive === true,
+  }
+}
+
+export async function listClinicScreens(userId: string): Promise<ClinicScreenRecord[]> {
+  const screens: ClinicScreenRecord[] = []
+  let lastEvaluatedKey: Record<string, unknown> | undefined
+  do {
+    const response = await ddb.send(new ScanCommand({
+      TableName: DDB_USERS_TABLE,
+      FilterExpression: '#type = :type AND #ownerUserId = :ownerUserId',
+      ExpressionAttributeNames: {
+        '#type': 'type',
+        '#ownerUserId': 'ownerUserId',
+      },
+      ExpressionAttributeValues: {
+        ':type': 'clinic-screen',
+        ':ownerUserId': userId,
+      },
+      ExclusiveStartKey: lastEvaluatedKey,
+    }))
+    screens.push(...(response.Items ?? []).map(mapClinicScreenItem))
+    lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined
+  } while (lastEvaluatedKey)
+  return screens.sort((a, b) => b.savedAt.localeCompare(a.savedAt))
+}
+
+export async function upsertClinicScreen(
+  userId: string,
+  screen: Omit<ClinicScreenRecord, 'isActive'>,
+): Promise<ClinicScreenRecord> {
+  // Preserve the existing active flag on update so re-saving doesn't
+  // silently deactivate the user's selection. setActiveClinicScreen is
+  // the only function that mutates is_active.
+  const existing = await ddb.send(new GetCommand({
+    TableName: DDB_USERS_TABLE,
+    Key: { id: clinicScreenStorageId(userId, screen.id) },
+  }))
+  const wasActive = existing.Item?.isActive === true
+  await ddb.send(new PutCommand({
+    TableName: DDB_USERS_TABLE,
+    Item: {
+      id: clinicScreenStorageId(userId, screen.id),
+      type: 'clinic-screen',
+      ownerUserId: userId,
+      screenId: screen.id,
+      label: screen.label,
+      cardWidthPx: screen.cardWidthPx,
+      screenWidthPx: screen.screenWidthPx,
+      screenHeightPx: screen.screenHeightPx,
+      devicePixelRatio: screen.devicePixelRatio,
+      viewingDistanceCm: screen.viewingDistanceCm,
+      brightnessFloor: screen.brightnessFloor,
+      savedAt: screen.savedAt,
+      isActive: wasActive,
+    },
+  }))
+  return { ...screen, isActive: wasActive }
+}
+
+export async function deleteClinicScreen(userId: string, screenId: string): Promise<void> {
+  await ddb.send(new DeleteCommand({
+    TableName: DDB_USERS_TABLE,
+    Key: { id: clinicScreenStorageId(userId, screenId) },
+  }))
+}
+
+export async function setActiveClinicScreen(userId: string, screenId: string | null): Promise<void> {
+  const screens = await listClinicScreens(userId)
+  // Clear flag on everything that isn't the new target, set it on the
+  // target. Sequential is fine — a clinician toggling active state
+  // won't have hundreds of workstations.
+  for (const s of screens) {
+    const shouldBeActive = s.id === screenId
+    if (s.isActive === shouldBeActive) continue
+    await ddb.send(new PutCommand({
+      TableName: DDB_USERS_TABLE,
+      Item: {
+        id: clinicScreenStorageId(userId, s.id),
+        type: 'clinic-screen',
+        ownerUserId: userId,
+        screenId: s.id,
+        label: s.label,
+        cardWidthPx: s.cardWidthPx,
+        screenWidthPx: s.screenWidthPx,
+        screenHeightPx: s.screenHeightPx,
+        devicePixelRatio: s.devicePixelRatio,
+        viewingDistanceCm: s.viewingDistanceCm,
+        brightnessFloor: s.brightnessFloor,
+        savedAt: s.savedAt,
+        isActive: shouldBeActive,
+      },
+    }))
+  }
 }
 
 export async function addVFResult(userId: string, result: { id: string; eye: string; date: string; data: string }): Promise<VFResultRecord> {
@@ -530,6 +788,22 @@ export async function deleteVFResult(userId: string, resultId: string): Promise<
     TableName: DDB_VF_RESULTS_TABLE,
     Key: { userId, logKey },
   }))
+}
+
+/** Admin: fetch a single result (including the full `data` JSON) by the
+ *  composite (userId, resultId) key. Returns null when the row doesn't
+ *  exist. Mirrors the sqlite implementation so the admin drill-down
+ *  works against either backend. DynamoDB requires the full `logKey`,
+ *  so we Query on `userId` and filter client-side by `id` — cheap
+ *  because a single user typically has a small number of results. */
+export async function getAdminVFResultDetail(
+  userId: string,
+  resultId: string,
+): Promise<{ id: string; userId: string; eye: string; date: string; data: string } | null> {
+  const results = await listVFResults(userId, 200)
+  const target = results.find(r => r.id === resultId)
+  if (!target) return null
+  return { id: target.id, userId, eye: target.eye, date: target.date, data: target.data }
 }
 
 export type VFSurveyRecord = {
@@ -595,6 +869,8 @@ export async function getAdminStats(): Promise<AdminStats> {
   const usersResponse = await ddb.send(new ScanCommand({
     TableName: DDB_USERS_TABLE,
     Select: 'COUNT',
+    FilterExpression: 'attribute_not_exists(#type)',
+    ExpressionAttributeNames: { '#type': 'type' },
   }))
   const totalUsers = usersResponse.Count ?? 0
 
@@ -609,7 +885,6 @@ export async function getAdminStats(): Promise<AdminStats> {
   let totalVFResults = 0
   let totalVFResultsByDevice = 0
   let totalSurveys = 0
-  const dayCounts = new Map<string, number>()
   let lastKey: Record<string, unknown> | undefined
 
   do {
@@ -630,18 +905,37 @@ export async function getAdminStats(): Promise<AdminStats> {
         } else {
           totalVFResults++
         }
-        // Bucket by day for the timeline
-        const date = String(item.date ?? '').slice(0, 10) // YYYY-MM-DD
-        if (date) {
-          dayCounts.set(date, (dayCounts.get(date) ?? 0) + 1)
-        }
       }
     }
 
     lastKey = response.LastEvaluatedKey as Record<string, unknown> | undefined
   } while (lastKey)
 
-  // Build last 30 days timeline (fill in zeros for days with no results)
+  // Last 30 days completed tests by day — counts `test_completed`
+  // events (server-timestamped at fire time) rather than vf_results
+  // rows, so the chart reflects how many tests actually finished each
+  // day even when results were anonymous or never synced.
+  const dayCounts = new Map<string, number>()
+  const cutoff = new Date()
+  cutoff.setDate(cutoff.getDate() - 30)
+  const cutoffIso = cutoff.toISOString()
+  let eventsKey: Record<string, unknown> | undefined
+  do {
+    const response = await ddb.send(new ScanCommand({
+      TableName: DDB_EVENTS_TABLE,
+      FilterExpression: '#event = :ev AND #ts >= :cutoff',
+      ExpressionAttributeNames: { '#event': 'event', '#ts': 'timestamp' },
+      ExpressionAttributeValues: { ':ev': 'test_completed', ':cutoff': cutoffIso },
+      ExclusiveStartKey: eventsKey,
+    }))
+    for (const item of response.Items ?? []) {
+      const day = String(item.timestamp ?? '').slice(0, 10)
+      if (day) dayCounts.set(day, (dayCounts.get(day) ?? 0) + 1)
+    }
+    eventsKey = response.LastEvaluatedKey as Record<string, unknown> | undefined
+  } while (eventsKey)
+
+  // Build last 30 days timeline (fill in zeros for days with no events)
   const resultsByDay: { date: string; count: number }[] = []
   const now = new Date()
   for (let i = 29; i >= 0; i--) {
@@ -660,9 +954,74 @@ export type AdminSessionRecord = {
   userId: string
   email: string
   displayName: string
+  isAdmin: boolean
+  isClinician: boolean
   createdAt: string
   lastSeenAt: string
   expiresAt: string
+}
+
+export type AdminUserRecord = {
+  id: string
+  email: string
+  displayName: string
+  isAdmin: boolean
+  isClinician: boolean
+  createdAt: string
+}
+
+export async function listAllUsers(): Promise<AdminUserRecord[]> {
+  const users: AdminUserRecord[] = []
+  let lastKey: Record<string, unknown> | undefined
+
+  do {
+    const response = await ddb.send(new ScanCommand({
+      TableName: DDB_USERS_TABLE,
+      FilterExpression: 'attribute_not_exists(#type)',
+      ProjectionExpression: '#id, email, displayName, isAdmin, isClinician, createdAt',
+      ExpressionAttributeNames: { '#id': 'id', '#type': 'type' },
+      ExclusiveStartKey: lastKey,
+    }))
+
+    for (const item of response.Items ?? []) {
+      users.push({
+        id: String(item.id ?? ''),
+        email: String(item.email ?? ''),
+        displayName: String(item.displayName ?? ''),
+        isAdmin: Boolean(item.isAdmin),
+        isClinician: Boolean(item.isClinician),
+        createdAt: String(item.createdAt ?? ''),
+      })
+    }
+
+    lastKey = response.LastEvaluatedKey as Record<string, unknown> | undefined
+  } while (lastKey)
+
+  users.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  return users
+}
+
+export async function setUserClinicianRole(userId: string, isClinician: boolean): Promise<AdminUserRecord | null> {
+  const existing = await findUserById(userId)
+  if (!existing) return null
+
+  await ddb.send(new UpdateCommand({
+    TableName: DDB_USERS_TABLE,
+    Key: { id: userId },
+    UpdateExpression: 'SET isClinician = :isClinician',
+    ExpressionAttributeValues: { ':isClinician': isClinician },
+  }))
+
+  const updated = await findUserById(userId)
+  if (!updated) return null
+  return {
+    id: updated.id,
+    email: updated.email,
+    displayName: updated.displayName,
+    isAdmin: Boolean(updated.isAdmin),
+    isClinician: Boolean(updated.isClinician),
+    createdAt: updated.createdAt,
+  }
 }
 
 export async function listAllSessions(): Promise<AdminSessionRecord[]> {
@@ -686,18 +1045,22 @@ export async function listAllSessions(): Promise<AdminSessionRecord[]> {
   } while (lastKey)
 
   // Fetch all users for email/name lookup
-  const userMap = new Map<string, { email: string; displayName: string }>()
+  const userMap = new Map<string, { email: string; displayName: string; isAdmin: boolean; isClinician: boolean }>()
   let userLastKey: Record<string, unknown> | undefined
   do {
     const response = await ddb.send(new ScanCommand({
       TableName: DDB_USERS_TABLE,
-      ProjectionExpression: 'id, email, displayName',
+      FilterExpression: 'attribute_not_exists(#type)',
+      ProjectionExpression: '#id, email, displayName, isAdmin, isClinician',
+      ExpressionAttributeNames: { '#id': 'id', '#type': 'type' },
       ExclusiveStartKey: userLastKey,
     }))
     for (const item of response.Items ?? []) {
       userMap.set(String(item.id), {
         email: String(item.email ?? ''),
         displayName: String(item.displayName ?? ''),
+        isAdmin: Boolean(item.isAdmin),
+        isClinician: Boolean(item.isClinician),
       })
     }
     userLastKey = response.LastEvaluatedKey as Record<string, unknown> | undefined
@@ -711,6 +1074,8 @@ export async function listAllSessions(): Promise<AdminSessionRecord[]> {
         userId: s.userId,
         email: user?.email ?? '?',
         displayName: user?.displayName ?? '?',
+        isAdmin: user?.isAdmin ?? false,
+        isClinician: user?.isClinician ?? false,
         createdAt: s.createdAt,
         lastSeenAt: s.lastSeenAt,
         expiresAt: s.expiresAt,
@@ -730,6 +1095,13 @@ export type AdminVFResultRecord = {
   totalPoints: number
   detectedPoints: number
   durationSeconds: number | null
+  studyId: string | null
+  participantId: string | null
+  sessionId: string | null
+  visitId: string | null
+  repeatIndex: number | null
+  protocolId: string | null
+  protocolVersion: string | null
 }
 
 export async function listAllVFResults(): Promise<AdminVFResultRecord[]> {
@@ -750,11 +1122,28 @@ export async function listAllVFResults(): Promise<AdminVFResultRecord[]> {
       let totalPoints = 0
       let detectedPoints = 0
       let durationSeconds: number | null = null
+      let studyId: string | null = null
+      let participantId: string | null = null
+      let sessionId: string | null = null
+      let visitId: string | null = null
+      let repeatIndex: number | null = null
+      let protocolId: string | null = null
+      let protocolVersion: string | null = null
       try {
         const data = JSON.parse(String(item.data ?? '{}'))
         testType = data.testType ?? null
         const parsedDuration = Number(data.durationSeconds)
         durationSeconds = Number.isFinite(parsedDuration) ? Math.max(0, Math.round(parsedDuration)) : null
+        if (data.study && typeof data.study === 'object') {
+          studyId = typeof data.study.studyId === 'string' ? data.study.studyId : null
+          participantId = typeof data.study.participantId === 'string' ? data.study.participantId : null
+          sessionId = typeof data.study.sessionId === 'string' ? data.study.sessionId : null
+          visitId = typeof data.study.visitId === 'string' ? data.study.visitId : null
+          const parsedRepeatIndex = Number(data.study.repeatIndex)
+          repeatIndex = Number.isFinite(parsedRepeatIndex) ? parsedRepeatIndex : null
+          protocolId = typeof data.study.protocolId === 'string' ? data.study.protocolId : null
+          protocolVersion = typeof data.study.protocolVersion === 'string' ? data.study.protocolVersion : null
+        }
         if (Array.isArray(data.points)) {
           totalPoints = data.points.length
           detectedPoints = data.points.filter((p: { detected?: boolean }) => p.detected).length
@@ -770,6 +1159,13 @@ export async function listAllVFResults(): Promise<AdminVFResultRecord[]> {
         totalPoints,
         detectedPoints,
         durationSeconds,
+        studyId,
+        participantId,
+        sessionId,
+        visitId,
+        repeatIndex,
+        protocolId,
+        protocolVersion,
       })
     }
 
@@ -789,6 +1185,7 @@ export type AdminSurveyRecord = {
   deviceId: string
   perceivedAccuracy: number
   easeOfUse: number
+  instructionsClarity: number | null
   comparedToClinical: string | null
   freeformFeedback: string
   age: number | null
@@ -822,6 +1219,7 @@ export async function listAllSurveys(): Promise<AdminSurveyRecord[]> {
           deviceId: userId.replace(/^device:/, ''),
           perceivedAccuracy: Number(data.perceivedAccuracy ?? 0),
           easeOfUse: Number(data.easeOfUse ?? 0),
+          instructionsClarity: data.instructionsClarity != null ? Number(data.instructionsClarity) : null,
           comparedToClinical: data.comparedToClinical ?? null,
           freeformFeedback: String(data.freeformFeedback ?? ''),
           age: data.age != null ? Number(data.age) : null,
@@ -845,7 +1243,15 @@ export async function listAllSurveys(): Promise<AdminSurveyRecord[]> {
 
 // ── Anonymous usage events ──
 
-export type EventType = 'test_started' | 'test_completed' | 'test_aborted' | 'page_view' | 'pdf_exported' | 'whatsapp_shared'
+export type EventType =
+  | 'test_started'
+  | 'test_completed'
+  | 'test_aborted'
+  | 'page_view'
+  | 'pdf_exported'
+  | 'whatsapp_shared'
+  | 'result_shared_anonymously'
+  | 'account_created'
 
 export async function trackEvent(deviceId: string, event: EventType, meta?: Record<string, string>): Promise<void> {
   const now = new Date()

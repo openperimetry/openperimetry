@@ -1,18 +1,17 @@
 import type { Page } from '@playwright/test'
 import { test, expect } from './fixtures/base'
 
-type TestMode = 'goldmann' | 'ring' | 'static'
+type TestMode = 'goldmann' | 'static'
 type EyeChoice = 'Left eye (OS)' | 'Right eye (OD)' | 'Both eyes (OU)'
 
 // Heading shown on each test's instruction screen (binocular always starts with right eye).
 const HEADINGS: Record<TestMode, RegExp> = {
   goldmann: /eye — multi-isopter$/,
-  ring: /^Ring Test$/,
   static: /eye — static test$/,
 }
 
 async function selectTestMode(page: Page, mode: TestMode) {
-  const tabName = mode === 'goldmann' ? 'Goldmann' : mode === 'ring' ? 'Ring' : 'Static'
+  const tabName = mode === 'goldmann' ? 'Goldmann' : 'Static'
   await page.getByRole('tab', { name: tabName }).click()
 }
 
@@ -33,8 +32,8 @@ async function completeReactionTime(page: Page) {
 async function completeCalibration(page: Page, mode: TestMode) {
   // Step 1 (screen) → Next
   await page.getByRole('button', { name: 'Next' }).click()
-  // Step 2 (brightness) → Confirm
-  await page.getByRole('button', { name: /Confirm/ }).click()
+  // Step 2 (brightness) → "dimmest I can see — continue"
+  await page.getByRole('button', { name: /dimmest.*continue/i }).click()
   // Goldmann inserts a reaction-time step before Ready
   if (mode === 'goldmann') {
     await completeReactionTime(page)
@@ -58,8 +57,8 @@ test.describe('Test routing — eye × test type', () => {
     await page.goto('/')
   })
 
-  // Ring + Static are fast (no RT step)
-  for (const mode of ['ring', 'static'] as const) {
+  // Static is fast (no RT step)
+  for (const mode of ['static'] as const) {
     test(`${mode} × right eye → ${mode} test screen`, async ({ page }) => {
       await startFlow(page, mode, 'Right eye (OD)')
       await expect(page.getByRole('heading', { level: 1 })).toContainText(HEADINGS[mode])

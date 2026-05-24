@@ -46,6 +46,24 @@ export const FRONTEND_PUBLIC_URL = envString(
   'FRONTEND_PUBLIC_URL',
   FRONTEND_ORIGIN.split(',')[0]?.trim() || 'http://localhost:5173',
 )
+
+/** Product name used in user-facing copy (welcome emails, subject lines).
+ *  Matches the web frontend's VITE_APP_NAME — forks rebrand by setting
+ *  PUBLIC_APP_NAME at deploy time. */
+export const PUBLIC_APP_NAME = envString('PUBLIC_APP_NAME', 'OpenPerimetry')
+
+/** Public-facing host (no scheme), derived from FRONTEND_PUBLIC_URL when
+ *  not explicitly set. Used in email body copy like "Welcome to X". */
+export const PUBLIC_APP_DOMAIN = envString(
+  'PUBLIC_APP_DOMAIN',
+  (() => {
+    try {
+      return new URL(FRONTEND_PUBLIC_URL).host
+    } catch {
+      return 'localhost'
+    }
+  })(),
+)
 export const TRUST_PROXY_HOPS = envNumber('TRUST_PROXY_HOPS', 1)
 
 // ── Auth cookies ────────────────────────────────────────────────────
@@ -88,6 +106,21 @@ export const DDB_SESSIONS_TABLE = envString('DDB_SESSIONS_TABLE', 'op-sessions')
 export const DDB_VF_RESULTS_TABLE = envString('DDB_VF_RESULTS_TABLE', 'op-vf-results')
 export const DDB_EVENTS_TABLE = envString('DDB_EVENTS_TABLE', 'op-events')
 export const DDB_RATE_LIMITS_TABLE = envString('DDB_RATE_LIMITS_TABLE', 'op-rate-limits')
+
+// ── Dev auto-login ─────────────────────────────────────────────────
+//
+// When set AND the server is NOT in production, every request that
+// arrives without a valid session cookie is silently logged in as
+// this user. The frontend then looks already-authenticated, which
+// saves re-typing credentials during local UI work. The password is
+// still required (same flow as a real login) so this can't be turned
+// on accidentally against a hardened account. The seed script prints
+// matching defaults, so the common case is:
+//   DEV_AUTO_LOGIN_EMAIL=test@openperimetry.local
+//   DEV_AUTO_LOGIN_PASSWORD=Test1234!
+
+export const DEV_AUTO_LOGIN_EMAIL = envString('DEV_AUTO_LOGIN_EMAIL', '')
+export const DEV_AUTO_LOGIN_PASSWORD = envString('DEV_AUTO_LOGIN_PASSWORD', '')
 
 // ── Email backend ──────────────────────────────────────────────────
 

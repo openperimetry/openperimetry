@@ -122,6 +122,47 @@ const PAPER_GROUPS: PaperGroup[] = [
     ],
   },
   {
+    id: 'home-perimetry',
+    label: 'Digital & Home-based Visual Field Tools',
+    description: 'Validation studies for consumer-grade perimetry and reviews of computerized tools for visual field testing and rehabilitation — the methodological basis for this app.',
+    papers: [
+      {
+        authors: 'Dzwiniel P, Kowalczuk K, Pietryga M, Oniszczuk P, Szumbarska D, Szkulmowski M',
+        title: 'Specvis: free and open-source software for visual field examination',
+        journal: 'PLoS ONE, 12(10): e0186224',
+        year: 2017,
+        doi: '10.1371/journal.pone.0186224',
+        summary:
+          'Introduced Specvis, an open-source static perimetry application running on ordinary LCD monitors. Validated against an Octopus 900 in 20 glaucoma patients and 20 controls and described a "SuperFast" 48-point protocol (~8–12 min per eye) using a 4-2 dB adaptive staircase with 2 reversals. The grid density, timing, and staircase approach used in this app\u2019s Static test are modelled directly on this reference.',
+      },
+      {
+        authors: 'Almulhim L, Alshammari T, Barstow E',
+        title: 'Computerized training tools used to address visual scanning and visual field deficits in vision rehabilitation: a scoping review',
+        journal: 'Occupational Therapy In Health Care (online, pp. 1–27)',
+        year: 2025,
+        doi: '10.1080/07380577.2025.2500378',
+        summary:
+          'Scoping review across CINAHL, Medline, and Scopus (839 articles screened, 6 included) of computerized tools used in vision rehabilitation to address visual field loss and visual scanning. Concludes that computerized tools are a viable option for screening and compensating for visual field deficits, while noting the evidence base — particularly for visual scanning — is still thin and needs more primary studies.',
+      },
+    ],
+  },
+  {
+    id: 'peripheral-vision',
+    label: 'Peripheral Vision & Field-of-view Visualisation',
+    description: 'Anatomy and functional zoning of the human visual field — the reference figure used by this app\u2019s vision simulator to label central, near, mid, and far peripheral bands.',
+    papers: [
+      {
+        authors: 'Younis O, Al-Nuaimy W, Alomari MH, Rowe F',
+        title: 'A Hazard Detection and Tracking System for People with Peripheral Vision Loss using Smart Glasses and Augmented Reality',
+        journal: 'International Journal of Advanced Computer Science and Applications (IJACSA), 10(2)',
+        year: 2019,
+        doi: '10.14569/IJACSA.2019.0100201',
+        summary:
+          'Proposes a smart-glasses system for hazard detection in users with peripheral vision loss. Figure 1 of the paper — "Human field of view for both eyes showing different levels of peripheral vision" — defines the zone boundaries (central, near peripheral 13°, mid peripheral 30°, far peripheral 60–107°) that drive the colored concentric rings and zone labels in this app\u2019s vision simulator overlay.',
+      },
+    ],
+  },
+  {
     id: 'genetics',
     label: 'Genetics & Classification',
     description: 'Genetic subtypes, inheritance patterns, and genotype-phenotype correlations in RP.',

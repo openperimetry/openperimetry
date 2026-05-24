@@ -4,13 +4,16 @@ import './index.css'
 import App from './App.tsx'
 import { AuthProvider } from './AuthContext'
 import { AdvancedSettingsRoot } from './advancedSettingsRoot'
+import { StudyModeRoot } from './studyModeRoot'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <AdvancedSettingsRoot>
-      <AuthProvider>
-        <App />
-      </AuthProvider>
+      <StudyModeRoot>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </StudyModeRoot>
     </AdvancedSettingsRoot>
   </StrictMode>,
 )

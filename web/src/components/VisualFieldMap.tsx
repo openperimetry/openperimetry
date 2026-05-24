@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { TestPoint, Eye, StimulusKey, CalibrationData } from '../types'
 import { STIMULI, ISOPTER_ORDER } from '../types'
-import { polarToXY, smoothClosedPath, computeIsopters } from '../isopterRender'
+import { polarToXY, smoothClosedPath, computeIsopters, computeScreenBoundary } from '../isopterRender'
 import { formatEyeLabelForResult } from '../eyeLabels'
 import { VerifyOverlay } from './VerifyOverlay'
 
@@ -148,38 +148,45 @@ export function VisualFieldMap({
           </>
         )}
 
-        {/* Screen boundary — shows the limits of what was testable */}
+        {/* Screen boundary + "not tested" shading beyond it. Shared with
+            the PDF export via `computeScreenBoundary` so both surfaces
+            paint the same mask. Follows the HFA printout convention of
+            visually distinguishing untested territory from tested
+            zero-sensitivity regions. */}
         {calibration && (() => {
-          const pxPerDeg = calibration.pixelsPerDegree
-          const fx = calibration.fixationOffsetPx
-          // Use stored screen dimensions from calibration time, fall back to current window
-          const screenW = calibration.screenWidthPx ?? (typeof window !== 'undefined' ? window.innerWidth : 1600)
-          const screenH = calibration.screenHeightPx ?? (typeof window !== 'undefined' ? window.innerHeight : 900)
-          const halfW = screenW / 2
-          const halfH = screenH / 2
-          const pts = Array.from({ length: 72 }, (_, i) => {
-            const angleDeg = i * 5
-            const rad = (angleDeg * Math.PI) / 180
-            const cos = Math.cos(rad)
-            const sin = -Math.sin(rad)
-            let t = 9999
-            if (cos > 0.001) t = Math.min(t, (halfW - fx) / cos)
-            if (cos < -0.001) t = Math.min(t, (-halfW - fx) / cos)
-            if (sin > 0.001) t = Math.min(t, halfH / sin)
-            if (sin < -0.001) t = Math.min(t, (-halfH) / sin)
-            const eccDeg = t / pxPerDeg
-            const r = Math.min(eccDeg * scale, radius + 5)
-            return `${center + r * Math.cos(rad)},${center + r * sin}`
+          const boundary = computeScreenBoundary(calibration, center, scale, radius, {
+            width: typeof window !== 'undefined' ? window.innerWidth : 1600,
+            height: typeof window !== 'undefined' ? window.innerHeight : 900,
           })
+          if (!boundary) return null
           return (
-            <polygon
-              points={pts.join(' ')}
-              fill="none"
-              stroke="#3b82f6"
-              strokeWidth={1}
-              strokeOpacity={0.3}
-              strokeDasharray="4,3"
-            />
+            <g>
+              <path
+                d={boundary.maskPath}
+                fill="#475569"
+                fillOpacity={0.22}
+                fillRule="evenodd"
+                pointerEvents="none"
+              />
+              <polygon
+                points={boundary.polygonStr}
+                fill="none"
+                stroke="#3b82f6"
+                strokeWidth={1}
+                strokeOpacity={0.45}
+                strokeDasharray="4,3"
+              />
+              <text
+                x={center}
+                y={CHART_PADDING - 22}
+                textAnchor="middle"
+                fill="#94a3b8"
+                fontSize={8}
+                opacity={0.7}
+              >
+                not tested (beyond screen)
+              </text>
+            </g>
           )
         })()}
 

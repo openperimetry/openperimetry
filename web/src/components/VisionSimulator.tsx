@@ -18,17 +18,33 @@ interface Props {
   minimal?: boolean
 }
 
-// Curated Unsplash photos showing real scenarios difficult with tunnel vision
+// Curated Unsplash photos showing real scenarios difficult with tunnel vision.
+// Order matters — the first entry is the default scene shown on load. We lead
+// with an eye-level crowd scene rather than a top-down crosswalk so the demo
+// shows peripheral-vision challenges in faces/people spread across the field
+// of view (not a ground-focused composition).
 const SCENE_OPTIONS = [
   {
-    label: 'Crossing',
-    url: 'https://images.unsplash.com/photo-1517732306149-e8f829eb588a?w=1200&h=800&fit=crop&auto=format',
-    // Busy pedestrian crosswalk — navigating traffic
+    label: 'Street',
+    url: 'https://images.unsplash.com/photo-1449824913935-59a10b8d2000?rect=210,436,1500,844&w=1600&h=900&auto=format',
+    // Wide eye-level city street scene — lots of horizontal extent so
+    // the peripheral zones actually have content to obscure. Explicit
+    // `rect=x,y,w,h` crop (source image is 1920×1280) puts the
+    // foreground taxi cab on the road at the exact centre of the
+    // output frame — a typical pedestrian-eye viewpoint. `fp-y`
+    // focal-point cropping alone is clamped to ≤0.578 because of the
+    // output aspect ratio, which wasn't low enough to land the taxi
+    // dead-centre.
   },
   {
-    label: 'Handshake',
+    label: 'Crowd',
+    url: 'https://images.unsplash.com/photo-1517457373958-b7bdd4587205?w=1200&h=800&fit=crop&auto=format',
+    // Crowd of people — finding someone in a group
+  },
+  {
+    label: 'High five',
     url: 'https://images.unsplash.com/photo-1600880292203-757bb62b4baf?w=1200&h=800&fit=crop&auto=format',
-    // People greeting / handshake — finding an extended hand
+    // People greeting — finding an extended hand
   },
   {
     label: 'Grocery',
@@ -41,9 +57,9 @@ const SCENE_OPTIONS = [
     // Staircase — depth and edges
   },
   {
-    label: 'Crowd',
-    url: 'https://images.unsplash.com/photo-1517457373958-b7bdd4587205?w=1200&h=800&fit=crop&auto=format',
-    // Crowd of people — finding someone in a group
+    label: 'Crossing',
+    url: 'https://images.unsplash.com/photo-1517732306149-e8f829eb588a?w=1200&h=800&fit=crop&auto=format',
+    // Busy pedestrian crosswalk — navigating traffic
   },
 ]
 const DEFAULT_SCENE_URL = SCENE_OPTIONS[0].url
@@ -706,6 +722,11 @@ export function VisionSimulator({ points, eye, maxEccentricity, secondEyePoints,
     (Object.keys(effectIntensities) as VisualEffect[]).filter(k => (effectIntensities[k] ?? 0) > 0),
   )
   const [expanded, setExpanded] = useState(false)
+  // Degree-grid overlay (concentric eccentricity rings + meridian axes).
+  // On by default — the grid helps users connect what they see to the
+  // degree-labelled scotomas on the VisualFieldMap next to it — but
+  // toggleable for scenes where the lines distract from the photo.
+  const [showDegreeGrid, setShowDegreeGrid] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
@@ -1659,6 +1680,246 @@ export function VisionSimulator({ points, eye, maxEccentricity, secondEyePoints,
           className="absolute inset-0 w-full h-full pointer-events-none"
         />
       )}
+
+      {/* Physiological-viewport overlays. The underlying canvas is a
+          rectangle — real human vision isn't. Three stacked, pointer-
+          transparent layers shape the image into something closer to
+          what the eye actually presents to the brain:
+
+          (1) Peripheral blur. Foveal acuity falls off rapidly with
+              eccentricity (≥50% acuity loss by ~5°, roughly continuing
+              the cortical-magnification curve summarised in
+              Strasburger, Rentschler & Jüttner 2011, "Peripheral vision
+              and pattern recognition"). We approximate that with a
+              backdrop-blur layer whose alpha mask is transparent in the
+              central ~12% of the canvas and fully opaque at the edges,
+              so the blur only affects pixels outside the foveal zone.
+          (2) Oval viewport. The normal binocular visual field is
+              roughly 200° horizontal × 130° vertical — an ellipse, not
+              a rectangle. A soft radial-gradient vignette fades the
+              corners of the canvas to the surrounding background so
+              what the user sees is an oval island of vision rather
+              than a hard rectangle. Deliberately soft-edged because
+              peripheral vision doesn't end abruptly.
+          (3) Degree grid. Subtle concentric eccentricity rings (10°,
+              20°, 30°, …) and four meridian axes, matched to the
+              canvas's pxPerDeg (r_px = (deg / maxEccentricity) × minR).
+              Only rings up to maxEccentricity are drawn. Rendered in
+              SVG with percentage-based viewBox so it scales with the
+              canvas. */}
+      {!cameraActive && !loading && (() => {
+        // Anatomical peripheral-vision zones from Younis, Al-Nuaimy,
+        // Alomari & Rowe (2019), "A Hazard Detection and Tracking
+        // System for People with Peripheral Vision Loss…", IJACSA
+        // 10(2), Fig. 1 and the paper's accompanying text:
+        //
+        //   "Central vision … comprises around 13 degrees. The second
+        //    type is the peripheral vision … extends up to 60 degrees
+        //    nasally, 107 degrees temporally, 70 degrees down and 80
+        //    degrees up for each eye."
+        //
+        // That makes the zone boundaries:
+        //   0–13°   = Central vision          (yellow ring at 13°)
+        //   13–30°  = Near peripheral         (blue ring at 30°)
+        //   30–60°  = Mid peripheral          (green inner ring at 60°)
+        //   60–107° = Far peripheral          (green outer ring at 107°)
+        //
+        // This overlay is an ANATOMICAL reference frame — it describes
+        // the shape of normal human vision, not the extent of the
+        // measurement. We therefore anchor the entire overlay to a
+        // fixed anatomical max (107°, the temporal monocular limit)
+        // instead of the test's `maxEccentricity`. A 30°-range static
+        // test still sees all four zones and the blur ramp in the same
+        // clinically-correct positions; only the scotoma overlay on
+        // the underlying canvas remains bound to maxEccentricity, as
+        // that IS the measurement.
+        const ANATOMICAL_MAX_DEG = 107
+        const ZONES = [
+          { deg: 13,  color: '#eab308', label: 'Central vision',   inside: true  }, // yellow — boundary of central vision
+          { deg: 30,  color: '#3b82f6', label: 'Near peripheral',  inside: false }, // blue
+          { deg: 60,  color: '#22c55e', label: 'Mid peripheral',   inside: false }, // green inner
+          { deg: 107, color: '#22c55e', label: 'Far peripheral',   inside: false }, // green outer
+        ]
+        // Anchor the blur ramp to anatomical degrees so the "sharp
+        // foveal zone + progressively blurred periphery" effect matches
+        // the Younis zones regardless of the test's measurement range.
+        // Many intermediate stops so acuity falls off continuously
+        // rather than in a step. The near-peripheral band (13°–30°)
+        // still reads clearly — in real vision you CAN recognise faces
+        // and read large signs in that band; the steep blur kicks in
+        // once you pass into mid peripheral (30°+):
+        //   ≤ 5°  — fully sharp (foveal)
+        //   13°   — still mostly sharp (edge of central vision)
+        //   30°   — ~half blurred (edge of near peripheral)
+        //   60°   — heavily blurred (edge of mid peripheral)
+        //   ≥ 80° — fully blurred (far peripheral)
+        //
+        // The canvas itself represents the full binocular (two-eye)
+        // field of view — edge of canvas ≈ 107° (the anatomical
+        // temporal limit). The gradient uses `closest-side`, so 100%
+        // lands exactly at the container edge along each axis. This
+        // way the blur envelope, vignette, and zone rings all track
+        // the canvas aspect and remain mutually aligned.
+        const degToPct = (deg: number) => Math.min(100, 100 * (deg / ANATOMICAL_MAX_DEG))
+        const mask =
+          `radial-gradient(ellipse closest-side at 50% 50%,` +
+          ` transparent ${degToPct(5)}%,` +
+          ` rgba(0,0,0,0.05) ${degToPct(10)}%,` +
+          ` rgba(0,0,0,0.12) ${degToPct(13)}%,` +
+          ` rgba(0,0,0,0.25) ${degToPct(20)}%,` +
+          ` rgba(0,0,0,0.45) ${degToPct(30)}%,` +
+          ` rgba(0,0,0,0.75) ${degToPct(45)}%,` +
+          ` rgba(0,0,0,0.92) ${degToPct(60)}%,` +
+          ` black ${degToPct(80)}%)`
+        return (
+          <>
+            {/* (1) Peripheral blur — ramped by eccentricity (see above).
+                The mask gradient uses `closest-side`, so its ellipse
+                matches the canvas aspect exactly — the blur envelope
+                is the same shape as the canvas and the same shape as
+                the zone rings below. */}
+            <div
+              aria-hidden
+              className="absolute inset-0 pointer-events-none"
+              style={{
+                backdropFilter: 'blur(9px)',
+                WebkitBackdropFilter: 'blur(9px)',
+                maskImage: mask,
+                WebkitMaskImage: mask,
+              }}
+            />
+            {/* (2) Outside-the-field mask. The binocular field is an
+                oval inscribed in the canvas — it touches the top,
+                bottom, left, and right edges at 107°, but the corners
+                of the rectangular canvas lie OUTSIDE the field. We
+                paint those corners black (matching the app's dark-
+                mode background) so the viewport reads as a clean
+                oval-shaped field without the corners screaming
+                against the surrounding page. `closest-side` means the
+                transparent interior reaches exactly to the canvas
+                edges along each axis. */}
+            <div
+              aria-hidden
+              className="absolute inset-0 pointer-events-none"
+              style={{
+                background:
+                  'radial-gradient(ellipse closest-side at 50% 50%, transparent 96%, #000000 100%)',
+              }}
+            />
+            {/* (3) Degree grid overlay — Younis-style peripheral-vision
+                zones. SVG in a 100×100 viewBox with preserveAspectRatio
+                "none" so the coord system tracks the canvas's actual
+                aspect (r_svg = 50 × deg / maxEcc). Toggleable via
+                the "Degree grid" control below the simulator — on by
+                default. */}
+            {showDegreeGrid && (
+            <svg
+              aria-hidden
+              className="absolute inset-0 w-full h-full pointer-events-none"
+              viewBox="0 0 100 100"
+              preserveAspectRatio="none"
+            >
+              {/* Meridian axes (horizontal + vertical through fixation).
+                  Orange, matching the Younis figure. Double-stroke with
+                  a dark under-stroke so they stay visible over both
+                  light and dark scenes. */}
+              <line x1={6} y1={50} x2={94} y2={50} stroke="rgba(0,0,0,0.5)"  strokeWidth={0.5}  />
+              <line x1={50} y1={6} x2={50} y2={94} stroke="rgba(0,0,0,0.5)"  strokeWidth={0.5}  />
+              <line x1={6} y1={50} x2={94} y2={50} stroke="#f97316"          strokeWidth={0.28} opacity={0.85} />
+              <line x1={50} y1={6} x2={50} y2={94} stroke="#f97316"          strokeWidth={0.28} opacity={0.85} />
+
+              {/* Zone rings. In the Younis figure each clinical zone
+                  has its own colour: red = central, yellow = near,
+                  blue = mid, green = far peripheral. We draw each as
+                  an SVG circle (which the non-uniform viewBox renders
+                  as an ellipse matched to the canvas aspect) so the
+                  rings always hug the oval viewport. A dark underlay
+                  at slightly larger stroke width keeps rings legible
+                  on bright scenes. */}
+              {ZONES.map(z => {
+                const r = 50 * (z.deg / ANATOMICAL_MAX_DEG)
+                return (
+                  <g key={z.deg}>
+                    <circle cx={50} cy={50} r={r} fill="none" stroke="rgba(0,0,0,0.55)" strokeWidth={0.6} />
+                    <circle cx={50} cy={50} r={r} fill="none" stroke={z.color} strokeWidth={0.38} opacity={0.95} />
+                  </g>
+                )
+              })}
+
+              {/* Fixation mark */}
+              <circle cx={50} cy={50} r={0.7} fill="rgba(255,255,255,0.9)" stroke="rgba(0,0,0,0.6)" strokeWidth={0.15} />
+            </svg>
+            )}
+            {/* Labels overlay — rendered as HTML spans with percentage
+                positioning rather than SVG text, because the SVG above
+                uses `preserveAspectRatio="none"` which non-uniformly
+                stretches text glyphs. HTML text is unaffected by that
+                stretch, so "Far peripheral" etc. remain legible at any
+                canvas aspect. Percentages map directly onto the SVG's
+                normalised coords because both fill the same box. */}
+            {showDegreeGrid && (
+              <div aria-hidden className="absolute inset-0 pointer-events-none select-none">
+                {/* Zone-name labels — positioned in the upper half of
+                    each band (halfway between this ring and the prior
+                    one). Skipped when the band is too narrow to fit
+                    the text cleanly (e.g. the 13° central zone). */}
+                {ZONES.map((z, i) => {
+                  if (!z.label) return null
+                  const r = 50 * (z.deg / ANATOMICAL_MAX_DEG)
+                  const prevR = i === 0 ? 0 : 50 * (ZONES[i - 1].deg / ANATOMICAL_MAX_DEG)
+                  const midR = (r + prevR) / 2
+                  if (midR < 5) return null
+                  return (
+                    <span
+                      key={`zone-${z.deg}`}
+                      className="absolute text-white text-[11px] font-medium whitespace-nowrap"
+                      style={{
+                        left: '50%',
+                        top: `${50 - midR}%`,
+                        transform: 'translate(-50%, -50%)',
+                        textShadow:
+                          '0 0 3px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.95), 0 1px 1px rgba(0,0,0,0.9)',
+                      }}
+                    >
+                      {z.label}
+                    </span>
+                  )
+                })}
+                {/* Degree labels on the horizontal axis, mirrored left
+                    and right, matching the Younis figure. Clamped
+                    slightly inside the canvas edge so the 107° label
+                    stays readable. */}
+                {ZONES.flatMap(z => {
+                  const r = 50 * (z.deg / ANATOMICAL_MAX_DEG)
+                  const labelR = Math.min(r, 47)
+                  const baseStyle = {
+                    top: '50%',
+                    transform: 'translate(-50%, 4px)',
+                    textShadow:
+                      '0 0 3px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.95), 0 1px 1px rgba(0,0,0,0.9)',
+                  } as const
+                  return [
+                    <span
+                      key={`deg-r-${z.deg}`}
+                      className="absolute text-white text-[11px] font-semibold whitespace-nowrap"
+                      style={{ ...baseStyle, left: `${50 + labelR}%` }}
+                    >
+                      {z.deg}°
+                    </span>,
+                    <span
+                      key={`deg-l-${z.deg}`}
+                      className="absolute text-white text-[11px] font-semibold whitespace-nowrap"
+                      style={{ ...baseStyle, left: `${50 - labelR}%` }}
+                    >
+                      {z.deg}°
+                    </span>,
+                  ]
+                })}
+              </div>
+            )}
+          </>
+        )
+      })()}
       {/* Expand / collapse button on the canvas */}
       <button
         onClick={() => setExpanded(v => !v)}
@@ -1709,6 +1970,25 @@ export function VisionSimulator({ points, eye, maxEccentricity, secondEyePoints,
         />
         <span className="text-xs text-gray-500 shrink-0">Blurry</span>
       </div>
+
+      {/* Degree-grid toggle. On by default; hide when a user just wants
+          to see the scene without the eccentricity rings competing for
+          attention. */}
+      <button
+        onClick={() => setShowDegreeGrid(v => !v)}
+        role="switch"
+        aria-checked={showDegreeGrid}
+        className="flex items-center justify-between w-full text-left text-xs text-gray-400 hover:text-white transition-colors"
+      >
+        <span>Degree grid</span>
+        <span
+          className={`w-8 h-4 rounded-full flex items-center px-0.5 transition-colors ${
+            showDegreeGrid ? 'bg-blue-500 justify-end' : 'bg-gray-700 justify-start'
+          }`}
+        >
+          <span className="w-3 h-3 rounded-full bg-white" />
+        </span>
+      </button>
 
       {/* Visual effects panel */}
       <div className="space-y-2">

@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react'
-import type { TestPoint, TestResult, CalibrationData } from '../types'
+import { useState, useEffect, useRef } from 'react'
+import type { CalibrationData, RunSpeedMode, TestPoint, TestResult } from '../types'
+import { useAuth } from '../AuthContext'
 import { STIMULI, ISOPTER_ORDER } from '../types'
 import { VisualFieldMap } from './VisualFieldMap'
 import { SensitivityMap } from './SensitivityMap'
-import { deriveDbFromSuprathreshold } from '../sensitivity'
 import { calcIsopterAreas } from '../isopterCalc'
 import { Interpretation } from './Interpretation'
 import { VisionSimulator } from './VisionSimulator'
@@ -12,12 +12,30 @@ import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { ScenarioOverlay } from './ScenarioOverlay'
 import { formatEyeLabel } from '../eyeLabels'
 import { ClinicalDisclaimer } from './ClinicalDisclaimer'
+import { SavePrompt } from './SavePrompt'
+import { WhatsAppShareButton } from './WhatsAppShareButton'
+import { APP_DOMAIN } from '../branding'
+import { useAdvancedSettings } from '../advancedSettings'
+import { useStudyMode } from '../studyMode'
+import {
+  buildNativeProvenance,
+  buildProtocolSnapshot,
+  buildStudyMetadata,
+  captureDeviceMetadata,
+} from '../resultMetadata'
 
 interface Props {
   rightPoints: TestPoint[]
   leftPoints: TestPoint[]
   calibration: CalibrationData
   maxEccentricity: number
+  /** Which test produced these points. Determines whether the visual-field
+   *  isopter plot (Goldmann kinetic) or the dB sensitivity heatmap (static)
+   *  is rendered. Legacy in-memory sessions only flow through Goldmann, so
+   *  omitting this prop defaults to Goldmann. */
+  testMode?: 'goldmann' | 'static'
+  speedMode?: RunSpeedMode
+  extendedField?: boolean
   onDone: () => void
 }
 
@@ -60,11 +78,23 @@ export function BinocularResults({
   leftPoints,
   calibration,
   maxEccentricity,
+  testMode = 'goldmann',
+  speedMode,
+  extendedField = false,
   onDone,
 }: Props) {
+  const isGoldmann = testMode === 'goldmann'
+  const { user, syncResults } = useAuth()
+  const advanced = useAdvancedSettings()
+  const studyMode = useStudyMode()
   const [tab, setTab] = useState<'combined' | 'right' | 'left'>('combined')
   const [savedIds, setSavedIds] = useState<{ right?: string; left?: string }>({})
   const savedAny = savedIds.right != null || savedIds.left != null
+  // Retain the TestResults built at mount so we can retry persistence if
+  // the user signs in after the binocular results are shown. saveResult
+  // no-ops for anonymous users; this ref lets us replay the save once
+  // the user has an account.
+  const lastResultsRef = useRef<{ right?: TestResult; left?: TestResult }>({})
 
   const combinedPoints = combineBinocularPoints(rightPoints, leftPoints)
 
@@ -98,19 +128,36 @@ export function BinocularResults({
     const groupId = isTrueBinocular ? crypto.randomUUID() : undefined
     const date = new Date().toISOString()
     const next: { right?: string; left?: string } = {}
+    const study = buildStudyMetadata(studyMode)
+    const protocol = buildProtocolSnapshot({
+      studyMode,
+      testType: testMode,
+      testMode: testMode === 'static' ? 'threshold' : 'suprathreshold',
+      speedMode,
+      extendedField: testMode === 'goldmann' ? extendedField : undefined,
+      advancedSettings: advanced,
+    })
+    const device = captureDeviceMetadata()
+    const provenance = buildNativeProvenance()
 
     if (hasRight) {
       const rightId = crypto.randomUUID()
-      saveResult({
+      const rightResult: TestResult = {
         id: rightId,
         eye: 'right',
         date,
         points: rightPoints,
         isopterAreas: rightAreas,
         calibration,
-        testType: 'goldmann',
+        testType: testMode,
         binocularGroup: groupId,
-      })
+        protocol,
+        ...(study ? { study } : {}),
+        device,
+        provenance,
+      }
+      lastResultsRef.current.right = rightResult
+      saveResult(rightResult)
       next.right = rightId
     }
     if (hasLeft) {
@@ -121,21 +168,39 @@ export function BinocularResults({
       // so the downstream verify/export can re-derive the mirrored offset
       // from result.eye. Consumers that want the exact left-eye fixation
       // offset can flip the sign when result.eye === 'left'.
-      saveResult({
+      const leftResult: TestResult = {
         id: leftId,
         eye: 'left',
         date,
         points: leftPoints,
         isopterAreas: leftAreas,
         calibration,
-        testType: 'goldmann',
+        testType: testMode,
         binocularGroup: groupId,
-      })
+        protocol,
+        ...(study ? { study } : {}),
+        device,
+        provenance,
+      }
+      lastResultsRef.current.left = leftResult
+      saveResult(leftResult)
       next.left = leftId
     }
     setSavedIds(next)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // If the user signs in after finishing the binocular test, retry
+  // persistence so both eyes land on their new account. saveResult is
+  // idempotent by id.
+  useEffect(() => {
+    if (!user) return
+    const { right, left } = lastResultsRef.current
+    if (!right && !left) return
+    if (right) saveResult(right)
+    if (left) saveResult(left)
+    syncResults()
+  }, [user, syncResults])
 
   const activePoints = tab === 'combined' ? combinedStandard : tab === 'right' ? rightStandard : leftStandard
   const activeEye = tab === 'combined' ? 'right' as const : tab // 'right' convention for combined display
@@ -147,11 +212,7 @@ export function BinocularResults({
       <div className="max-w-lg mx-auto space-y-6 pb-12">
         <h2 className="text-2xl font-heading font-bold text-center">Binocular Results</h2>
 
-        {savedAny && (
-          <p className="text-center text-teal text-xs">
-            Saved automatically — this session is now available on the Results page.
-          </p>
-        )}
+        {savedAny && <SavePrompt />}
 
         <ClinicalDisclaimer variant="results" />
 
@@ -172,30 +233,33 @@ export function BinocularResults({
           ))}
         </div>
 
-        {/* Radar */}
-        {tab === 'combined' ? (
-          <div className="relative">
+        {/* Radar — only the Goldmann (kinetic) flow produces isopters to
+            render here. Static sessions show the sensitivity heatmap below. */}
+        {isGoldmann && (
+          tab === 'combined' ? (
+            <div className="relative">
+              <VisualFieldMap
+                points={combinedStandard}
+                eye="right"
+                maxEccentricity={maxEccentricity}
+                size={mapSize}
+                calibration={combinedCalibration}
+                enableVerify
+              />
+              <p className="text-center text-xs text-zinc-500 mt-1">
+                Combined field — best response from either eye at each direction
+              </p>
+            </div>
+          ) : (
             <VisualFieldMap
-              points={combinedStandard}
-              eye="right"
+              points={activePoints}
+              eye={activeEye}
               maxEccentricity={maxEccentricity}
               size={mapSize}
-              calibration={combinedCalibration}
+              calibration={calibration}
               enableVerify
             />
-            <p className="text-center text-xs text-zinc-500 mt-1">
-              Combined field — best response from either eye at each direction
-            </p>
-          </div>
-        ) : (
-          <VisualFieldMap
-            points={activePoints}
-            eye={activeEye}
-            maxEccentricity={maxEccentricity}
-            size={mapSize}
-            calibration={calibration}
-            enableVerify
-          />
+          )
         )}
 
         {/* Area comparison table */}
@@ -261,15 +325,29 @@ export function BinocularResults({
           </div>
         )}
 
-        {/* Derived sensitivity heatmap (placed after isopter-area table so
-            the area legend sits directly under the field map it describes) */}
-        <SensitivityMap
-          points={deriveDbFromSuprathreshold(tab === 'combined' ? combinedStandard : activePoints)}
-          eye={tab === 'combined' ? 'right' : activeEye}
-          maxEccentricity={maxEccentricity}
-          size={mapSize}
-          source="derived"
-        />
+        {/* Sensitivity heatmap — rendered only for threshold-mode static
+            tests that carry per-location thresholdDb. Goldmann shows the
+            isopter radar above instead; legacy suprathreshold static
+            imports carry no measured dB and render nothing here. */}
+        {!isGoldmann && (() => {
+          const source = tab === 'combined' ? combinedStandard : activePoints
+          const measured = source
+            .filter(p => p.thresholdDb != null && !p.catchTrial)
+            .map(p => ({
+              meridianDeg: p.meridianDeg,
+              eccentricityDeg: p.eccentricityDeg,
+              db: p.thresholdDb!,
+            }))
+          if (measured.length === 0) return null
+          return (
+            <SensitivityMap
+              points={measured}
+              eye={tab === 'combined' ? 'right' : activeEye}
+              maxEccentricity={maxEccentricity}
+              size={mapSize}
+            />
+          )
+        })()}
 
         {/* Interpretation */}
         <Interpretation
@@ -334,6 +412,9 @@ export function BinocularResults({
             Done
           </button>
         </div>
+        <WhatsAppShareButton
+          message={`I just took a free binocular visual-field self-test on ${APP_DOMAIN}. Try it yourself:`}
+        />
       </div>
     </div>
   )

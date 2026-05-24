@@ -22,13 +22,23 @@ export interface SpeedPresetTimings {
   gapMaxMs: number
 }
 
+/** Full speed-preset bundle including the staircase reversal budget.
+ *  Separate from `SpeedPresetTimings` because the runtime override UI
+ *  (Advanced Settings) only exposes the timing fields — reversal count
+ *  is tied to the home-screen fast/normal/relaxed toggle. */
+export interface SpeedPresetConfig extends SpeedPresetTimings {
+  /** Reversals required per location. Fewer = shorter exam, noisier
+   *  per-point threshold. Passed to `initStaircase(priorDb, ...)`. */
+  reversalsRequired: number
+}
+
 /** The three built-in speed presets. */
-export type SpeedPresetName = 'relaxed' | 'normal' | 'fast'
+export type SpeedPresetName = 'relaxed' | 'slow' | 'normal'
 
 /** How often a stimulus presentation is swapped for a blindspot catch trial.
- *  Default per Dzwiniel et al., PLoS ONE 2017 (Specvis-Desktop's
- *  `monitorFixationEveryXStimuli`). Overridable at runtime by the Advanced
- *  Settings feature (see 2026-04-18-advanced-settings.md). */
+ *  Default per Dzwiniel et al., PLoS ONE 2017 (12(10):e0186224), their
+ *  `monitorFixationEveryXStimuli` parameter. Overridable at runtime by
+ *  the Advanced Settings feature (see 2026-04-18-advanced-settings.md). */
 export const CATCH_TRIAL_EVERY_N: number = 10
 
 /** Duration (ms) the fixation-loss alert overlay is shown when a catch
@@ -45,12 +55,17 @@ export const FIXATION_LOSS_ALERT_MESSAGE: string = 'Keep your eye on the fixatio
  *  - responseMs: extra response window after the stimulus clears
  *  - gapMinMs / gapMaxMs: the inter-stimulus gap is uniformly random within
  *    [gapMinMs, gapMaxMs] — this is the jitter that prevents anticipation
- *    (equivalent to Specvis's constant + random ISI model).
- *  Overridable at runtime by Advanced Settings. */
-export const SPEED_PRESETS: Record<SpeedPresetName, SpeedPresetTimings> = {
-  relaxed: { stimulusMs: 600, responseMs: 1800, gapMinMs: 500, gapMaxMs: 900 },
-  normal:  { stimulusMs: 500, responseMs: 1400, gapMinMs: 350, gapMaxMs: 650 },
-  fast:    { stimulusMs: 400, responseMs: 1000, gapMinMs: 250, gapMaxMs: 450 },
+ *  - reversalsRequired: how many 4-2 dB staircase reversals per location
+ *    before we accept the threshold. Normal uses 2 (noisier, shortest
+ *    exam); Slow/Relaxed use 4 (~9 trials per location, matching the
+ *    9-level brightness vector Dzwiniel et al. 2017 used for their
+ *    SuperFast reference protocol).
+ *  Timing fields are overridable at runtime via Advanced Settings;
+ *  `reversalsRequired` is fixed per home-screen speed toggle. */
+export const SPEED_PRESETS: Record<SpeedPresetName, SpeedPresetConfig> = {
+  relaxed: { stimulusMs: 600, responseMs: 1800, gapMinMs: 500, gapMaxMs: 900, reversalsRequired: 4 },
+  slow:    { stimulusMs: 500, responseMs: 1400, gapMinMs: 350, gapMaxMs: 650, reversalsRequired: 4 },
+  normal:  { stimulusMs: 200, responseMs: 1000, gapMinMs: 700, gapMaxMs: 900, reversalsRequired: 2 },
 }
 
 /** Shape of a reliability-index reference range. */

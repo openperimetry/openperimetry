@@ -46,8 +46,8 @@ test.describe('Calibration Flow', () => {
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Brightness calibration')
     await expect(page.getByText('Step 2 of')).toBeVisible()
 
-    // Step 2 → Step 3 (skipped for ring/static, so test with Goldmann)
-    await page.getByRole('button', { name: /Confirm/ }).click()
+    // Step 2 → Step 3 (skipped for static, so test with Goldmann which has reaction-time)
+    await page.getByRole('button', { name: /dimmest.*continue/i }).click()
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Reaction time test')
     await expect(page.getByText('Step 3 of')).toBeVisible()
   })
@@ -78,7 +78,7 @@ test.describe('Calibration Flow', () => {
     await page.getByRole('button', { name: 'Next' }).click()
     // Should be brightness
     await expect(page.getByText('Step 2 of')).toBeVisible()
-    await page.getByRole('button', { name: /Confirm/ }).click()
+    await page.getByRole('button', { name: /dimmest.*continue/i }).click()
     // Should skip to Ready, not reaction time
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Ready to test')
   })

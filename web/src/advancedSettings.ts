@@ -19,6 +19,11 @@ import {
   FIXATION_LOSS_ALERT_MESSAGE,
   SPEED_PRESETS,
 } from './testDefaults'
+import {
+  CUSTOM_GRID_PRESETS,
+  type StaticGridPattern,
+  type CustomGridParams,
+} from './grids'
 
 /** Speed-preset timings + a flag that controls whether the advanced
  *  values replace the per-run speed selector in the static test. The
@@ -37,6 +42,15 @@ export interface SpeedPresetSettings {
 }
 
 export interface AdvancedSettings {
+  /** When true, a "Get in position" screen with the HeadGuide profile and
+   *  distance callout shows before the first block. Decoupled from
+   *  {@link initialBlindspotCheck} so users can see the positioning
+   *  illustration without also sitting through the blindspot dot check. */
+  showPositionGuide: boolean
+  /** When true, a blindspot position-check screen runs before the first block. */
+  initialBlindspotCheck: boolean
+  /** When false, no blindspot catch trials are injected during the test. */
+  catchTrialsEnabled: boolean
   /** How often a presentation is swapped for a blindspot catch trial. int ≥ 1. */
   catchTrialEveryN: number
   /** Fixation-loss alert duration in ms. 0 disables the overlay. int ≥ 0. */
@@ -47,14 +61,39 @@ export interface AdvancedSettings {
   speedPreset: SpeedPresetSettings
   /** Pre-calibrated background shade for test screens. */
   backgroundShade: 'dark' | 'medium' | 'light'
+  /** Which grid pattern the static test runs. Defaults to 24-2 (the
+   *  most common clinical grid); 30-2 adds outer coverage preferred
+   *  for RP monitoring; 10-2 is for advanced-RP or macular cases where
+   *  only central field remains; `custom` uses the parameter-driven
+   *  generator (see {@link customGrid}). */
+  staticGridPattern: StaticGridPattern
+  /** Parameters for the parameter-driven grid generator. Consulted only
+   *  when `staticGridPattern === 'custom'`; the fields are still
+   *  persisted under the default preset so the setup-screen preview
+   *  works even when the user isn't currently running a custom grid. */
+  customGrid: CustomGridParams
+  /** When true, the Goldmann calibration includes a 5-trial reaction-
+   *  time measurement and uses the median to compensate stimulus
+   *  positions. When false (default), the calibration skips that step
+   *  and uses {@link CALIBRATION.DEFAULT_REACTION_TIME_MS}, which most
+   *  users tested were close enough to that the extra step felt like
+   *  friction without a meaningful accuracy gain. Static tests already
+   *  skip RT calibration since they don't reaction-correct positions. */
+  measureReactionTime: boolean
 }
 
 export const DEFAULT_ADVANCED_SETTINGS: AdvancedSettings = {
+  showPositionGuide: true,
+  initialBlindspotCheck: false,
+  catchTrialsEnabled: false,
   catchTrialEveryN: CATCH_TRIAL_EVERY_N,
   fixationAlertMs: FIXATION_LOSS_ALERT_MS,
   fixationAlertMessage: FIXATION_LOSS_ALERT_MESSAGE,
   speedPreset: { override: false, ...SPEED_PRESETS.normal },
   backgroundShade: 'dark',
+  staticGridPattern: '24-2',
+  customGrid: { ...CUSTOM_GRID_PRESETS.normal },
+  measureReactionTime: false,
 }
 
 export function mergeWithDefaults(partial: Partial<AdvancedSettings>): AdvancedSettings {
@@ -72,6 +111,18 @@ export function validateAdvancedSettings(raw: unknown): Partial<AdvancedSettings
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     if (!known.has(k)) throw new Error(`unknown field: ${k}`)
     switch (k) {
+      case 'showPositionGuide':
+        if (typeof v !== 'boolean') throw new Error('showPositionGuide must be boolean')
+        out.showPositionGuide = v
+        break
+      case 'initialBlindspotCheck':
+        if (typeof v !== 'boolean') throw new Error('initialBlindspotCheck must be boolean')
+        out.initialBlindspotCheck = v
+        break
+      case 'catchTrialsEnabled':
+        if (typeof v !== 'boolean') throw new Error('catchTrialsEnabled must be boolean')
+        out.catchTrialsEnabled = v
+        break
       case 'catchTrialEveryN':
         if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
           throw new Error('catchTrialEveryN must be integer ≥ 1')
@@ -113,6 +164,30 @@ export function validateAdvancedSettings(raw: unknown): Partial<AdvancedSettings
         }
         out.backgroundShade = v
         break
+      case 'staticGridPattern':
+        if (v !== '24-2' && v !== '30-2' && v !== '10-2' && v !== 'custom') {
+          throw new Error('staticGridPattern must be 24-2|30-2|10-2|custom')
+        }
+        out.staticGridPattern = v
+        break
+      case 'measureReactionTime':
+        if (typeof v !== 'boolean') throw new Error('measureReactionTime must be boolean')
+        out.measureReactionTime = v
+        break
+      case 'customGrid': {
+        if (!v || typeof v !== 'object' || Array.isArray(v)) {
+          throw new Error('customGrid must be an object')
+        }
+        const o = v as Record<string, unknown>
+        for (const f of ['spacingXDeg', 'spacingYDeg', 'extentXDeg', 'extentYDeg'] as const) {
+          const n = o[f]
+          if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0 || n > 90) {
+            throw new Error(`customGrid.${f} must be a finite number in (0, 90]`)
+          }
+        }
+        out.customGrid = v as AdvancedSettings['customGrid']
+        break
+      }
     }
   }
   return out

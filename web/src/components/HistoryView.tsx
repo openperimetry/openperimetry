@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import type { TestResult } from '../types'
-import { STIMULI, ISOPTER_ORDER } from '../types'
+import { STIMULI, ISOPTER_ORDER, isGoldmannResult } from '../types'
 import { getResults, deleteResult, saveResult, saveSurvey, hasSurveyForResult } from '../storage'
 import { VisualFieldMap } from './VisualFieldMap'
 import { SensitivityMap } from './SensitivityMap'
-import { deriveDbFromSuprathreshold } from '../sensitivity'
 import { Interpretation } from './Interpretation'
 import { VisionSimulator } from './VisionSimulator'
 import { exportTrackedResultPDF } from '../pdfExportTracking'
@@ -29,6 +28,47 @@ const ISOPTER_SHAPES: Record<string, string> = {
 
 interface Props {
   onBack: () => void
+}
+
+function describeProtocol(result: TestResult): string[] {
+  const protocol = result.protocol
+  if (!protocol) return []
+  const out: string[] = []
+  if (protocol.label) out.push(`${protocol.label}${protocol.version ? ` (v${protocol.version})` : ''}`)
+  out.push(protocol.testType === 'static' ? 'Static' : 'Goldmann')
+  if (protocol.testMode) out.push(protocol.testMode)
+  if (protocol.speedMode) out.push(protocol.speedMode === 'slow' ? 'Slow pace' : 'Normal pace')
+  if (protocol.staticGridPattern) out.push(`Grid ${protocol.staticGridPattern}`)
+  if (protocol.extendedField != null) out.push(protocol.extendedField ? 'Extended field on' : 'Extended field off')
+  return out
+}
+
+function describeDevice(result: TestResult): string[] {
+  const device = result.device
+  if (!device) return []
+  const out: string[] = []
+  if (device.viewportWidth != null && device.viewportHeight != null) {
+    out.push(`Viewport ${device.viewportWidth}×${device.viewportHeight}`)
+  }
+  if (device.screenWidth != null && device.screenHeight != null) {
+    out.push(`Screen ${device.screenWidth}×${device.screenHeight}`)
+  }
+  if (device.pixelRatio != null) out.push(`DPR ${device.pixelRatio}`)
+  if (device.fullscreen != null) out.push(device.fullscreen ? 'Fullscreen at capture' : 'Windowed capture')
+  if (device.timezone) out.push(device.timezone)
+  return out
+}
+
+function describeQuality(result: TestResult): string[] {
+  const q = result.qualityMetrics
+  if (!q) return []
+  const out: string[] = []
+  if (q.catchTrialsPresented != null) out.push(`Catch trials ${q.catchTrialsPresented}`)
+  if (q.catchTrialsFalsePositive != null) out.push(`Catch false positives ${q.catchTrialsFalsePositive}`)
+  if (q.falsePositiveIsiPresses != null) out.push(`ISI false positives ${q.falsePositiveIsiPresses}`)
+  if (q.truePositiveResponses != null) out.push(`True positives ${q.truePositiveResponses}`)
+  if (q.rescueTrialsFired != null) out.push(`Rescue trials ${q.rescueTrialsFired}`)
+  return out
 }
 
 export function HistoryView({ onBack }: Props) {
@@ -154,16 +194,18 @@ export function HistoryView({ onBack }: Props) {
           <p className="text-zinc-400 text-sm">
             {new Date(selected.date).toLocaleTimeString()}
             {selected.testType && (
-              <span className="ml-2 text-zinc-500">· {selected.testType === 'ring' ? 'Ring test' : selected.testType === 'static' ? 'Static test' : 'Goldmann'}</span>
+              <span className="ml-2 text-zinc-500">· {selected.testType === 'static' ? 'Static test' : 'Goldmann'}</span>
             )}
           </p>
-          <VisualFieldMap
-            points={standardPoints}
-            eye={selected.eye}
-            maxEccentricity={maxEcc}
-            calibration={selected.calibration}
-            enableVerify
-          />
+          {isGoldmannResult(selected) && (
+            <VisualFieldMap
+              points={standardPoints}
+              eye={selected.eye}
+              maxEccentricity={maxEcc}
+              calibration={selected.calibration}
+              enableVerify
+            />
+          )}
           <div className="space-y-2">
             <div className="grid grid-cols-2 gap-2 text-sm">
               {ISOPTER_ORDER.map(key => {
@@ -188,12 +230,26 @@ export function HistoryView({ onBack }: Props) {
               </p>
             )}
           </div>
-          <SensitivityMap
-            points={deriveDbFromSuprathreshold(standardPoints)}
-            eye={selected.eye}
-            maxEccentricity={maxEcc}
-            source="derived"
-          />
+          {!isGoldmannResult(selected) && (() => {
+            // Static threshold-mode tests carry per-location thresholdDb.
+            // Legacy suprathreshold static imports have no measured dB
+            // and therefore render no heatmap here.
+            const measured = standardPoints
+              .filter(p => p.thresholdDb != null && !p.catchTrial)
+              .map(p => ({
+                meridianDeg: p.meridianDeg,
+                eccentricityDeg: p.eccentricityDeg,
+                db: p.thresholdDb!,
+              }))
+            if (measured.length === 0) return null
+            return (
+              <SensitivityMap
+                points={measured}
+                eye={selected.eye}
+                maxEccentricity={maxEcc}
+              />
+            )
+          })()}
           <Interpretation points={standardPoints} areas={selected.isopterAreas} maxEccentricityDeg={selected.calibration.maxEccentricityDeg} calibration={selected.calibration} reliabilityIndices={selected.reliabilityIndices} />
           <ScenarioOverlay userPoints={standardPoints} userAreas={selected.isopterAreas} maxEccentricity={maxEcc} />
           {/* Vision sim gets ALL points including extended for wider coverage */}
@@ -207,6 +263,67 @@ export function HistoryView({ onBack }: Props) {
             <p>Max eccentricity: {selected.calibration.maxEccentricityDeg}°</p>
             <p>Total points: {selected.points.length} ({selected.points.filter(p => p.detected).length} detected)</p>
           </div>
+          {(selected.protocol || selected.study || selected.device || selected.provenance || selected.qualityMetrics) && (
+            <div className="space-y-3 rounded-xl border border-white/[0.06] bg-surface p-4">
+              <h2 className="text-sm font-medium text-white">Clinician / study metadata</h2>
+              {selected.study && (
+                <div className="space-y-1 text-sm text-zinc-300">
+                  <p className="text-xs uppercase tracking-[0.08em] text-zinc-500">Study</p>
+                  <p>
+                    Study {selected.study.studyId} · Participant {selected.study.participantId} · Session {selected.study.sessionId}
+                    {selected.study.visitId ? ` · Visit ${selected.study.visitId}` : ''}
+                    {selected.study.repeatIndex != null ? ` · Repeat ${selected.study.repeatIndex}` : ''}
+                    {selected.study.siteId ? ` · Site ${selected.study.siteId}` : ''}
+                    {selected.study.operatorId ? ` · Operator ${selected.study.operatorId}` : ''}
+                  </p>
+                </div>
+              )}
+              {selected.protocol && (
+                <div className="space-y-1 text-sm text-zinc-300">
+                  <p className="text-xs uppercase tracking-[0.08em] text-zinc-500">Protocol</p>
+                  <p>{describeProtocol(selected).join(' · ')}</p>
+                  {selected.protocol.advancedSettingsSnapshot && (
+                    <details className="pt-1 text-xs text-zinc-400">
+                      <summary className="cursor-pointer select-none text-zinc-300">Advanced settings snapshot</summary>
+                      <pre className="mt-2 overflow-x-auto rounded-lg border border-white/[0.06] bg-black/20 p-3 text-[11px] leading-relaxed text-zinc-400">
+                        {JSON.stringify(selected.protocol.advancedSettingsSnapshot, null, 2)}
+                      </pre>
+                    </details>
+                  )}
+                </div>
+              )}
+              {selected.device && (
+                <div className="space-y-1 text-sm text-zinc-300">
+                  <p className="text-xs uppercase tracking-[0.08em] text-zinc-500">Acquisition</p>
+                  <p>{describeDevice(selected).join(' · ')}</p>
+                  {selected.device.platform && (
+                    <p className="text-xs text-zinc-500">
+                      {selected.device.platform}
+                      {selected.device.language ? ` · ${selected.device.language}` : ''}
+                    </p>
+                  )}
+                </div>
+              )}
+              {selected.qualityMetrics && (
+                <div className="space-y-1 text-sm text-zinc-300">
+                  <p className="text-xs uppercase tracking-[0.08em] text-zinc-500">Quality signals</p>
+                  <p>{describeQuality(selected).join(' · ')}</p>
+                </div>
+              )}
+              {selected.provenance && (
+                <div className="space-y-1 text-sm text-zinc-300">
+                  <p className="text-xs uppercase tracking-[0.08em] text-zinc-500">Provenance</p>
+                  <p>
+                    {selected.provenance.source === 'ovfx-import' ? 'Imported from OVFX' : 'Captured natively'}
+                    {selected.provenance.sourceDocumentId ? ` · Source doc ${selected.provenance.sourceDocumentId}` : ''}
+                    {selected.provenance.sourceSoftwareName ? ` · ${selected.provenance.sourceSoftwareName}` : ''}
+                    {selected.provenance.sourceSoftwareVersion ? ` ${selected.provenance.sourceSoftwareVersion}` : ''}
+                    {selected.provenance.appVersion ? ` · App ${selected.provenance.appVersion}` : ''}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
           <ClinicalDisclaimer variant="results" />
 
           {resultHasSurvey(selected.id) ? (
@@ -504,8 +621,8 @@ function isopterStrategyHint(t?: string): string {
 
 function testTypeBadge(t?: string) {
   if (!t) return null
-  const cls = t === 'ring' ? 'bg-purple-600/15 text-purple-400' : t === 'static' ? 'bg-teal/10 text-teal' : 'bg-accent/10 text-accent'
-  const label = t === 'ring' ? 'Ring' : t === 'static' ? 'Static' : 'Goldmann'
+  const cls = t === 'static' ? 'bg-teal/10 text-teal' : 'bg-accent/10 text-accent'
+  const label = t === 'static' ? 'Static' : 'Goldmann'
   return <span className={`text-xs ml-2 px-1.5 py-0.5 rounded ${cls}`}>{label}</span>
 }
 
@@ -700,9 +817,7 @@ function ResultsList({
 /** Per-test-type colors for the isopter trend chart. Static and kinetic
  *  produce III4e areas on different scales (kinetic typically 1.5–4×
  *  larger on the same eye — see the test-type caption below), so we never
- *  connect them with a single line. Ring-test is excluded from the chart
- *  entirely — its "isopter area" means something different (ring detection
- *  coverage, not a III4e extent). */
+ *  connect them with a single line. */
 const TEST_TYPE_COLORS: Record<string, string> = {
   static: '#2dd4bf',   // teal — matches the Static badge
   goldmann: '#fb923c', // orange — matches the Goldmann badge
@@ -717,14 +832,12 @@ function AreaChart({ results }: { results: TestResult[] }) {
 
   // Group by testType. Static-scatter and Goldmann-kinetic produce the
   // III4e area via different algorithms (seen-points hull vs. kinetic
-  // sweep endpoints) and shouldn't share a line. Ring tests don't produce
-  // a comparable III4e isopter so we skip them.
+  // sweep endpoints) and shouldn't share a line.
   const byType = new Map<string, { date: string; area: number }[]>()
   for (const r of sorted) {
     const area = r.isopterAreas['III4e']
     if (area == null) continue
     const type = r.testType ?? 'unknown'
-    if (type === 'ring') continue
     const arr = byType.get(type) ?? []
     arr.push({ date: r.date, area })
     byType.set(type, arr)

@@ -119,13 +119,45 @@ describe('validateAdvancedSettings', () => {
 
   it('accepts a full valid override', () => {
     const full: AdvancedSettings = {
+      showPositionGuide: true,
+      initialBlindspotCheck: true,
+      catchTrialsEnabled: true,
       catchTrialEveryN: 5,
       fixationAlertMs: 2000,
       fixationAlertMessage: 'stay focused',
       speedPreset: { override: true, stimulusMs: 500, responseMs: 1400, gapMinMs: 300, gapMaxMs: 600 },
       backgroundShade: 'medium',
+      staticGridPattern: 'custom',
+      customGrid: { spacingXDeg: 5, spacingYDeg: 5, extentXDeg: 22, extentYDeg: 22 },
+      measureReactionTime: false,
     }
     expect(validateAdvancedSettings(full)).toEqual(full)
+  })
+
+  it('rejects customGrid with non-positive spacing', () => {
+    expect(() =>
+      validateAdvancedSettings({
+        customGrid: { spacingXDeg: 0, spacingYDeg: 4, extentXDeg: 20, extentYDeg: 20 },
+      }),
+    ).toThrow()
+  })
+
+  it('rejects customGrid with an out-of-range extent (> 90°)', () => {
+    expect(() =>
+      validateAdvancedSettings({
+        customGrid: { spacingXDeg: 4, spacingYDeg: 4, extentXDeg: 180, extentYDeg: 20 },
+      }),
+    ).toThrow()
+  })
+
+  it('accepts the new "custom" static grid pattern', () => {
+    expect(validateAdvancedSettings({ staticGridPattern: 'custom' })).toEqual({ staticGridPattern: 'custom' })
+  })
+
+  it('rejects an unknown static grid pattern', () => {
+    expect(() =>
+      validateAdvancedSettings({ staticGridPattern: '60-2' as unknown as 'custom' }),
+    ).toThrow(/staticGridPattern/)
   })
 })
 
@@ -227,11 +259,17 @@ describe('buildExportDocument', () => {
 
   it('round-trips through validate + merge back to the original', () => {
     const s: AdvancedSettings = {
+      showPositionGuide: false,
+      initialBlindspotCheck: true,
+      catchTrialsEnabled: true,
       catchTrialEveryN: 12,
       fixationAlertMs: 800,
       fixationAlertMessage: 'Keep looking',
       speedPreset: { override: true, stimulusMs: 450, responseMs: 1200, gapMinMs: 300, gapMaxMs: 600 },
       backgroundShade: 'medium',
+      staticGridPattern: 'custom',
+      customGrid: { spacingXDeg: 5, spacingYDeg: 5, extentXDeg: 22, extentYDeg: 22 },
+      measureReactionTime: true,
     }
     const doc = buildExportDocument(s)
     const reparsed = mergeWithDefaults(validateAdvancedSettings(doc.settings))

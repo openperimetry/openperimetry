@@ -30,10 +30,9 @@ test.describe('Home Page', () => {
   })
 
   test('switching test mode updates selected tab', async ({ page }) => {
-    await page.getByRole('tab', { name: 'Ring' }).click()
-    await expect(page.getByRole('tab', { name: 'Ring' })).toHaveAttribute('aria-selected', 'true')
+    await page.getByRole('tab', { name: 'Static' }).click()
+    await expect(page.getByRole('tab', { name: 'Static' })).toHaveAttribute('aria-selected', 'true')
     await expect(page.getByRole('tab', { name: 'Goldmann' })).toHaveAttribute('aria-selected', 'false')
-    await expect(page.getByRole('heading', { level: 1 })).toContainText('Ring')
   })
 
   test('shows history button when results exist', async ({ page, seedResults }) => {
@@ -54,8 +53,9 @@ test.describe('Home Page', () => {
     const nav = page.getByRole('navigation', { name: 'Site navigation' })
     await expect(nav).toBeVisible()
     await expect(nav.getByRole('button', { name: 'Demos' })).toBeVisible()
+    await expect(nav.getByRole('button', { name: 'Methods' })).toBeVisible()
     await expect(nav.getByRole('button', { name: 'References' })).toBeVisible()
-    await expect(nav.getByRole('button', { name: 'About' })).toBeVisible()
+    await expect(nav.getByRole('button', { name: 'About' })).toHaveCount(0)
     await expect(nav.getByRole('button', { name: 'Contact' })).toBeVisible()
     await expect(nav.getByRole('button', { name: 'Privacy' })).toBeVisible()
   })

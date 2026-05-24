@@ -3,9 +3,9 @@ import { trackEvent } from '../api'
 import { getDeviceId } from '../storage'
 
 export interface SurveyResponse {
-  perceivedAccuracy: number // 1-5 scale
-  easeOfUse: number // 1-5 scale
-  comparedToClinical?: 'more_sensitive' | 'similar' | 'less_sensitive' | 'never_had_clinical'
+  perceivedAccuracy: number     // 1-5 scale
+  easeOfUse: number             // 1-5 scale
+  instructionsClarity: number   // 1-5 scale
   freeformFeedback: string
 }
 
@@ -16,6 +16,7 @@ interface Props {
 
 const ACCURACY_LABELS = ['Very inaccurate', 'Somewhat inaccurate', 'Neutral', 'Somewhat accurate', 'Very accurate']
 const EASE_LABELS = ['Very difficult', 'Difficult', 'Neutral', 'Easy', 'Very easy']
+const CLARITY_LABELS = ['Very unclear', 'Unclear', 'Neutral', 'Clear', 'Very clear']
 
 function ScaleInput({
   value, onChange, labels, groupLabel,
@@ -51,14 +52,14 @@ function ScaleInput({
 export function PostTestSurvey({ onSubmit, onSkip }: Props) {
   const [perceivedAccuracy, setPerceivedAccuracy] = useState(3)
   const [easeOfUse, setEaseOfUse] = useState(3)
-  const [comparedToClinical, setComparedToClinical] = useState<SurveyResponse['comparedToClinical']>()
+  const [instructionsClarity, setInstructionsClarity] = useState(3)
   const [freeformFeedback, setFreeformFeedback] = useState('')
 
   const handleSubmit = () => {
     const response: SurveyResponse = {
       perceivedAccuracy,
       easeOfUse,
-      comparedToClinical,
+      instructionsClarity,
       freeformFeedback,
     }
     trackEvent('survey_submitted', getDeviceId()).catch(() => {})
@@ -78,7 +79,7 @@ export function PostTestSurvey({ onSubmit, onSkip }: Props) {
       </div>
 
       <div className="space-y-1.5">
-        <p className="text-xs text-zinc-400" id="accuracy-label">How accurate does this result feel compared to your actual vision?</p>
+        <p className="text-xs text-zinc-400" id="accuracy-label">How accurate do the results feel?</p>
         <ScaleInput value={perceivedAccuracy} onChange={setPerceivedAccuracy} labels={ACCURACY_LABELS} groupLabel="Perceived accuracy" />
       </div>
 
@@ -88,29 +89,8 @@ export function PostTestSurvey({ onSubmit, onSkip }: Props) {
       </div>
 
       <div className="space-y-1.5">
-        <p className="text-xs text-zinc-400" id="compare-label">How does this compare to clinical perimetry?</p>
-        <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-labelledby="compare-label">
-          {([
-            ['never_had_clinical', 'Never had clinical test'],
-            ['more_sensitive', 'This detects more'],
-            ['similar', 'Similar results'],
-            ['less_sensitive', 'Clinical detects more'],
-          ] as const).map(([val, label]) => (
-            <button
-              key={val}
-              onClick={() => setComparedToClinical(val)}
-              role="radio"
-              aria-checked={comparedToClinical === val}
-              className={`py-2 px-2 rounded-lg text-xs font-medium transition-colors border ${
-                comparedToClinical === val
-                  ? 'bg-accent border-accent text-white'
-                  : 'bg-surface border-white/[0.06] text-zinc-400 hover:border-white/[0.12]'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        <p className="text-xs text-zinc-400" id="clarity-label">How clear were the instructions?</p>
+        <ScaleInput value={instructionsClarity} onChange={setInstructionsClarity} labels={CLARITY_LABELS} groupLabel="Instructions clarity" />
       </div>
 
       <div className="space-y-1.5">

@@ -4,11 +4,20 @@ import { ApiError, requestPasswordReset, confirmPasswordReset } from '../api'
 
 interface Props {
   onClose: () => void
+  /**
+   * Initial mode to open in. Defaults to 'register' — most visitors to
+   * this app are first-time users (self-test for a single result), so
+   * leading with account creation matches the actual audience better
+   * than defaulting to sign-in. Callers with context that the user
+   * already has an account (e.g. an explicit "Sign in" button) can
+   * override to 'login'.
+   */
+  initialMode?: 'login' | 'register'
 }
 
-export function AuthModal({ onClose }: Props) {
+export function AuthModal({ onClose, initialMode = 'register' }: Props) {
   const { login, register } = useAuth()
-  const [mode, setMode] = useState<'login' | 'register' | 'forgot' | 'reset-sent' | 'reset-confirm'>('login')
+  const [mode, setMode] = useState<'login' | 'register' | 'forgot' | 'reset-sent' | 'reset-confirm'>(initialMode)
   const [email, setEmail] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [password, setPassword] = useState('')
@@ -138,13 +147,14 @@ export function AuthModal({ onClose }: Props) {
           </button>
         </div>
 
-        <p className="text-zinc-400 text-sm">
-          {mode === 'login' && 'Sign in to sync your results across devices.'}
-          {mode === 'register' && 'Create a free account to save your results in the cloud.'}
-          {mode === 'forgot' && 'Enter your email and we\'ll send you a reset link.'}
-          {mode === 'reset-sent' && 'If an account exists with that email, you\'ll receive a password reset link shortly. Check your inbox (and spam folder).'}
-          {mode === 'reset-confirm' && 'Choose a new password for your account.'}
-        </p>
+        {mode !== 'login' && (
+          <p className="text-zinc-400 text-sm">
+            {mode === 'register' && 'Create a free account to view your results and track progress over time.'}
+            {mode === 'forgot' && 'Enter your email and we\'ll send you a reset link.'}
+            {mode === 'reset-sent' && 'If an account exists with that email, you\'ll receive a password reset link shortly. Check your inbox (and spam folder).'}
+            {mode === 'reset-confirm' && 'Choose a new password for your account.'}
+          </p>
+        )}
 
         {error && (
           <div role="alert" className="text-red-400 text-sm bg-red-900/15 border border-red-800/25 rounded-xl px-3 py-2 flex items-start gap-2">

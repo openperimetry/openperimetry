@@ -5,7 +5,7 @@ import path from 'node:path'
 import Database from 'better-sqlite3'
 
 import { SESSION_TTL_MS, SQLITE_DB_PATH } from './config.js'
-import type { AuthUser, VFResultRecord, VFSurveyRecord, AdminSurveyRecord, AdminStats, AdminSessionRecord, AdminVFResultRecord, EventType, AdminEventRecord } from './ddbStore.js'
+import type { AuthUser, ClinicalParticipantRecord, ClinicScreenRecord, VFResultRecord, VFSurveyRecord, AdminSurveyRecord, AdminStats, AdminSessionRecord, AdminVFResultRecord, AdminUserRecord, EventType, AdminEventRecord } from './ddbStore.js'
 
 type SqlUserRow = {
   id: string
@@ -13,6 +13,7 @@ type SqlUserRow = {
   display_name: string
   password_hash: string
   is_admin?: number | null
+  is_clinician?: number | null
   reset_token_hash?: string | null
   reset_expires_at?: string | null
   created_at: string
@@ -66,6 +67,7 @@ function mapUser(row: SqlUserRow): AuthUser {
     email: row.email,
     displayName: row.display_name,
     isAdmin: Boolean(row.is_admin),
+    isClinician: Boolean(row.is_clinician),
     createdAt: row.created_at,
   }
 }
@@ -88,6 +90,7 @@ function getDb(): Database.Database {
       display_name TEXT NOT NULL,
       password_hash TEXT NOT NULL,
       is_admin INTEGER DEFAULT 0,
+      is_clinician INTEGER DEFAULT 0,
       reset_token_hash TEXT,
       reset_expires_at TEXT,
       created_at TEXT NOT NULL
@@ -129,6 +132,36 @@ function getDb(): Database.Database {
 
     CREATE INDEX IF NOT EXISTS idx_vf_surveys_user_date ON vf_surveys(user_id, date DESC);
 
+    CREATE TABLE IF NOT EXISTS clinical_participants (
+      id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (id, user_id),
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_clinical_participants_user ON clinical_participants(user_id, id);
+
+    CREATE TABLE IF NOT EXISTS clinic_screens (
+      id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      card_width_px REAL NOT NULL,
+      screen_width_px INTEGER NOT NULL,
+      screen_height_px INTEGER NOT NULL,
+      device_pixel_ratio REAL NOT NULL,
+      viewing_distance_cm REAL,
+      brightness_floor REAL,
+      saved_at TEXT NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (id, user_id),
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_clinic_screens_user ON clinic_screens(user_id);
+
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       device_id TEXT NOT NULL,
@@ -142,6 +175,7 @@ function getDb(): Database.Database {
 
   // Migration for existing databases
   try { db.exec('ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE users ADD COLUMN is_clinician INTEGER DEFAULT 0') } catch { /* already exists */ }
 
   return db
 }
@@ -352,9 +386,161 @@ export async function deleteUserAccount(userId: string): Promise<void> {
     database.prepare('DELETE FROM sessions WHERE user_id = ?').run(id)
     database.prepare('DELETE FROM vf_results WHERE user_id = ?').run(id)
     database.prepare('DELETE FROM vf_surveys WHERE user_id = ?').run(id)
+    database.prepare('DELETE FROM clinical_participants WHERE user_id = ?').run(id)
+    database.prepare('DELETE FROM clinic_screens WHERE user_id = ?').run(id)
     database.prepare('DELETE FROM users WHERE id = ?').run(id)
   })
   tx(userId)
+}
+
+const EXAMPLE_PARTICIPANT: ClinicalParticipantRecord = {
+  id: 'P-EXAMPLE-001',
+  label: 'Example participant',
+  createdAt: '2026-05-13T00:00:00.000Z',
+  updatedAt: '2026-05-13T00:00:00.000Z',
+}
+
+export async function listClinicalParticipants(userId: string): Promise<ClinicalParticipantRecord[]> {
+  const rows = getDb()
+    .prepare('SELECT id, label, created_at, updated_at FROM clinical_participants WHERE user_id = ? ORDER BY id')
+    .all(userId) as Array<{ id: string; label: string; created_at: string; updated_at: string }>
+  if (rows.length > 0) {
+    return rows.map(r => ({
+      id: r.id,
+      label: r.label,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    }))
+  }
+  await upsertClinicalParticipant(userId, EXAMPLE_PARTICIPANT)
+  return [EXAMPLE_PARTICIPANT]
+}
+
+export async function upsertClinicalParticipant(
+  userId: string,
+  participant: ClinicalParticipantRecord,
+): Promise<ClinicalParticipantRecord> {
+  const now = nowIso()
+  const updated: ClinicalParticipantRecord = {
+    id: participant.id,
+    label: participant.label,
+    createdAt: participant.createdAt || now,
+    updatedAt: now,
+  }
+  getDb()
+    .prepare(
+      `INSERT INTO clinical_participants (id, user_id, label, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(id, user_id) DO UPDATE SET
+         label = excluded.label,
+         updated_at = excluded.updated_at`,
+    )
+    .run(updated.id, userId, updated.label, updated.createdAt, updated.updatedAt)
+  return updated
+}
+
+export async function deleteClinicalParticipant(userId: string, participantId: string): Promise<void> {
+  getDb().prepare('DELETE FROM clinical_participants WHERE id = ? AND user_id = ?').run(participantId, userId)
+}
+
+// ── Clinic Screens ──
+//
+// One row per named workstation the clinician has set up. The (id,
+// user_id) primary key keeps each clinician's registry isolated.
+// `is_active` is enforced at most one row per user by the upsert/
+// activate helpers below.
+
+interface SqlClinicScreenRow {
+  id: string
+  label: string
+  card_width_px: number
+  screen_width_px: number
+  screen_height_px: number
+  device_pixel_ratio: number
+  viewing_distance_cm: number | null
+  brightness_floor: number | null
+  saved_at: string
+  is_active: number
+}
+
+function mapClinicScreen(row: SqlClinicScreenRow): ClinicScreenRecord {
+  return {
+    id: row.id,
+    label: row.label,
+    cardWidthPx: row.card_width_px,
+    screenWidthPx: row.screen_width_px,
+    screenHeightPx: row.screen_height_px,
+    devicePixelRatio: row.device_pixel_ratio,
+    viewingDistanceCm: row.viewing_distance_cm,
+    brightnessFloor: row.brightness_floor,
+    savedAt: row.saved_at,
+    isActive: row.is_active === 1,
+  }
+}
+
+export async function listClinicScreens(userId: string): Promise<ClinicScreenRecord[]> {
+  const rows = getDb()
+    .prepare(
+      `SELECT id, label, card_width_px, screen_width_px, screen_height_px,
+              device_pixel_ratio, viewing_distance_cm, brightness_floor,
+              saved_at, is_active
+         FROM clinic_screens WHERE user_id = ? ORDER BY saved_at DESC`,
+    )
+    .all(userId) as SqlClinicScreenRow[]
+  return rows.map(mapClinicScreen)
+}
+
+export async function upsertClinicScreen(
+  userId: string,
+  screen: Omit<ClinicScreenRecord, 'isActive'>,
+): Promise<ClinicScreenRecord> {
+  getDb()
+    .prepare(
+      `INSERT INTO clinic_screens (
+         id, user_id, label, card_width_px, screen_width_px, screen_height_px,
+         device_pixel_ratio, viewing_distance_cm, brightness_floor, saved_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id, user_id) DO UPDATE SET
+         label = excluded.label,
+         card_width_px = excluded.card_width_px,
+         screen_width_px = excluded.screen_width_px,
+         screen_height_px = excluded.screen_height_px,
+         device_pixel_ratio = excluded.device_pixel_ratio,
+         viewing_distance_cm = excluded.viewing_distance_cm,
+         brightness_floor = excluded.brightness_floor,
+         saved_at = excluded.saved_at`,
+    )
+    .run(
+      screen.id, userId, screen.label, screen.cardWidthPx, screen.screenWidthPx,
+      screen.screenHeightPx, screen.devicePixelRatio, screen.viewingDistanceCm,
+      screen.brightnessFloor, screen.savedAt,
+    )
+  const row = getDb()
+    .prepare(
+      `SELECT id, label, card_width_px, screen_width_px, screen_height_px,
+              device_pixel_ratio, viewing_distance_cm, brightness_floor,
+              saved_at, is_active
+         FROM clinic_screens WHERE user_id = ? AND id = ?`,
+    )
+    .get(userId, screen.id) as SqlClinicScreenRow
+  return mapClinicScreen(row)
+}
+
+export async function deleteClinicScreen(userId: string, screenId: string): Promise<void> {
+  getDb().prepare('DELETE FROM clinic_screens WHERE id = ? AND user_id = ?').run(screenId, userId)
+}
+
+export async function setActiveClinicScreen(userId: string, screenId: string | null): Promise<void> {
+  const database = getDb()
+  const tx = database.transaction(() => {
+    database.prepare('UPDATE clinic_screens SET is_active = 0 WHERE user_id = ?').run(userId)
+    if (screenId) {
+      database
+        .prepare('UPDATE clinic_screens SET is_active = 1 WHERE user_id = ? AND id = ?')
+        .run(userId, screenId)
+    }
+  })
+  tx()
 }
 
 export async function addVFResult(userId: string, result: { id: string; eye: string; date: string; data: string }): Promise<VFResultRecord> {
@@ -373,6 +559,22 @@ export async function listVFResults(userId: string, limit = 100): Promise<VFResu
 
 export async function deleteVFResult(userId: string, resultId: string): Promise<void> {
   getDb().prepare('DELETE FROM vf_results WHERE id = ? AND user_id = ?').run(resultId, userId)
+}
+
+/** Admin: fetch a single result (including the full `data` JSON) by the
+ *  composite (userId, resultId) key. Returns null when the row doesn't
+ *  exist so the caller can produce a 404. Kept separate from
+ *  `listAllVFResults` because the list endpoint deliberately omits the
+ *  full blob to keep its payload small; this drill-down is opt-in. */
+export async function getAdminVFResultDetail(
+  userId: string,
+  resultId: string,
+): Promise<{ id: string; userId: string; eye: string; date: string; data: string } | null> {
+  const row = getDb()
+    .prepare('SELECT id, user_id, eye, date, data FROM vf_results WHERE id = ? AND user_id = ? LIMIT 1')
+    .get(resultId, userId) as { id: string; user_id: string; eye: string; date: string; data: string } | undefined
+  if (!row) return null
+  return { id: row.id, userId: row.user_id, eye: row.eye, date: row.date, data: row.data }
 }
 
 export async function addVFSurvey(userId: string, survey: { id: string; resultId: string; date: string; data: string }): Promise<VFSurveyRecord> {
@@ -397,9 +599,12 @@ export async function getAdminStats(): Promise<AdminStats> {
   const totalVFResultsByDevice = (database.prepare("SELECT COUNT(*) as c FROM vf_results WHERE user_id LIKE 'device:%'").get() as { c: number }).c
   const totalSurveys = (database.prepare('SELECT COUNT(*) as c FROM vf_surveys').get() as { c: number }).c
 
-  // Last 30 days VF results by day
+  // Last 30 days completed tests by day — counts test_completed events
+  // (server-side timestamps) rather than vf_results sync rows, so the
+  // chart reflects how many tests actually finished each day even when
+  // results were saved anonymously or never synced.
   const rows = database.prepare(
-    "SELECT substr(date, 1, 10) as day, COUNT(*) as c FROM vf_results WHERE date >= date('now', '-30 days') GROUP BY day ORDER BY day"
+    "SELECT substr(timestamp, 1, 10) as day, COUNT(*) as c FROM events WHERE event = 'test_completed' AND timestamp >= date('now', '-30 days') GROUP BY day ORDER BY day"
   ).all() as Array<{ day: string; c: number }>
   const dayCounts = new Map(rows.map(r => [r.day, r.c]))
   const resultsByDay: { date: string; count: number }[] = []
@@ -414,18 +619,62 @@ export async function getAdminStats(): Promise<AdminStats> {
   return { totalUsers, activeSessions, totalVFResults, totalVFResultsByDevice, totalSurveys, resultsByDay }
 }
 
+export async function listAllUsers(): Promise<AdminUserRecord[]> {
+  const rows = getDb()
+    .prepare('SELECT id, email, display_name, is_admin, is_clinician, created_at FROM users ORDER BY created_at DESC')
+    .all() as Array<{
+      id: string
+      email: string
+      display_name: string
+      is_admin?: number | null
+      is_clinician?: number | null
+      created_at: string
+    }>
+
+  return rows.map(row => ({
+    id: row.id,
+    email: row.email,
+    displayName: row.display_name,
+    isAdmin: Boolean(row.is_admin),
+    isClinician: Boolean(row.is_clinician),
+    createdAt: row.created_at,
+  }))
+}
+
+export async function setUserClinicianRole(userId: string, isClinician: boolean): Promise<AdminUserRecord | null> {
+  const row = findUserById(userId)
+  if (!row) return null
+
+  getDb()
+    .prepare('UPDATE users SET is_clinician = ? WHERE id = ?')
+    .run(isClinician ? 1 : 0, userId)
+
+  const updated = findUserById(userId)
+  if (!updated) return null
+  return {
+    id: updated.id,
+    email: updated.email,
+    displayName: updated.display_name,
+    isAdmin: Boolean(updated.is_admin),
+    isClinician: Boolean(updated.is_clinician),
+    createdAt: updated.created_at,
+  }
+}
+
 export async function listAllSessions(): Promise<AdminSessionRecord[]> {
   const rows = getDb().prepare(
-    `SELECT s.user_id, u.email, u.display_name, s.created_at, s.last_seen_at, s.expires_at
+    `SELECT s.user_id, u.email, u.display_name, u.is_admin, u.is_clinician, s.created_at, s.last_seen_at, s.expires_at
      FROM sessions s
      LEFT JOIN users u ON s.user_id = u.id
      ORDER BY s.last_seen_at DESC`
-  ).all() as Array<{ user_id: string; email: string | null; display_name: string | null; created_at: string; last_seen_at: string; expires_at: string }>
+  ).all() as Array<{ user_id: string; email: string | null; display_name: string | null; is_admin?: number | null; is_clinician?: number | null; created_at: string; last_seen_at: string; expires_at: string }>
 
   return rows.map(r => ({
     userId: r.user_id,
     email: r.email ?? '?',
     displayName: r.display_name ?? '?',
+    isAdmin: Boolean(r.is_admin),
+    isClinician: Boolean(r.is_clinician),
     createdAt: r.created_at,
     lastSeenAt: r.last_seen_at,
     expiresAt: r.expires_at,
@@ -437,24 +686,57 @@ export async function listAllVFResults(): Promise<AdminVFResultRecord[]> {
     'SELECT id, user_id, eye, date, data FROM vf_results ORDER BY date DESC'
   ).all() as Array<{ id: string; user_id: string; eye: string; date: string; data: string }>
 
-	  return rows.map(r => {
-	    let testType: string | null = null
-	    let totalPoints = 0
-	    let detectedPoints = 0
-	    let durationSeconds: number | null = null
-	    try {
-	      const data = JSON.parse(r.data)
-	      testType = data.testType ?? null
-	      const parsedDuration = Number(data.durationSeconds)
-	      durationSeconds = Number.isFinite(parsedDuration) ? Math.max(0, Math.round(parsedDuration)) : null
-	      if (Array.isArray(data.points)) {
-	        totalPoints = data.points.length
-	        detectedPoints = data.points.filter((p: { detected?: boolean }) => p.detected).length
-	      }
-	    } catch { /* skip */ }
-	    return { id: r.id, userId: r.user_id, eye: r.eye, date: r.date, testType, totalPoints, detectedPoints, durationSeconds }
-	  })
-	}
+  return rows.map(r => {
+    let testType: string | null = null
+    let totalPoints = 0
+    let detectedPoints = 0
+    let durationSeconds: number | null = null
+    let studyId: string | null = null
+    let participantId: string | null = null
+    let sessionId: string | null = null
+    let visitId: string | null = null
+    let repeatIndex: number | null = null
+    let protocolId: string | null = null
+    let protocolVersion: string | null = null
+    try {
+      const data = JSON.parse(r.data)
+      testType = data.testType ?? null
+      const parsedDuration = Number(data.durationSeconds)
+      durationSeconds = Number.isFinite(parsedDuration) ? Math.max(0, Math.round(parsedDuration)) : null
+      if (data.study && typeof data.study === 'object') {
+        studyId = typeof data.study.studyId === 'string' ? data.study.studyId : null
+        participantId = typeof data.study.participantId === 'string' ? data.study.participantId : null
+        sessionId = typeof data.study.sessionId === 'string' ? data.study.sessionId : null
+        visitId = typeof data.study.visitId === 'string' ? data.study.visitId : null
+        const parsedRepeatIndex = Number(data.study.repeatIndex)
+        repeatIndex = Number.isFinite(parsedRepeatIndex) ? parsedRepeatIndex : null
+        protocolId = typeof data.study.protocolId === 'string' ? data.study.protocolId : null
+        protocolVersion = typeof data.study.protocolVersion === 'string' ? data.study.protocolVersion : null
+      }
+      if (Array.isArray(data.points)) {
+        totalPoints = data.points.length
+        detectedPoints = data.points.filter((p: { detected?: boolean }) => p.detected).length
+      }
+    } catch { /* skip */ }
+    return {
+      id: r.id,
+      userId: r.user_id,
+      eye: r.eye,
+      date: r.date,
+      testType,
+      totalPoints,
+      detectedPoints,
+      durationSeconds,
+      studyId,
+      participantId,
+      sessionId,
+      visitId,
+      repeatIndex,
+      protocolId,
+      protocolVersion,
+    }
+  })
+}
 
 export async function listAllSurveys(): Promise<AdminSurveyRecord[]> {
   const rows = getDb().prepare(
@@ -471,6 +753,7 @@ export async function listAllSurveys(): Promise<AdminSurveyRecord[]> {
         deviceId: r.user_id.replace(/^device:/, ''),
         perceivedAccuracy: Number(data.perceivedAccuracy ?? 0),
         easeOfUse: Number(data.easeOfUse ?? 0),
+        instructionsClarity: data.instructionsClarity != null ? Number(data.instructionsClarity) : null,
         comparedToClinical: data.comparedToClinical ?? null,
         freeformFeedback: String(data.freeformFeedback ?? ''),
         age: data.age != null ? Number(data.age) : null,

@@ -1,23 +1,31 @@
 import jsPDF from 'jspdf'
-import type { TestResult, TestPoint, StimulusKey } from './types'
-import { STIMULI, ISOPTER_ORDER } from './types'
+import type { TestResult, TestPoint, StimulusKey, CalibrationData } from './types'
+import { STIMULI, ISOPTER_ORDER, isGoldmannResult } from './types'
 import { getAllScenarios } from './testFixtures'
 import { calcIsopterAreas } from './isopterCalc'
-import { classifyFieldLoss, type FieldSeverity } from './clinicalClassifications'
+import { classifyFieldLoss, expectedNormalArea, type FieldSeverity } from './clinicalClassifications'
+import {
+  analyzeSensitivityGradient,
+  analyzeCentralIsland,
+  detectFieldPatterns,
+  detectRPFindings,
+  detectAnomalies,
+  type Tone,
+  type AnomalyIcon,
+} from './fieldAnalysis'
 import { eyeLabelForFilename } from './eyeLabels'
 import { APP_NAME, APP_DOMAIN, PDF_HEADER_TAGLINE } from './branding'
 import { computeReliability } from './reliabilityScore'
 import { computeReliabilityIndices } from './reliabilityIndices'
 import { RELIABILITY_REFERENCE_RANGES } from './testDefaults'
-import { polarToXY, smoothClosedPath, computeIsopters } from './isopterRender'
-import {
-  renderSensitivityToCanvas,
-  deriveDbFromSuprathreshold,
-  DB_MIN_DERIVED,
-  DB_MAX_DERIVED,
-} from './sensitivity'
+import { polarToXY, smoothClosedPath, computeIsopters, computeScreenBoundary } from './isopterRender'
+import { renderSensitivityToCanvas } from './sensitivity'
 
-// ── Classification logic (matches Interpretation.tsx) ──
+// ── Classification logic ──
+// Thresholds, bands and the gradient / central-island / RP / anomaly
+// analyses live in ./clinicalClassifications and ./fieldAnalysis so the
+// PDF and the in-app Interpretation panel cannot disagree. This file
+// just maps the shared outputs to jsPDF-specific colours.
 
 interface Classification {
   label: string
@@ -42,133 +50,35 @@ const PDF_CLASSIFICATION_DESCRIPTIONS: Record<FieldSeverity, string> = {
     'More than ~85% of the testable field is detected - within normal limits for the tested range. A screen-based test cannot cover the full clinical field; a clinical Goldmann test assesses out to 90 deg.',
 }
 
-function expectedNormalArea(maxEccentricityDeg: number): number {
-  return Math.PI * maxEccentricityDeg * maxEccentricityDeg
-}
-
-function classifyField(iii4eArea: number, maxEccentricityDeg: number): Classification {
-  const fraction = iii4eArea / expectedNormalArea(maxEccentricityDeg)
+function classifyField(
+  iii4eArea: number,
+  maxEccentricityDeg: number,
+  calibration?: CalibrationData,
+): Classification {
+  const fraction = iii4eArea / expectedNormalArea(maxEccentricityDeg, calibration)
   const band = classifyFieldLoss(fraction)
   return { label: band.label, description: PDF_CLASSIFICATION_DESCRIPTIONS[band.severity] }
 }
 
-// ── Sensitivity gradient ──
-
-interface Insight {
-  label: string
-  description: string
+/** jsPDF RGB triples per tone emitted by fieldAnalysis.ts. The in-app
+ *  renderer has a parallel Tailwind mapping — both stay in sync because
+ *  the shared module emits a tone key, not a colour. */
+const TONE_RGB: Record<Tone, [number, number, number]> = {
+  critical: [220, 38, 38],   // red-600
+  warning: [194, 65, 12],    // orange-700
+  caution: [161, 98, 7],     // yellow-700
+  info: [29, 78, 216],       // blue-700
+  ok: [22, 101, 52],         // green-700
+  muted: [100, 116, 139],    // slate-500
 }
 
-function analyzeSensitivityGradient(areas: Partial<Record<StimulusKey, number>>): Insight | null {
-  const iii4e = areas['III4e']
-  const iii2e = areas['III2e']
-  if (iii4e == null || iii2e == null || iii4e === 0) return null
-  const ratio = iii2e / iii4e
-  if (ratio < 0.05) return { label: 'Steep sensitivity drop-off', description: 'The dim stimulus (III2e) is barely seen compared to the bright one (III4e). This suggests a sharp boundary between functioning and non-functioning retina — typical of RP scotomas.' }
-  if (ratio < 0.20) return { label: 'Significant sensitivity gradient', description: 'There is a large difference between bright (III4e) and dim (III2e) stimulus detection. The retina in the mid-periphery has reduced sensitivity even where it still detects bright stimuli.' }
-  if (ratio < 0.50) return { label: 'Moderate sensitivity gradient', description: 'The sensitivity gradient between bright and dim stimuli is moderate. Some retinal sensitivity loss is present in areas that still detect larger or brighter targets.' }
-  return { label: 'Preserved sensitivity', description: 'Dim stimuli are detected across a reasonable portion of the field. Retinal sensitivity is relatively well-preserved where the field is intact.' }
-}
-
-// ── Central island ──
-
-function analyzeCentralIsland(areas: Partial<Record<StimulusKey, number>>): Insight | null {
-  const i2e = areas['I2e']
-  if (i2e == null) return null
-  if (i2e < 10) return { label: 'Very small central island', description: 'Fine detail vision (I2e) is limited to less than ~2° radius. Reading and tasks requiring fine acuity may be significantly affected.' }
-  if (i2e < 50) return { label: 'Small central island', description: 'Fine detail vision (I2e) is present but limited to a small central area (~2–4° radius). Central acuity may still be functional for reading with appropriate aids.' }
-  if (i2e < 200) return { label: 'Moderate central field', description: 'Fine detail vision (I2e) covers a moderate central area. Central function is relatively well preserved.' }
-  return { label: 'Good central field', description: 'Fine detail vision (I2e) is present across a healthy central area. Central retinal function appears well preserved.' }
-}
-
-// ── Anomaly detection ──
-
-interface Anomaly {
-  label: string
-  description: string
-  severity: 'info' | 'warning' | 'error'
-}
-
-function detectAnomalies(points: TestPoint[], areas: Partial<Record<StimulusKey, number>>): Anomaly[] {
-  const anomalies: Anomaly[] = []
-
-  for (let i = 0; i < ISOPTER_ORDER.length - 1; i++) {
-    const outer = ISOPTER_ORDER[i]
-    const inner = ISOPTER_ORDER[i + 1]
-    const outerArea = areas[outer]
-    const innerArea = areas[inner]
-    if (outerArea == null || innerArea == null) continue
-    if (innerArea > outerArea * 2.0) {
-      anomalies.push({
-        label: `${STIMULI[inner].label} isopter much larger than ${STIMULI[outer].label}`,
-        description: `The ${STIMULI[inner].label} isopter (${innerArea.toFixed(0)} deg²) is more than double the ${STIMULI[outer].label} isopter (${outerArea.toFixed(0)} deg²). This degree of reversal is unusual and likely indicates a measurement issue.`,
-        severity: 'warning',
-      })
-    }
-  }
-
-  const v4e = areas['V4e']
-  const i2e = areas['I2e']
-  if (v4e != null && i2e != null && i2e > v4e * 1.1) {
-    anomalies.push({
-      label: 'Innermost isopter larger than outermost',
-      description: `The I2e isopter (${i2e.toFixed(0)} deg²) is larger than V4e (${v4e.toFixed(0)} deg²). This is physiologically unlikely and suggests significant testing artifacts.`,
-      severity: 'error',
-    })
-  }
-
-  for (const stim of ISOPTER_ORDER) {
-    const detected = points.filter(p => p.stimulus === stim && p.detected)
-    if (detected.length < 6) continue
-    const eccs = detected.map(p => p.eccentricityDeg)
-    const mean = eccs.reduce((s, v) => s + v, 0) / eccs.length
-    if (mean < 2) continue
-    const variance = eccs.reduce((s, v) => s + (v - mean) ** 2, 0) / eccs.length
-    const cv = Math.sqrt(variance) / mean
-    if (cv > 0.50) {
-      anomalies.push({
-        label: `Irregular ${STIMULI[stim].label} isopter shape`,
-        description: `The ${STIMULI[stim].label} boundary is highly irregular (CV=${(cv * 100).toFixed(0)}%). Consider retesting for confirmation.`,
-        severity: 'warning',
-      })
-    }
-  }
-
-  const iii4eDetected = points.filter(p => p.stimulus === 'III4e' && p.detected)
-  if (iii4eDetected.length >= 8) {
-    const superior = iii4eDetected.filter(p => p.meridianDeg >= 30 && p.meridianDeg <= 150)
-    const inferior = iii4eDetected.filter(p => p.meridianDeg >= 210 && p.meridianDeg <= 330)
-    if (superior.length >= 2 && inferior.length >= 2) {
-      const supMean = superior.reduce((s, p) => s + p.eccentricityDeg, 0) / superior.length
-      const infMean = inferior.reduce((s, p) => s + p.eccentricityDeg, 0) / inferior.length
-      const bigger = Math.max(supMean, infMean)
-      const smaller = Math.min(supMean, infMean)
-      if (bigger > 0 && smaller / bigger < 0.5) {
-        const moreAffected = supMean < infMean ? 'superior' : 'inferior'
-        anomalies.push({
-          label: 'Marked vertical asymmetry',
-          description: `The ${moreAffected} field is significantly more constricted. While some asymmetry is common in RP, marked differences should be discussed with your ophthalmologist.`,
-          severity: 'info',
-        })
-      }
-    }
-  }
-
-  for (const stim of ISOPTER_ORDER) {
-    const stimPoints = points.filter(p => p.stimulus === stim)
-    if (stimPoints.length < 4) continue
-    const detectedCount = stimPoints.filter(p => p.detected).length
-    const rate = detectedCount / stimPoints.length
-    if (rate < 0.25) {
-      anomalies.push({
-        label: `Very low detection for ${STIMULI[stim].label}`,
-        description: `Only ${(rate * 100).toFixed(0)}% of ${STIMULI[stim].label} stimuli were detected (${detectedCount}/${stimPoints.length}). This could indicate severe field loss or attention issues.`,
-        severity: 'info',
-      })
-    }
-  }
-
-  return anomalies
+/** Icon glyph shown in front of anomaly labels. Keeps the 3-band ℹ/⚠/✕
+ *  cue the PDF used to carry, but no longer duplicates colour state
+ *  because colour is supplied by `TONE_RGB[anomaly.tone]`. */
+const ANOMALY_GLYPH: Record<AnomalyIcon, string> = {
+  info: 'i ',
+  warning: '! ',
+  error: 'x ',
 }
 
 // Reliability scoring + isopter rendering are now shared with the in-app
@@ -217,6 +127,16 @@ async function renderRadarImage(result: TestResult, sizePx: number): Promise<str
   svg += `<text x="4" y="${center + 4}" fill="#94a3b8" font-size="11" font-family="sans-serif">${eye === 'right' ? 'N' : 'T'}</text>`
   svg += `<text x="${center - 3}" y="${PADDING - 6}" fill="#94a3b8" font-size="11" font-family="sans-serif">S</text>`
   svg += `<text x="${center - 3}" y="${sizePx - PADDING + 14}" fill="#94a3b8" font-size="11" font-family="sans-serif">I</text>`
+
+  // Screen boundary + "not tested beyond screen" mask. Shared with the
+  // on-screen VisualFieldMap via computeScreenBoundary so the two
+  // surfaces paint the same untested region.
+  const boundary = computeScreenBoundary(result.calibration, center, scale, radius)
+  if (boundary) {
+    svg += `<path d="${boundary.maskPath}" fill="#475569" fill-opacity="0.22" fill-rule="evenodd"/>`
+    svg += `<polygon points="${boundary.polygonStr}" fill="none" stroke="#3b82f6" stroke-width="1" stroke-opacity="0.45" stroke-dasharray="4,3"/>`
+    svg += `<text x="${center}" y="${PADDING - 22}" text-anchor="middle" fill="#94a3b8" font-size="8" font-family="sans-serif" opacity="0.7">not tested (beyond screen)</text>`
+  }
 
   // Blind spot
   const bsMeridian = eye === 'right' ? 0 : 180
@@ -270,30 +190,34 @@ async function renderRadarImage(result: TestResult, sizePx: number): Promise<str
   })
 }
 
-/** Render the derived sensitivity heatmap to a PNG data URL. Uses the
- *  same IDW/jet_r rendering as the on-screen `SensitivityMap`. */
-async function renderSensitivityImage(result: TestResult, sizePx: number): Promise<string> {
-  // Render at natural size first (putImageData ignores transforms).
+/** Render the measured sensitivity heatmap (threshold-mode only) to a
+ *  PNG data URL. Returns null when the result has no per-location
+ *  thresholdDb (Goldmann or legacy suprathreshold static) — caller
+ *  should skip the sensitivity section in that case. */
+async function renderSensitivityImage(result: TestResult, sizePx: number): Promise<string | null> {
+  const measured = result.points
+    .filter(p => p.thresholdDb != null && !p.catchTrial)
+    .map(p => ({
+      meridianDeg: p.meridianDeg,
+      eccentricityDeg: p.eccentricityDeg,
+      db: p.thresholdDb!,
+    }))
+  if (measured.length === 0) return null
+
   const src = document.createElement('canvas')
   src.width = sizePx
   src.height = sizePx
   const srcCtx = src.getContext('2d')!
   srcCtx.fillStyle = '#0f172a'
   srcCtx.fillRect(0, 0, sizePx, sizePx)
-  const points = deriveDbFromSuprathreshold(result.points)
-  // Derived-from-Goldmann data — use the tight ramp so the three possible
-  // outcomes (unseen / saw-bright / saw-dim) aren't all crushed to red.
+
   renderSensitivityToCanvas(
     srcCtx,
-    points,
+    measured,
     sizePx,
     result.calibration.maxEccentricityDeg,
-    2,
-    DB_MIN_DERIVED,
-    DB_MAX_DERIVED,
   )
 
-  // Upscale 2x for PDF sharpness via drawImage (respects transforms).
   const dst = document.createElement('canvas')
   dst.width = sizePx * 2
   dst.height = sizePx * 2
@@ -470,65 +394,86 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
   }
   y += 6
 
-  // Visual field map — rendered as image matching on-screen appearance
-  y = drawSection(doc, isBinocular ? 'Combined Visual Field Map (OU)' : 'Visual Field Map', y, margin)
-  y += 2
+  // Which map to render is determined by test type: Goldmann (kinetic)
+  // produces isopters → draw the visual-field / isopter plot. Static
+  // (threshold or suprathreshold grid) produces per-location sensitivity
+  // → draw the dB heatmap. Legacy results with no testType are treated
+  // as Goldmann via the shared helper.
+  const showGoldmannMap = isGoldmannResult(result)
 
   const mapSizeMm = 85
-  const radarImg = await renderRadarImage(result, 800)
-  const mapX = (pageW - mapSizeMm) / 2
-  doc.addImage(radarImg, 'PNG', mapX, y, mapSizeMm, mapSizeMm)
-  y += mapSizeMm + 4
 
-  // Legend below map
-  doc.setFontSize(7)
-  const legendColors: Record<StimulusKey, string> = { 'V4e': '#60a5fa', 'III4e': '#34d399', 'III2e': '#a78bfa', 'I4e': '#fb923c', 'I2e': '#f472b6' }
-  for (let i = 0; i < ISOPTER_ORDER.length; i++) {
-    const stim = ISOPTER_ORDER[i]
-    const hex = legendColors[stim]
-    const cr = parseInt(hex.slice(1, 3), 16)
-    const cg = parseInt(hex.slice(3, 5), 16)
-    const cb = parseInt(hex.slice(5, 7), 16)
-    const lx = margin + i * 33
-    doc.setFillColor(cr, cg, cb)
-    doc.circle(lx + 1.5, y - 0.5, 1.5, 'F')
-    doc.setTextColor(80, 80, 80)
-    doc.setFont('helvetica', 'normal')
-    doc.text(STIMULI[stim].label, lx + 4, y)
-  }
-  y += 6
-
-  // Sensitivity heatmap — derived dB from Goldmann suprathreshold data.
-  // Uses the same IDW + jet_r rendering as the on-screen SensitivityMap.
-  {
-    // Reserve space for the section header, map, caption and legend.
-    const sensNeeded = mapSizeMm + 20
-    if (y + sensNeeded > pageH - 15) {
-      doc.addPage()
-      y = margin
-    }
-
-    y = drawSection(doc, 'Derived Sensitivity Map', y, margin)
+  if (showGoldmannMap) {
+    // Visual field map — rendered as image matching on-screen appearance
+    y = drawSection(doc, isBinocular ? 'Combined Visual Field Map (OU)' : 'Visual Field Map', y, margin)
     y += 2
 
-    const sensImg = await renderSensitivityImage(result, 800)
-    const sensX = (pageW - mapSizeMm) / 2
-    doc.addImage(sensImg, 'PNG', sensX, y, mapSizeMm, mapSizeMm)
+    const radarImg = await renderRadarImage(result, 800)
+    const mapX = (pageW - mapSizeMm) / 2
+    doc.addImage(radarImg, 'PNG', mapX, y, mapSizeMm, mapSizeMm)
     y += mapSizeMm + 4
 
+    // Legend below map
     doc.setFontSize(7)
-    doc.setFont('helvetica', 'italic')
-    doc.setTextColor(120, 120, 120)
-    doc.text('Derived sensitivity (dB, from Goldmann levels)', pageW / 2, y, { align: 'center' })
-    doc.setFont('helvetica', 'normal')
-    y += 3.5
-    doc.setTextColor(100, 100, 100)
-    doc.text('-5 dB (insensitive, red)  <->  40 dB (sensitive, blue)', pageW / 2, y, { align: 'center' })
+    const legendColors: Record<StimulusKey, string> = { 'V4e': '#60a5fa', 'III4e': '#34d399', 'III2e': '#a78bfa', 'I4e': '#fb923c', 'I2e': '#f472b6' }
+    for (let i = 0; i < ISOPTER_ORDER.length; i++) {
+      const stim = ISOPTER_ORDER[i]
+      const hex = legendColors[stim]
+      const cr = parseInt(hex.slice(1, 3), 16)
+      const cg = parseInt(hex.slice(3, 5), 16)
+      const cb = parseInt(hex.slice(5, 7), 16)
+      const lx = margin + i * 33
+      doc.setFillColor(cr, cg, cb)
+      doc.circle(lx + 1.5, y - 0.5, 1.5, 'F')
+      doc.setTextColor(80, 80, 80)
+      doc.setFont('helvetica', 'normal')
+      doc.text(STIMULI[stim].label, lx + 4, y)
+    }
     y += 6
+  } else {
+    // Sensitivity heatmap — measured dB from threshold static tests. Uses
+    // the same IDW + jet_r rendering as the on-screen SensitivityMap. If
+    // the result has no measured thresholds the section is skipped.
+    const sensImg = await renderSensitivityImage(result, 800)
+    if (sensImg) {
+      const sensNeeded = mapSizeMm + 20
+      if (y + sensNeeded > pageH - 15) {
+        doc.addPage()
+        y = margin
+      }
+
+      y = drawSection(doc, 'Sensitivity Map', y, margin)
+      y += 2
+
+      const sensX = (pageW - mapSizeMm) / 2
+      doc.addImage(sensImg, 'PNG', sensX, y, mapSizeMm, mapSizeMm)
+      y += mapSizeMm + 4
+
+      doc.setFontSize(7)
+      doc.setFont('helvetica', 'normal')
+      doc.setTextColor(100, 100, 100)
+      doc.text('-5 dB (insensitive, red)  <->  40 dB (sensitive, blue)', pageW / 2, y, { align: 'center' })
+      y += 6
+
+      if (result.gridCoverage && result.gridCoverage.presentedLocations < result.gridCoverage.totalLocations) {
+        doc.setFontSize(7)
+        doc.setTextColor(180, 120, 40)
+        doc.text(
+          `Partial grid coverage: ${result.gridCoverage.presentedLocations} of ${result.gridCoverage.totalLocations} locations presented (outer points fell outside the calibrated display).`,
+          pageW / 2,
+          y,
+          { align: 'center', maxWidth: pageW - margin * 2 },
+        )
+        y += 6
+      }
+    }
   }
 
-  // Per-eye radar maps for binocular tests
-  if (isBinocular && (options?.rightEyePoints || options?.leftEyePoints)) {
+  // Per-eye radar maps for binocular Goldmann tests. Static binocular
+  // PDFs omit per-eye isopter radars (they aren't meaningful for static
+  // sessions — the sensitivity heatmap above already conveys per-location
+  // loss).
+  if (showGoldmannMap && isBinocular && (options?.rightEyePoints || options?.leftEyePoints)) {
     const perEyeSize = 65
     const perEyeGap = 10
     const totalW = perEyeSize * 2 + perEyeGap
@@ -590,9 +535,9 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
   // Quick summary on page 1
   const iii4eArea = result.isopterAreas['III4e']
   const maxEccDeg = result.calibration.maxEccentricityDeg
-  const expectedArea = expectedNormalArea(maxEccDeg)
+  const expectedArea = expectedNormalArea(maxEccDeg, result.calibration)
   if (iii4eArea != null) {
-    const classification = classifyField(iii4eArea, maxEccDeg)
+    const classification = classifyField(iii4eArea, maxEccDeg, result.calibration)
     doc.setFont('helvetica', 'bold')
     doc.setFontSize(10)
     doc.setTextColor(0, 0, 0)
@@ -674,7 +619,7 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
 
   // ── Field classification ──
   if (iii4eArea != null) {
-    const classification = classifyField(iii4eArea, maxEccDeg)
+    const classification = classifyField(iii4eArea, maxEccDeg, result.calibration)
     y = drawSection(doc, 'Field Classification', y, margin)
 
     doc.setFont('helvetica', 'bold')
@@ -692,6 +637,29 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
     y += 4
   }
 
+  // ── Pattern modifiers (ring scotoma, asymmetry) ──
+  // Additive overlays on the headline severity tier. In the in-app
+  // panel these render as coloured chips next to the classification;
+  // here we print them as small cards right after the classification so
+  // a user with, e.g., moderate constriction + ring scotoma sees both.
+  const patterns = detectFieldPatterns(result.points, result.isopterAreas)
+  for (const p of patterns) {
+    if (y > pageH - 30) {
+      doc.addPage()
+      y = margin
+    }
+    y = drawSection(doc, p.label, y, margin)
+    doc.setFont('helvetica', 'bold')
+    doc.setFontSize(9)
+    doc.setTextColor(...TONE_RGB[p.tone])
+    doc.text(p.label, margin + 2, y)
+    y += 4
+    doc.setFont('helvetica', 'normal')
+    doc.setTextColor(60, 60, 60)
+    y = drawWrappedText(doc, p.description, margin + 2, y, contentW - 4, 8)
+    y += 3
+  }
+
   // ── Sensitivity gradient ──
   const gradient = analyzeSensitivityGradient(result.isopterAreas)
   if (gradient) {
@@ -699,7 +667,7 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
 
     doc.setFont('helvetica', 'bold')
     doc.setFontSize(9)
-    doc.setTextColor(0, 0, 0)
+    doc.setTextColor(...TONE_RGB[gradient.tone])
     doc.text(gradient.label, margin + 2, y)
     y += 4
 
@@ -724,7 +692,7 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
 
     doc.setFont('helvetica', 'bold')
     doc.setFontSize(9)
-    doc.setTextColor(0, 0, 0)
+    doc.setTextColor(...TONE_RGB[centralIsland.tone])
     doc.text(centralIsland.label, margin + 2, y)
     y += 4
 
@@ -742,6 +710,39 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
     y += 4
   }
 
+  // ── RP-specific indicators ──
+  // Filtered to `present` findings to match the in-app panel — a long
+  // list of "not detected" cards is noise in a printed report.
+  const rpFindings = detectRPFindings(
+    result.points,
+    result.isopterAreas,
+    maxEccDeg,
+    result.calibration,
+  ).filter(f => f.present)
+  if (rpFindings.length > 0) {
+    if (y > pageH - 40) {
+      doc.addPage()
+      y = margin
+    }
+    y = drawSection(doc, 'RP Indicators', y, margin)
+    for (const f of rpFindings) {
+      if (y > pageH - 30) {
+        doc.addPage()
+        y = margin
+      }
+      doc.setFont('helvetica', 'bold')
+      doc.setFontSize(9)
+      doc.setTextColor(...TONE_RGB[f.tone])
+      doc.text(f.label, margin + 2, y)
+      y += 4
+      doc.setFont('helvetica', 'normal')
+      doc.setTextColor(60, 60, 60)
+      y = drawWrappedText(doc, f.description, margin + 2, y, contentW - 4, 8)
+      y += 2
+    }
+    y += 2
+  }
+
   // ── Anomalies ──
   const anomalies = detectAnomalies(result.points, result.isopterAreas)
   if (anomalies.length > 0) {
@@ -755,9 +756,8 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
       }
 
       doc.setFont('helvetica', 'bold')
-      const anomalyColor: [number, number, number] = a.severity === 'error' ? [180, 30, 30] : a.severity === 'warning' ? [160, 100, 30] : [60, 60, 180]
-      doc.setTextColor(...anomalyColor)
-      y = drawWrappedText(doc, a.label, margin + 2, y, contentW - 4, 8.5)
+      doc.setTextColor(...TONE_RGB[a.tone])
+      y = drawWrappedText(doc, ANOMALY_GLYPH[a.icon] + a.label, margin + 2, y, contentW - 4, 8.5)
 
       doc.setFont('helvetica', 'normal')
       doc.setTextColor(80, 80, 80)

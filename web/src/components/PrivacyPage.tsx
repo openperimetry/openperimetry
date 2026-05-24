@@ -35,9 +35,15 @@ export function PrivacyPage({ onBack }: Props) {
           <Section title="What data I collect">
             <Subsection title="Without an account">
               <ul className="list-disc list-inside space-y-1">
-                <li>Test results are stored <strong className="text-white">only in your browser</strong> (localStorage). Nothing is sent to my servers.</li>
-                <li>Calibration data (screen size, viewing distance, brightness) stays local.</li>
-                <li>Anonymous usage analytics via <a href="https://umami.is" target="_blank" rel="noopener noreferrer" className="text-accent hover:text-accent-light underline">Umami</a> &mdash; no cookies, no personal data, no IP tracking.</li>
+                <li>Test results are stored <strong className="text-white">only in your browser</strong> (localStorage) by default. Nothing is sent to my servers unless you explicitly tap <em>Share anonymous result</em> on the results screen.</li>
+                <li>Calibration data (screen size, viewing distance, brightness) stays local unless shared with a result.</li>
+                <li>
+                  Anonymous usage events (test started / completed / aborted, page views, PDF exports) are sent to my server tagged with a random device ID generated in your browser. These include summary stats &mdash; total points, detected count, test duration, and for threshold tests the distribution of measured dB values &mdash; to help me see whether the tool is working. They expire after 90 days and contain no name, email, or IP.
+                </li>
+                <li>
+                  If you tap <em>Share anonymous result</em>, the full point data plus calibration parameters are uploaded under that same random device ID so I can investigate how the tool behaves on your screen. You can skip this; the button is opt-in.
+                </li>
+                <li>Anonymous page-view analytics via <a href="https://umami.is" target="_blank" rel="noopener noreferrer" className="text-accent hover:text-accent-light underline">Umami</a> &mdash; no cookies, no personal data, no IP tracking.</li>
               </ul>
             </Subsection>
             <Subsection title="With an account">

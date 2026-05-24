@@ -10,7 +10,6 @@ const webServerEnv = Object.fromEntries(
 )
 webServerEnv.VITE_APP_URL = baseURL
 webServerEnv.VITE_APP_NAME = 'Visual Field Check'
-webServerEnv.VITE_SHOW_ABOUT_PAGE = 'true'
 
 export default defineConfig({
   testDir: './e2e',

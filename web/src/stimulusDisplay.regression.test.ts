@@ -16,7 +16,6 @@ import { resolve } from 'path'
 const COMPONENTS_THAT_PRESENT_STIMULI = [
   'components/StaticTest.tsx',
   'components/GoldmannTest.tsx',
-  'components/RingTest.tsx',
 ]
 
 describe('stimulus presentation uses stimulusDisplayColor helper', () => {

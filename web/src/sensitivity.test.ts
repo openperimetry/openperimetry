@@ -1,15 +1,12 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   opacityToDb,
   dbToOpacity,
-  deriveDbFromSuprathreshold,
   jetReverseColor,
+  renderSensitivityToCanvas,
   DB_MIN,
   DB_MAX,
-  DB_MIN_DERIVED,
-  DB_MAX_DERIVED,
 } from './sensitivity'
-import type { TestPoint } from './types'
 
 describe('opacityToDb', () => {
   it('returns 0 dB at max opacity', () => {
@@ -45,121 +42,21 @@ describe('dbToOpacity', () => {
   })
 })
 
-describe('deriveDbFromSuprathreshold', () => {
-  it('returns empty array for no input', () => {
-    expect(deriveDbFromSuprathreshold([])).toEqual([])
-  })
-
-  /** Pick the grid sample whose (meridian, eccentricity) is closest to a
-   *  target location — the new function emits a whole polar grid rather
-   *  than one point per input, so tests need to look up "near where the
-   *  stimulus was". */
-  function sampleNear(
-    derived: { meridianDeg: number; eccentricityDeg: number; db: number }[],
-    m: number,
-    r: number,
-  ): { meridianDeg: number; eccentricityDeg: number; db: number } {
-    let best = derived[0]
-    let bestScore = Infinity
-    for (const d of derived) {
-      const dm = Math.min(Math.abs(d.meridianDeg - m), 360 - Math.abs(d.meridianDeg - m))
-      const dr = Math.abs(d.eccentricityDeg - r)
-      const score = dm * dm + dr * dr
-      if (score < bestScore) { bestScore = score; best = d }
-    }
-    return best
-  }
-
-  it('fills interior of the dimmest-seen isopter with the corresponding dB', () => {
-    // I2e seen at (0°, 10°): every point on meridian 0 with r ≤ 10 should
-    // derive to ~10 dB, not just the boundary sample. This is the main
-    // behaviour change from the old per-sample bucket: the radar isopter
-    // is projected inward to fill the field, so the fovea does not render
-    // as an unsampled red hole.
-    const pts: TestPoint[] = [
-      { meridianDeg: 0, eccentricityDeg: 10, rawEccentricityDeg: 10, detected: true,  stimulus: 'V4e' },
-      { meridianDeg: 0, eccentricityDeg: 10, rawEccentricityDeg: 10, detected: true,  stimulus: 'I2e' },
-    ]
-    const derived = deriveDbFromSuprathreshold(pts)
-    expect(derived.length).toBeGreaterThan(1)
-    // A point well inside the isopter (r=4°) must also be ~10 dB.
-    expect(sampleNear(derived, 0, 4).db).toBeCloseTo(10, 1)
-    // The centre (r=0) must also be ~10 dB — the fovea is enclosed by
-    // every isopter that was ever seen, so it always inherits the
-    // dimmest-seen dB. Previously the centre rendered as an unsampled
-    // red hole; this is the regression guard.
-    expect(sampleNear(derived, 0, 0).db).toBeCloseTo(10, 1)
-  })
-
-  it('dimmest-seen isopter wins across three intensities on the same meridian', () => {
-    const pts: TestPoint[] = [
-      { meridianDeg: 0, eccentricityDeg: 20, rawEccentricityDeg: 20, detected: true, stimulus: 'V4e' },   // 1.0
-      { meridianDeg: 0, eccentricityDeg: 20, rawEccentricityDeg: 20, detected: true, stimulus: 'III2e' }, // 0.10
-      { meridianDeg: 0, eccentricityDeg: 20, rawEccentricityDeg: 20, detected: true, stimulus: 'I4e' },   // 1.0
-    ]
-    const derived = deriveDbFromSuprathreshold(pts)
-    // Inside the III2e isopter → 10 dB (not 0 dB, even though V4e/I4e also seen).
-    expect(sampleNear(derived, 0, 10).db).toBeCloseTo(10, 1)
-  })
-
-  it('returns DB_MIN everywhere when no stimulus was detected', () => {
-    const pts: TestPoint[] = [
-      { meridianDeg: 90, eccentricityDeg: 25, rawEccentricityDeg: 25, detected: false, stimulus: 'V4e' },
-    ]
-    const derived = deriveDbFromSuprathreshold(pts)
-    // Still emits a grid (the field needs rendering), just entirely at baseline.
-    expect(derived.length).toBeGreaterThan(0)
-    for (const d of derived) expect(d.db).toBe(DB_MIN)
-  })
-
-  it('excludes catch trials', () => {
-    const pts: TestPoint[] = [
-      { meridianDeg: 15, eccentricityDeg: 15, rawEccentricityDeg: 15, detected: true, stimulus: 'III4e', catchTrial: true },
-    ]
-    // Catch trials are the only input → no real test points → empty output.
-    expect(deriveDbFromSuprathreshold(pts)).toEqual([])
-  })
-
-  it('paints outside the outermost isopter as DB_MIN baseline', () => {
-    // V4e seen at (0°, 30°): inside the isopter is 0 dB (V4e = brightest
-    // → lowest dB); outside is DB_MIN (nothing was detectable there).
-    const pts: TestPoint[] = [
-      { meridianDeg: 0, eccentricityDeg: 30, rawEccentricityDeg: 30, detected: true, stimulus: 'V4e' },
-    ]
-    const derived = deriveDbFromSuprathreshold(pts)
-    // Inside: V4e visible → 0 dB.
-    expect(sampleNear(derived, 0, 15).db).toBeCloseTo(0, 1)
-    // Outside (beyond the boundary + a margin): DB_MIN.
-    const outside = derived.find(d => d.eccentricityDeg > 32)
-    expect(outside?.db).toBe(DB_MIN)
-  })
-})
-
 describe('range constants', () => {
   it('DB_MAX > DB_MIN', () => {
     expect(DB_MAX).toBeGreaterThan(DB_MIN)
-  })
-  it('DB_MAX_DERIVED > DB_MIN_DERIVED', () => {
-    expect(DB_MAX_DERIVED).toBeGreaterThan(DB_MIN_DERIVED)
-  })
-  it('derived ramp is narrower than measured ramp', () => {
-    // Goldmann only spans 0–10 dB; a narrower ramp keeps those values
-    // visually distinct instead of crushing them to the warm end.
-    expect(DB_MAX_DERIVED - DB_MIN_DERIVED).toBeLessThan(DB_MAX - DB_MIN)
   })
 })
 
 describe('jetReverseColor', () => {
   it('low t yields the warm (red) region of jet_r', () => {
     const { r, g, b } = jetReverseColor(0)
-    // jet_r at t=0 sits in the warm (red) end: red dominates, blue is 0.
     expect(r).toBeGreaterThan(g)
     expect(r).toBeGreaterThan(b)
     expect(b).toBe(0)
   })
   it('high t yields the cool (blue) region of jet_r', () => {
     const { r, g, b } = jetReverseColor(1)
-    // jet_r at t=1 sits in the cool (blue) end: blue dominates, red is 0.
     expect(b).toBeGreaterThan(g)
     expect(b).toBeGreaterThan(r)
     expect(r).toBe(0)
@@ -176,5 +73,58 @@ describe('jetReverseColor', () => {
         expect(c).toBeLessThanOrEqual(255)
       }
     }
+  })
+})
+
+describe('renderSensitivityToCanvas', () => {
+  /** Build a minimal 2D-context stub that records the primary calls the
+   *  renderer makes. Just enough surface for the function to run — we
+   *  assert on which methods were invoked, not on pixel output. */
+  function makeCtxStub(size: number) {
+    const imageData = { data: new Uint8ClampedArray(size * size * 4), width: size, height: size }
+    return {
+      clearRect: vi.fn(),
+      createImageData: vi.fn(() => imageData),
+      putImageData: vi.fn(),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      stroke: vi.fn(),
+      strokeStyle: '',
+      lineWidth: 0,
+    } as unknown as CanvasRenderingContext2D & { putImageData: ReturnType<typeof vi.fn>; clearRect: ReturnType<typeof vi.fn> }
+  }
+
+  it('clears the canvas and paints when given threshold points', () => {
+    const ctx = makeCtxStub(60) as ReturnType<typeof makeCtxStub>
+    renderSensitivityToCanvas(
+      ctx,
+      [
+        { meridianDeg: 0, eccentricityDeg: 10, db: 25 },
+        { meridianDeg: 90, eccentricityDeg: 10, db: 30 },
+      ],
+      60,
+      30,
+    )
+    expect(ctx.clearRect).toHaveBeenCalled()
+    expect(ctx.putImageData).toHaveBeenCalled()
+  })
+
+  it('bails early with no points', () => {
+    const ctx = makeCtxStub(60) as ReturnType<typeof makeCtxStub>
+    renderSensitivityToCanvas(ctx, [], 60, 30)
+    expect(ctx.clearRect).toHaveBeenCalled()
+    expect(ctx.putImageData).not.toHaveBeenCalled()
+  })
+
+  it('bails early with non-positive max eccentricity', () => {
+    const ctx = makeCtxStub(60) as ReturnType<typeof makeCtxStub>
+    renderSensitivityToCanvas(
+      ctx,
+      [{ meridianDeg: 0, eccentricityDeg: 10, db: 25 }],
+      60,
+      0,
+    )
+    expect(ctx.putImageData).not.toHaveBeenCalled()
   })
 })

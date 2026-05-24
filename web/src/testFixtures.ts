@@ -3,6 +3,8 @@
  * Used for visual verification of radar maps, vision simulator, and interpretation.
  */
 import type { TestPoint, StimulusKey, CalibrationData } from './types'
+import { getGrid24_2 } from './grids/hfa24_2'
+import { DB_MIN, DB_MAX } from './sensitivity'
 
 export interface ClinicalScenario {
   id: string
@@ -10,8 +12,33 @@ export interface ClinicalScenario {
   description: string
   severity: string // e.g. 'Normal', 'Mild', 'Moderate', 'Severe', 'Very Severe'
   points: TestPoint[]
+  /** Matching static-threshold sample points (HFA 24-2 grid, per-location
+   *  dB via a synthetic severity profile). Drives the demo-page static
+   *  sensitivity companion panel so both Goldmann and static visualisations
+   *  of the same severity sit side-by-side. */
+  staticPoints?: TestPoint[]
   maxEccentricity: number
   calibration: CalibrationData
+}
+
+/** Synthetic per-location severity profile for generating static threshold
+ *  fixtures. A profile describes how each location's healthy baseline dB is
+ *  perturbed to simulate a clinical pattern. */
+export interface SeverityProfile {
+  id: string
+  /** Uniform penalty subtracted from every location. */
+  globalDepression?: number
+  /** Extra penalty proportional to eccentricity: `slope * r` dB. Simulates
+   *  peripheral loss (classic RP). */
+  peripheralSlope?: number
+  /** Scotoma bands: locations with eccentricity in [rMin, rMax] lose
+   *  `depth` dB. Multiple bands stack (max depth wins). */
+  scotomaBands?: Array<{ rMin: number; rMax: number; depth: number }>
+  /** Extra penalty applied to inferior-field points (y < 0). */
+  inferiorPenalty?: number
+  /** Tunnel vision: locations outside this radius lose `tunnelOuterDepression` dB. */
+  tunnelRadius?: number
+  tunnelOuterDepression?: number
 }
 
 const MERIDIANS_12 = Array.from({ length: 12 }, (_, i) => i * 30)
@@ -338,16 +365,156 @@ function doubleRingScotoma(): ClinicalScenario {
   }
 }
 
+/** Severity profiles for the static-threshold companion fixtures. Each
+ *  profile describes the per-location dB perturbation pattern that matches
+ *  the corresponding Goldmann scenario above. The exact patterns are not
+ *  clinical ground truth — they just need to produce visually recognisable
+ *  static maps at the same severity level as their Goldmann counterparts. */
+export const SCENARIO_PROFILES: Record<string, SeverityProfile> = {
+  normal: {
+    id: 'normal',
+  },
+  earlyRP: {
+    id: 'earlyRP',
+    globalDepression: 3,
+    peripheralSlope: 0.2,
+    inferiorPenalty: 2,
+  },
+  moderateRP: {
+    id: 'moderateRP',
+    globalDepression: 8,
+    peripheralSlope: 0.3,
+    inferiorPenalty: 2,
+  },
+  severeRP: {
+    id: 'severeRP',
+    tunnelRadius: 10,
+    // Drops outer dB below zero so the profile reaches the absolute-scotoma
+    // sentinel (DB_MIN = -5) and renders as vivid red, not warm orange.
+    tunnelOuterDepression: 35,
+    globalDepression: 2,
+  },
+  verySevereRP: {
+    id: 'verySevereRP',
+    tunnelRadius: 6,
+    tunnelOuterDepression: 40,
+    globalDepression: 4,
+  },
+  ringScotoma: {
+    id: 'ringScotoma',
+    scotomaBands: [{ rMin: 7, rMax: 17, depth: 18 }],
+  },
+  doubleRingScotoma: {
+    id: 'doubleRingScotoma',
+    scotomaBands: [
+      { rMin: 6, rMax: 11, depth: 14 },
+      { rMin: 18, rMax: 26, depth: 16 },
+    ],
+  },
+  asymmetricRP: {
+    id: 'asymmetricRP',
+    globalDepression: 4,
+    peripheralSlope: 0.25,
+    inferiorPenalty: 10,
+  },
+}
+
+/** Healthy baseline sensitivity (dB) at a given eccentricity. Mirrors the
+ *  hill-of-vision shape: high centrally, tapering toward the periphery,
+ *  floored at 20 dB to keep the normal map legible. */
+function healthyBaselineDb(r: number): number {
+  return Math.max(20, 30 - r / 5)
+}
+
+/** Cartesian grid matching the 24-2 rectangular extent (±28° × ±22°) at a
+ *  given spacing. Used by the demo to feed the sensitivity renderer a
+ *  dense enough sample set that the Gaussian smoother produces smooth
+ *  round contours instead of a blocky per-sample lattice. */
+function buildDenseDemoGrid(stepDeg: number): Array<{ xDeg: number; yDeg: number; key: string }> {
+  const out: Array<{ xDeg: number; yDeg: number; key: string }> = []
+  for (let y = -22; y <= 22; y += stepDeg) {
+    for (let x = -28; x <= 28; x += stepDeg) {
+      out.push({ xDeg: x, yDeg: y, key: `${x},${y}` })
+    }
+  }
+  return out
+}
+
+/** Generate a static-threshold fixture for a given severity profile.
+ *  Output has one TestPoint per grid location with `thresholdDb` set,
+ *  `stimulus: 'III4e'`, `detected: true`. Values are deterministic.
+ *
+ *  Default grid is the clinical HFA 24-2 pattern (54 locations, 6° spacing)
+ *  so outputs match what a real threshold run would produce. Pass
+ *  `denseStepDeg` to use a tighter Cartesian grid instead — useful for the
+ *  demo page, where the sparse 24-2 lattice shows through the heatmap's
+ *  Gaussian smoother as a visibly square pattern. */
+export function makeStaticThresholdPoints(
+  profile: SeverityProfile,
+  denseStepDeg?: number,
+): TestPoint[] {
+  const grid = denseStepDeg ? buildDenseDemoGrid(denseStepDeg) : getGrid24_2('right')
+  const out: TestPoint[] = []
+  for (const g of grid) {
+    const r = Math.sqrt(g.xDeg * g.xDeg + g.yDeg * g.yDeg)
+    const meridianDeg = ((Math.atan2(g.yDeg, g.xDeg) * 180) / Math.PI + 360) % 360
+    let db = healthyBaselineDb(r)
+    if (profile.globalDepression) db -= profile.globalDepression
+    if (profile.peripheralSlope) db -= profile.peripheralSlope * r
+    if (profile.scotomaBands) {
+      let bandDepth = 0
+      for (const band of profile.scotomaBands) {
+        if (r >= band.rMin && r <= band.rMax && band.depth > bandDepth) {
+          bandDepth = band.depth
+        }
+      }
+      db -= bandDepth
+    }
+    if (profile.inferiorPenalty && g.yDeg < 0) db -= profile.inferiorPenalty
+    if (
+      profile.tunnelRadius != null &&
+      profile.tunnelOuterDepression != null &&
+      r > profile.tunnelRadius
+    ) {
+      db -= profile.tunnelOuterDepression
+    }
+    // Deterministic ±1 dB jitter so the map doesn't look suspiciously flat.
+    const noise = (pseudoRandom(g.xDeg, g.yDeg) - 0.5) * 2
+    db += noise
+    // Clamp to the display range ([DB_MIN, DB_MAX]), not [0, 40] — the
+    // sub-zero sentinel represents "absolute scotoma" (even max brightness
+    // not seen) and is what makes severe regions render vivid red instead
+    // of warm orange at the colormap's amber edge.
+    db = Math.max(DB_MIN, Math.min(DB_MAX, db))
+    out.push({
+      meridianDeg,
+      eccentricityDeg: r,
+      rawEccentricityDeg: r,
+      detected: true,
+      stimulus: 'III4e',
+      thresholdDb: db,
+    })
+  }
+  return out
+}
+
 /** All scenarios in order from best to worst */
 export function getAllScenarios(): ClinicalScenario[] {
-  return [
-    normalField(),
-    earlyRP(),
-    moderateRP(),
-    ringScotoma(),
-    doubleRingScotoma(),
-    asymmetricRP(),
-    severeRP(),
-    verySevereRP(),
+  const builders: Array<[() => ClinicalScenario, keyof typeof SCENARIO_PROFILES]> = [
+    [normalField, 'normal'],
+    [earlyRP, 'earlyRP'],
+    [moderateRP, 'moderateRP'],
+    [ringScotoma, 'ringScotoma'],
+    [doubleRingScotoma, 'doubleRingScotoma'],
+    [asymmetricRP, 'asymmetricRP'],
+    [severeRP, 'severeRP'],
+    [verySevereRP, 'verySevereRP'],
   ]
+  return builders.map(([build, profileKey]) => {
+    const scenario = build()
+    // Dense 2° grid for demo-page rendering — sparse 24-2 grid shows the
+    // sample lattice as a visible square pattern under the Gaussian smoother.
+    scenario.staticPoints = makeStaticThresholdPoints(SCENARIO_PROFILES[profileKey], 2)
+    return scenario
+  })
 }

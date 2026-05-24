@@ -16,13 +16,6 @@ test.describe('Accessibility', () => {
     expect(results.violations).toEqual([])
   })
 
-  test('about page has no accessibility violations', async ({ page }) => {
-    await page.goto('/')
-    await page.getByRole('navigation').getByRole('button', { name: 'About' }).click()
-    const results = await new AxeBuilder({ page }).disableRules(['color-contrast']).analyze()
-    expect(results.violations).toEqual([])
-  })
-
   test('contact page has no accessibility violations', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('navigation').getByRole('button', { name: 'Contact' }).click()

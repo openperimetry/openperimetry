@@ -16,10 +16,13 @@ import { STORAGE_BACKEND } from './config.js'
 // them from ddbStore.js today, but remains available in both builds).
 export type {
   AuthUser,
+  ClinicalParticipantRecord,
+  ClinicScreenRecord,
   VFResultRecord,
   VFSurveyRecord,
   AdminSurveyRecord,
   AdminStats,
+  AdminUserRecord,
   AdminSessionRecord,
   AdminVFResultRecord,
   AdminEventRecord,
@@ -86,14 +89,24 @@ export const requestPasswordReset = forward('requestPasswordReset')
 export const resetPasswordWithToken = forward('resetPasswordWithToken')
 export const deleteUserAccount = forward('deleteUserAccount')
 export const checkDatabaseReady = forward('checkDatabaseReady')
+export const listClinicalParticipants = forward('listClinicalParticipants')
+export const upsertClinicalParticipant = forward('upsertClinicalParticipant')
+export const deleteClinicalParticipant = forward('deleteClinicalParticipant')
+export const listClinicScreens = forward('listClinicScreens')
+export const upsertClinicScreen = forward('upsertClinicScreen')
+export const deleteClinicScreen = forward('deleteClinicScreen')
+export const setActiveClinicScreen = forward('setActiveClinicScreen')
 export const addVFResult = forward('addVFResult')
 export const listVFResults = forward('listVFResults')
 export const deleteVFResult = forward('deleteVFResult')
 export const addVFSurvey = forward('addVFSurvey')
 export const listVFSurveys = forward('listVFSurveys')
 export const getAdminStats = forward('getAdminStats')
+export const listAllUsers = forward('listAllUsers')
+export const setUserClinicianRole = forward('setUserClinicianRole')
 export const listAllSessions = forward('listAllSessions')
 export const listAllVFResults = forward('listAllVFResults')
+export const getAdminVFResultDetail = forward('getAdminVFResultDetail')
 export const listAllSurveys = forward('listAllSurveys')
 export const trackEvent = forward('trackEvent')
 export const listAllEvents = forward('listAllEvents')

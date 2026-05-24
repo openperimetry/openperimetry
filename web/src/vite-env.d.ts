@@ -7,8 +7,9 @@ interface ImportMetaEnv {
   readonly VITE_SUPPORT_EMAIL?: string
   readonly VITE_CONTACT_EMAIL?: string
   readonly VITE_APP_VERSION?: string
+  readonly VITE_BUILD_SHA?: string
+  readonly VITE_BUILD_TIME?: string
   readonly VITE_API_URL?: string
-  readonly VITE_SHOW_ABOUT_PAGE?: string
   readonly VITE_GITHUB_URL?: string
 }
 

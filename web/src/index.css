@@ -174,27 +174,29 @@ html, body {
   mix-blend-mode: overlay;
 }
 
-/* ── Radial background glow ── */
-.bg-radial-glow {
-  background: radial-gradient(circle, rgba(200, 144, 42, 0.05) 0%, rgba(200, 144, 42, 0.015) 40%, transparent 65%);
-}
-
-/* ── Perimetry chart ── */
-.chart-breathe {
-  animation: chartBreathe 10s ease-in-out infinite;
-}
-@keyframes chartBreathe {
-  0%, 100% { transform: scale(1); filter: drop-shadow(0 0 14px rgba(200, 144, 42, 0.02)); }
-  50% { transform: scale(1.005); filter: drop-shadow(0 0 24px rgba(200, 144, 42, 0.04)); }
-}
-
-.hero-chart-enter {
-  opacity: 0;
-  transform: scale(0.92);
-  animation: heroChartEnter 1s ease-out 0.1s forwards;
-}
-@keyframes heroChartEnter {
-  to { opacity: 1; transform: scale(1); }
+/* ── Scope-bezel card ──
+   Three concentric gold ring outlines stacked around the card edge,
+   echoing the perimetry scope inside it. Achieved via layered
+   box-shadows: each gold ring is paired with a transparent spacer
+   one pixel inside it, so the spacer punches a "gap" through the
+   gold layers beneath, leaving only the rim visible. Transparent
+   spacers (vs. a solid color) let the page background gradient show
+   through the gaps, so the rings read as floating rather than as a
+   solid frame.
+   - 1 px tight rim at the card edge (0.30 alpha).
+   - 1 px ring 9 px out (0.16 alpha).
+   - 1 px ring 22 px out (0.08 alpha).
+   - Plus the original drop shadow.
+   Layered with rounded-[2.5rem] on the card so the rings follow the
+   same curvature as the card border. */
+.scope-bezel {
+  box-shadow:
+    0 0 0 1px rgba(200, 144, 42, 0.30),
+    0 0 0 9px transparent,
+    0 0 0 10px rgba(200, 144, 42, 0.16),
+    0 0 0 22px transparent,
+    0 0 0 23px rgba(200, 144, 42, 0.08),
+    0 18px 60px rgba(0, 0, 0, 0.45);
 }
 
 /* ── Glow effects ── */

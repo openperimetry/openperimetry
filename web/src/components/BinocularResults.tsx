@@ -6,15 +6,14 @@ import { VisualFieldMap } from './VisualFieldMap'
 import { SensitivityMap } from './SensitivityMap'
 import { calcIsopterAreas } from '../isopterCalc'
 import { Interpretation } from './Interpretation'
-import { VisionSimulator } from './VisionSimulator'
-import { saveResult } from '../storage'
+import { saveResult, saveSurvey, hasSurveyForResult, hasBeenPromptedForFeedback, markFeedbackPrompted } from '../storage'
 import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { ScenarioOverlay } from './ScenarioOverlay'
 import { formatEyeLabel } from '../eyeLabels'
 import { ClinicalDisclaimer } from './ClinicalDisclaimer'
 import { SavePrompt } from './SavePrompt'
-import { WhatsAppShareButton } from './WhatsAppShareButton'
-import { APP_DOMAIN } from '../branding'
+import { PostTestSurvey } from './PostTestSurvey'
+import type { SurveyResponse } from './PostTestSurvey'
 import { useAdvancedSettings } from '../advancedSettings'
 import { useStudyMode } from '../studyMode'
 import {
@@ -90,6 +89,9 @@ export function BinocularResults({
   const [tab, setTab] = useState<'combined' | 'right' | 'left'>('combined')
   const [savedIds, setSavedIds] = useState<{ right?: string; left?: string }>({})
   const savedAny = savedIds.right != null || savedIds.left != null
+  const surveyResultId = savedIds.right ?? savedIds.left ?? null
+  const [surveyDone, setSurveyDone] = useState(false)
+  const [feedbackTrigger, setFeedbackTrigger] = useState<'done' | 'pdf' | null>(null)
   // Retain the TestResults built at mount so we can retry persistence if
   // the user signs in after the binocular results are shown. saveResult
   // no-ops for anonymous users; this ref lets us replay the save once
@@ -201,6 +203,40 @@ export function BinocularResults({
     if (left) saveResult(left)
     syncResults()
   }, [user, syncResults])
+
+  const shouldPromptForFeedback = () => (
+    surveyResultId != null
+    && !surveyDone
+    && !hasSurveyForResult(surveyResultId)
+    && !hasBeenPromptedForFeedback()
+  )
+
+  const openFeedbackPrompt = (trigger: 'done' | 'pdf') => {
+    markFeedbackPrompted()
+    setFeedbackTrigger(trigger)
+  }
+
+  const handleDoneFromResults = () => {
+    if (shouldPromptForFeedback()) {
+      openFeedbackPrompt('done')
+      return
+    }
+    onDone()
+  }
+
+  const closeFeedbackModal = () => {
+    const trigger = feedbackTrigger
+    setFeedbackTrigger(null)
+    if (trigger === 'done') onDone()
+  }
+
+  const handleFeedbackSubmit = (response: SurveyResponse) => {
+    if (surveyResultId) {
+      saveSurvey(surveyResultId, response)
+      setSurveyDone(true)
+    }
+    closeFeedbackModal()
+  }
 
   const activePoints = tab === 'combined' ? combinedStandard : tab === 'right' ? rightStandard : leftStandard
   const activeEye = tab === 'combined' ? 'right' as const : tab // 'right' convention for combined display
@@ -360,22 +396,8 @@ export function BinocularResults({
           <ScenarioOverlay userPoints={combinedStandard} userAreas={combinedAreas} maxEccentricity={maxEccentricity} />
         )}
 
-        {/* Vision simulation */}
-        {tab === 'combined' ? (
-          <VisionSimulator
-            points={combinedStandard}
-            eye="right"
-            maxEccentricity={maxEccentricity}
-            secondEyePoints={leftStandard}
-            secondEyeMaxEccentricity={maxEccentricity}
-          />
-        ) : (
-          <VisionSimulator
-            points={activePoints}
-            eye={activeEye}
-            maxEccentricity={maxEccentricity}
-          />
-        )}
+        {/* Vision simulation disabled for now — see comment in
+            StaticTest.tsx. */}
 
         <div className="flex gap-3">
           <button
@@ -394,28 +416,48 @@ export function BinocularResults({
                 points: combinedStandard,
                 isopterAreas: combinedAreas,
                 calibration,
+                testType: testMode,
+                testMode: testMode === 'static' ? 'threshold' : 'suprathreshold',
               }
               exportTrackedResultPDF(result, {
                 binocular: true,
                 rightEyePoints: rightPoints,
                 leftEyePoints: leftPoints,
               }, 'binocular_results')
+              if (shouldPromptForFeedback()) openFeedbackPrompt('pdf')
             }}
             className="flex-1 py-3 btn-primary rounded-xl font-medium text-white"
           >
             Export PDF
           </button>
           <button
-            onClick={onDone}
+            onClick={handleDoneFromResults}
             className="flex-1 py-3 bg-elevated hover:bg-overlay rounded-xl font-medium transition-colors"
           >
             Done
           </button>
         </div>
-        <WhatsAppShareButton
-          message={`I just took a free binocular visual-field self-test on ${APP_DOMAIN}. Try it yourself:`}
-        />
+        {surveyDone && (
+          <p className="text-center text-green-400 text-xs">Thank you for your feedback!</p>
+        )}
       </div>
+
+      {feedbackTrigger && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Quick feedback"
+          onClick={closeFeedbackModal}
+        >
+          <div className="w-full max-w-md" onClick={e => e.stopPropagation()}>
+            <PostTestSurvey
+              onSubmit={handleFeedbackSubmit}
+              onSkip={closeFeedbackModal}
+            />
+          </div>
+        </div>
+      )}
     </div>
   )
 }

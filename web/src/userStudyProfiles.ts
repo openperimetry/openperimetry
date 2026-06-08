@@ -20,7 +20,7 @@ function sanitize(raw: unknown): StudyProfile | null {
   if (typeof obj.studyId !== 'string' || !obj.studyId.trim()) return null
   if (typeof obj.version !== 'string' || !obj.version.trim()) return null
   if (obj.testType !== 'goldmann' && obj.testType !== 'static') return null
-  if (obj.speedMode !== 'slow' && obj.speedMode !== 'normal') return null
+  if (obj.speedMode !== 'slow' && obj.speedMode !== 'normal' && obj.speedMode !== 'quick') return null
   if (typeof obj.extendedField !== 'boolean') return null
   if (!isStaticGridPattern(obj.staticGridPattern)) return null
   let advancedSettings: StudyProfile['advancedSettings']

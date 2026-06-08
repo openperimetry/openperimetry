@@ -183,19 +183,6 @@ export async function deleteVFResult(id: string) {
   return request<void>(`/api/users/me/vf-results/${id}`, { method: 'DELETE' })
 }
 
-/** Opt-in anonymous upload. Backs the "Share anonymous result" button on
- *  the results page for logged-out users — same device-UUID convention as
- *  anonymous surveys. `data` is the JSON-stringified full TestResult. */
-export async function shareAnonymousVFResult(
-  record: { id: string; eye: string; date: string; data: string },
-  deviceId: string,
-) {
-  return request<{ ok: true }>('/api/vf-results/anonymous', {
-    method: 'POST',
-    body: JSON.stringify({ ...record, deviceId }),
-  })
-}
-
 // ── Visual Field Surveys ──
 
 export interface VFSurveyRecord {
@@ -235,7 +222,6 @@ export interface AdminStats {
   totalUsers: number
   activeSessions: number
   totalVFResults: number
-  totalVFResultsByDevice: number
   totalSurveys: number
   resultsByDay: { date: string; count: number }[]
 }
@@ -269,6 +255,8 @@ export interface AdminUserRecord {
   isAdmin: boolean
   isClinician: boolean
   createdAt: string
+  lastLoginAt: string | null
+  totalLogins: number
 }
 
 export interface AdminSessionRecord {
@@ -292,7 +280,6 @@ export type EventName =
   | 'pdf_exported'
   | 'whatsapp_shared'
   | 'survey_submitted'
-  | 'result_shared_anonymously'
   // account_created is produced server-side on successful /api/auth/register;
   // listed here so AdminPage can type the events list and the badge colour
   // map covers it.

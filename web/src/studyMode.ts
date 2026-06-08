@@ -81,8 +81,8 @@ function validateStudyProfile(raw: unknown): StudyProfile {
   if (obj.testType !== 'goldmann' && obj.testType !== 'static') {
     throw new Error('testType must be goldmann|static')
   }
-  if (obj.speedMode !== 'slow' && obj.speedMode !== 'normal') {
-    throw new Error('speedMode must be slow|normal')
+  if (obj.speedMode !== 'slow' && obj.speedMode !== 'normal' && obj.speedMode !== 'quick') {
+    throw new Error('speedMode must be slow|normal|quick')
   }
   if (typeof obj.extendedField !== 'boolean') {
     throw new Error('extendedField must be boolean')

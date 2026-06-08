@@ -17,6 +17,8 @@ type SqlUserRow = {
   reset_token_hash?: string | null
   reset_expires_at?: string | null
   created_at: string
+  last_login_at?: string | null
+  total_logins?: number | null
 }
 
 type SqlSessionRow = {
@@ -93,7 +95,9 @@ function getDb(): Database.Database {
       is_clinician INTEGER DEFAULT 0,
       reset_token_hash TEXT,
       reset_expires_at TEXT,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      last_login_at TEXT,
+      total_logins INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
@@ -176,6 +180,8 @@ function getDb(): Database.Database {
   // Migration for existing databases
   try { db.exec('ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0') } catch { /* already exists */ }
   try { db.exec('ALTER TABLE users ADD COLUMN is_clinician INTEGER DEFAULT 0') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE users ADD COLUMN last_login_at TEXT') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE users ADD COLUMN total_logins INTEGER NOT NULL DEFAULT 0') } catch { /* already exists */ }
 
   return db
 }
@@ -203,6 +209,10 @@ function createSession(userId: string): string {
       ) VALUES (?, ?, ?, ?, ?, ?)`
     )
     .run(tokenHash, randomUUID(), userId, now, expiresAt, now)
+
+  getDb()
+    .prepare('UPDATE users SET last_login_at = ?, total_logins = total_logins + 1 WHERE id = ?')
+    .run(now, userId)
 
   return token
 }
@@ -595,14 +605,13 @@ export async function getAdminStats(): Promise<AdminStats> {
   const database = getDb()
   const totalUsers = (database.prepare('SELECT COUNT(*) as c FROM users').get() as { c: number }).c
   const activeSessions = (database.prepare('SELECT COUNT(*) as c FROM sessions').get() as { c: number }).c
-  const totalVFResults = (database.prepare("SELECT COUNT(*) as c FROM vf_results WHERE user_id NOT LIKE 'device:%'").get() as { c: number }).c
-  const totalVFResultsByDevice = (database.prepare("SELECT COUNT(*) as c FROM vf_results WHERE user_id LIKE 'device:%'").get() as { c: number }).c
+  const totalVFResults = (database.prepare('SELECT COUNT(*) as c FROM vf_results').get() as { c: number }).c
   const totalSurveys = (database.prepare('SELECT COUNT(*) as c FROM vf_surveys').get() as { c: number }).c
 
   // Last 30 days completed tests by day — counts test_completed events
   // (server-side timestamps) rather than vf_results sync rows, so the
   // chart reflects how many tests actually finished each day even when
-  // results were saved anonymously or never synced.
+  // the user wasn't signed in (no row written to vf_results).
   const rows = database.prepare(
     "SELECT substr(timestamp, 1, 10) as day, COUNT(*) as c FROM events WHERE event = 'test_completed' AND timestamp >= date('now', '-30 days') GROUP BY day ORDER BY day"
   ).all() as Array<{ day: string; c: number }>
@@ -616,12 +625,12 @@ export async function getAdminStats(): Promise<AdminStats> {
     resultsByDay.push({ date: key, count: dayCounts.get(key) ?? 0 })
   }
 
-  return { totalUsers, activeSessions, totalVFResults, totalVFResultsByDevice, totalSurveys, resultsByDay }
+  return { totalUsers, activeSessions, totalVFResults, totalSurveys, resultsByDay }
 }
 
 export async function listAllUsers(): Promise<AdminUserRecord[]> {
   const rows = getDb()
-    .prepare('SELECT id, email, display_name, is_admin, is_clinician, created_at FROM users ORDER BY created_at DESC')
+    .prepare('SELECT id, email, display_name, is_admin, is_clinician, created_at, last_login_at, total_logins FROM users ORDER BY created_at DESC')
     .all() as Array<{
       id: string
       email: string
@@ -629,6 +638,8 @@ export async function listAllUsers(): Promise<AdminUserRecord[]> {
       is_admin?: number | null
       is_clinician?: number | null
       created_at: string
+      last_login_at?: string | null
+      total_logins?: number | null
     }>
 
   return rows.map(row => ({
@@ -638,6 +649,8 @@ export async function listAllUsers(): Promise<AdminUserRecord[]> {
     isAdmin: Boolean(row.is_admin),
     isClinician: Boolean(row.is_clinician),
     createdAt: row.created_at,
+    lastLoginAt: row.last_login_at ?? null,
+    totalLogins: row.total_logins ?? 0,
   }))
 }
 
@@ -658,6 +671,8 @@ export async function setUserClinicianRole(userId: string, isClinician: boolean)
     isAdmin: Boolean(updated.is_admin),
     isClinician: Boolean(updated.is_clinician),
     createdAt: updated.created_at,
+    lastLoginAt: updated.last_login_at ?? null,
+    totalLogins: updated.total_logins ?? 0,
   }
 }
 

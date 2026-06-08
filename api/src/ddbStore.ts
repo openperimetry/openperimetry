@@ -46,6 +46,8 @@ type UserItem = {
   resetPasswordTokenHash?: string
   resetPasswordExpiresAt?: string
   createdAt: string
+  lastLoginAt?: string
+  totalLogins?: number
 }
 
 type SessionItem = {
@@ -161,6 +163,15 @@ async function createSession(userId: string): Promise<string> {
     new PutCommand({
       TableName: DDB_SESSIONS_TABLE,
       Item: item,
+    }),
+  )
+
+  await ddb.send(
+    new UpdateCommand({
+      TableName: DDB_USERS_TABLE,
+      Key: { id: userId },
+      UpdateExpression: 'SET lastLoginAt = :now ADD totalLogins :one',
+      ExpressionAttributeValues: { ':now': now, ':one': 1 },
     }),
   )
 
@@ -858,7 +869,6 @@ export type AdminStats = {
   totalUsers: number
   activeSessions: number
   totalVFResults: number
-  totalVFResultsByDevice: number
   totalSurveys: number
   /** VF results per day (last 30 days), sorted oldest first */
   resultsByDay: { date: string; count: number }[]
@@ -883,7 +893,6 @@ export async function getAdminStats(): Promise<AdminStats> {
 
   // Scan VF results + surveys in one pass
   let totalVFResults = 0
-  let totalVFResultsByDevice = 0
   let totalSurveys = 0
   let lastKey: Record<string, unknown> | undefined
 
@@ -895,16 +904,11 @@ export async function getAdminStats(): Promise<AdminStats> {
 
     for (const item of response.Items ?? []) {
       const logKey = String(item.logKey ?? '')
-      const userId = String(item.userId ?? '')
 
       if (logKey.startsWith('vfsurvey#')) {
         totalSurveys++
       } else if (logKey.startsWith('vf#')) {
-        if (userId.startsWith('device:')) {
-          totalVFResultsByDevice++
-        } else {
-          totalVFResults++
-        }
+        totalVFResults++
       }
     }
 
@@ -914,7 +918,7 @@ export async function getAdminStats(): Promise<AdminStats> {
   // Last 30 days completed tests by day — counts `test_completed`
   // events (server-timestamped at fire time) rather than vf_results
   // rows, so the chart reflects how many tests actually finished each
-  // day even when results were anonymous or never synced.
+  // day even when the user wasn't signed in (no vf_results row).
   const dayCounts = new Map<string, number>()
   const cutoff = new Date()
   cutoff.setDate(cutoff.getDate() - 30)
@@ -945,7 +949,7 @@ export async function getAdminStats(): Promise<AdminStats> {
     resultsByDay.push({ date: key, count: dayCounts.get(key) ?? 0 })
   }
 
-  return { totalUsers, activeSessions, totalVFResults, totalVFResultsByDevice, totalSurveys, resultsByDay }
+  return { totalUsers, activeSessions, totalVFResults, totalSurveys, resultsByDay }
 }
 
 // ── Admin: list all login sessions with user info ──
@@ -968,6 +972,8 @@ export type AdminUserRecord = {
   isAdmin: boolean
   isClinician: boolean
   createdAt: string
+  lastLoginAt: string | null
+  totalLogins: number
 }
 
 export async function listAllUsers(): Promise<AdminUserRecord[]> {
@@ -978,7 +984,7 @@ export async function listAllUsers(): Promise<AdminUserRecord[]> {
     const response = await ddb.send(new ScanCommand({
       TableName: DDB_USERS_TABLE,
       FilterExpression: 'attribute_not_exists(#type)',
-      ProjectionExpression: '#id, email, displayName, isAdmin, isClinician, createdAt',
+      ProjectionExpression: '#id, email, displayName, isAdmin, isClinician, createdAt, lastLoginAt, totalLogins',
       ExpressionAttributeNames: { '#id': 'id', '#type': 'type' },
       ExclusiveStartKey: lastKey,
     }))
@@ -991,6 +997,8 @@ export async function listAllUsers(): Promise<AdminUserRecord[]> {
         isAdmin: Boolean(item.isAdmin),
         isClinician: Boolean(item.isClinician),
         createdAt: String(item.createdAt ?? ''),
+        lastLoginAt: item.lastLoginAt != null ? String(item.lastLoginAt) : null,
+        totalLogins: Number(item.totalLogins ?? 0),
       })
     }
 
@@ -1021,6 +1029,8 @@ export async function setUserClinicianRole(userId: string, isClinician: boolean)
     isAdmin: Boolean(updated.isAdmin),
     isClinician: Boolean(updated.isClinician),
     createdAt: updated.createdAt,
+    lastLoginAt: updated.lastLoginAt ?? null,
+    totalLogins: Number(updated.totalLogins ?? 0),
   }
 }
 
@@ -1250,7 +1260,6 @@ export type EventType =
   | 'page_view'
   | 'pdf_exported'
   | 'whatsapp_shared'
-  | 'result_shared_anonymously'
   | 'account_created'
 
 export async function trackEvent(deviceId: string, event: EventType, meta?: Record<string, string>): Promise<void> {

@@ -6,6 +6,17 @@ import type { SurveyResponse } from './components/PostTestSurvey'
 const STORAGE_KEY = 'goldmann-vf-results'
 const SURVEY_KEY = 'goldmann-vf-surveys'
 const DEVICE_ID_KEY = 'goldmann-vf-device-id'
+// Tombstone set — IDs the user explicitly deleted locally. Lives here
+// because the server's mergeFromServer step would otherwise re-import
+// any server record that doesn't exist locally, silently undoing the
+// delete the moment the next sync runs. We hold tombstones until the
+// server confirms the corresponding DELETE; the auth-context sync
+// path tries to clear them on every sync and drops the tombstone on
+// 204 (or 404, meaning already gone). This is the only mechanism
+// keeping deletes durable when the server-delete network call drops
+// or 5xxs, which is exactly when the user previously saw "deleted
+// results come back".
+const TOMBSTONES_KEY = 'goldmann-vf-tombstones'
 // Single device-level flag tracking whether the feedback modal has
 // already been shown. We only ask once per device across both
 // triggers (Done + Export PDF) so repeat testers don't get nagged.
@@ -110,6 +121,38 @@ export function saveResult(result: TestResult): void {
 export function deleteResult(id: string): void {
   const results = getResults().filter(r => r.id !== id)
   localStorage.setItem(STORAGE_KEY, JSON.stringify(results))
+  // Tombstone the id so the next mergeFromServer doesn't quietly
+  // re-import it from the server copy. The auth context's sync loop
+  // will retry the server-side DELETE until the server agrees, then
+  // clear the tombstone.
+  addTombstone(id)
+}
+
+/** Tombstone API — IDs the user has deleted but where the server
+ *  may not yet have caught up. mergeFromServer respects these. */
+export function getTombstones(): string[] {
+  if (typeof localStorage === 'undefined') return []
+  const raw = localStorage.getItem(TOMBSTONES_KEY)
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+export function addTombstone(id: string): void {
+  if (typeof localStorage === 'undefined') return
+  const current = new Set(getTombstones())
+  current.add(id)
+  localStorage.setItem(TOMBSTONES_KEY, JSON.stringify([...current]))
+}
+
+export function removeTombstone(id: string): void {
+  if (typeof localStorage === 'undefined') return
+  const remaining = getTombstones().filter(x => x !== id)
+  localStorage.setItem(TOMBSTONES_KEY, JSON.stringify(remaining))
 }
 
 /**
@@ -120,6 +163,12 @@ export function deleteResult(id: string): void {
 export function clearLocalResults(): void {
   localStorage.removeItem(STORAGE_KEY)
   localStorage.removeItem(SURVEY_KEY)
+  // Clear tombstones too — they're scoped to the logged-in account
+  // that issued the deletes. Leaving them around would cause the
+  // next user on the device to silently drop their own server
+  // results if any happen to share an id (extremely unlikely with
+  // UUIDs, but the correctness story is cleaner this way).
+  localStorage.removeItem(TOMBSTONES_KEY)
 }
 
 // ── Server sync helpers ──
@@ -141,14 +190,19 @@ export function syncToServer(): VFResultRecord[] {
   }))
 }
 
-/** Merge server results into localStorage (adds any missing ones) */
+/** Merge server results into localStorage (adds any missing ones).
+ *  Honours the tombstone set — IDs the user explicitly deleted are
+ *  skipped, so a server-side copy that hasn't been DELETEd yet
+ *  doesn't get re-imported and silently undo the user's action. */
 export function mergeFromServer(serverRecords: VFResultRecord[]): void {
   const local = getResults()
   const localIds = new Set(local.map(r => r.id).filter(Boolean))
+  const tombstoned = new Set(getTombstones())
   let changed = false
 
   for (const record of serverRecords) {
     if (!record.id || localIds.has(record.id)) continue
+    if (tombstoned.has(record.id)) continue // user deleted this; do not resurrect
     try {
       const result: TestResult = JSON.parse(record.data)
       // Validate that the parsed result has required fields

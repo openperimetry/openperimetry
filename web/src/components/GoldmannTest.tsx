@@ -5,18 +5,16 @@ import { VisualFieldMap } from './VisualFieldMap'
 import { calcIsopterAreas } from '../isopterCalc'
 import { detectTruncatedIsopters } from '../goldmannCoverage'
 import { Interpretation } from './Interpretation'
-import { VisionSimulator } from './VisionSimulator'
 import { saveResult, saveSurvey, hasSurveyForResult, hasBeenPromptedForFeedback, markFeedbackPrompted, getDeviceId, getDeviceInfo } from '../storage'
 import { useAuth } from '../AuthContext'
-import { trackEvent, trackEventBeacon, shareAnonymousVFResult } from '../api'
+import { trackEvent, trackEventBeacon } from '../api'
 import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { ScenarioOverlay } from './ScenarioOverlay'
 import { PostTestSurvey } from './PostTestSurvey'
 import type { SurveyResponse } from './PostTestSurvey'
 import { ClinicalDisclaimer } from './ClinicalDisclaimer'
+import { PauseScreen } from './PauseScreen'
 import { SavePrompt } from './SavePrompt'
-import { WhatsAppShareButton } from './WhatsAppShareButton'
-import { APP_DOMAIN } from '../branding'
 import { GOLDMANN } from '../constants'
 import { degToPx } from '../geometry'
 import { stimulusDisplayColor } from '../stimulusDisplay'
@@ -24,6 +22,7 @@ import { blindspotLocation } from '../blindspot'
 import { useAdvancedSettings } from '../advancedSettings'
 import { PositionCheckOverlay } from './PositionCheckOverlay'
 import { useStudyMode } from '../studyMode'
+import { isPhoneLikeDevice } from '../deviceMode'
 import {
   buildNativeProvenance,
   buildProtocolSnapshot,
@@ -49,6 +48,18 @@ const SPEED_PRESETS = {
     preDelayMax: 2800,
   },
   normal: {
+    stimulus: 6,
+    medium: 4,
+    slow: 3,
+    preDelayMin: 400,
+    preDelayMax: 1000,
+  },
+  // `quick` uses the same per-stimulus pacing as `normal` — the time
+  // saving comes from running only the III4e phase, not from speeding
+  // each sweep up. Pacing too fast on a single-isopter run would
+  // increase reaction-time noise without helping (the user's already
+  // signed up for a short test).
+  quick: {
     stimulus: 6,
     medium: 4,
     slow: 3,
@@ -85,11 +96,7 @@ interface PhaseBlock {
   fixation?: FixationOffset // if set, fixation moves from center
 }
 
-export type SpeedMode = 'slow' | 'normal'
-
-/** localStorage flag so "already shared" state survives a page reload. Same
- *  convention as StaticTest — mirrors `vfc-shared-result-<id>`. */
-const sharedFlagKey = (resultId: string) => `vfc-shared-result-${resultId}`
+export type SpeedMode = 'slow' | 'normal' | 'quick'
 
 interface Props {
   eye: StoredEye
@@ -462,9 +469,7 @@ function edgeEccentricityDeg(
 // strings are clutter on phones. Computed once per module load —
 // orientation doesn't change whether the device has a hardware
 // keyboard.
-const isMobileDevice = typeof navigator !== 'undefined'
-  && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
-  && navigator.maxTouchPoints > 0
+const isMobileDevice = isPhoneLikeDevice()
 
 export function GoldmannTest({ eye, calibration, extendedField, onDone, onComplete, speedMode: initialSpeedMode = 'normal' }: Props) {
   const { user, syncResults } = useAuth()
@@ -525,8 +530,6 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // initial saveResult call will have no-op'd for anonymous users.
   const lastResultRef = useRef<TestResult | null>(null)
   const [surveyDone, setSurveyDone] = useState(false)
-  const [showVisionSim, setShowVisionSim] = useState(false)
-  const [shareState, setShareState] = useState<'idle' | 'sharing' | 'shared' | 'error'>('idle')
   // Active-prompt feedback modal — fires once per device, on either
   // Done or Export PDF, whichever they hit first. `'done'` also runs
   // handleDone() on close; `'pdf'` just closes the modal in place so
@@ -626,11 +629,41 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   }, [])
 
   // ---------- build initial phase blocks ----------
-  useEffect(() => {
+  // Pulled out into a function so a pause-menu "Restart" can rebuild
+  // the block list from scratch without remounting the component
+  // (post-phase-1 adaptive/boundary/outlier blocks would otherwise
+  // remain spliced into `blocksRef` from the previous attempt). Reads
+  // `speedMode`, `extendedField`, `sp.medium`, `pixelsPerDegree`,
+  // `calibration.fixationOffsetPx` from closure — values that match
+  // whatever the user has selected at restart time (e.g. the speed
+  // toggle inside the pause menu).
+  const buildInitialBlocks = (): PhaseBlock[] => {
     const phase1: PhaseBlock = {
       label: 'Initial scan',
       description: 'Mapping III4e isopter — 12 directions',
       tasks: shuffle(BASE_MERIDIANS).map(m => ({ meridianDeg: m, stimulus: 'III4e' as const })),
+    }
+
+    // Quick scan: III4e only — no inner isopters (no V4e/III2e/I4e/I2e
+    // passes), but **extended-field is still respected** because the
+    // extended passes themselves are also III4e sweeps. Skipping them
+    // when extended is on would silently break the user's setting
+    // (and the home-screen toggle would lie about coverage). For the
+    // phone-as-perimeter use case, the user *wants* extended on a
+    // quick check — the temporal field reach matters more than the
+    // 30 seconds saved. Returns just phase1 here so the
+    // (extendedField → append extBlocks) path below still runs.
+    if (speedMode === 'quick') {
+      let blocks: PhaseBlock[] = [phase1]
+      if (extendedField) {
+        blocks = [...blocks, ...buildExtendedBlocks(
+          pixelsPerDegree,
+          window.innerWidth,
+          window.innerHeight,
+          calibration.fixationOffsetPx,
+        )]
+      }
+      return blocks
     }
     // Phases 3 & 4 are always planned; phase 2 (adaptive) gets inserted after phase 1
     const phase3: PhaseBlock = {
@@ -691,7 +724,11 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       )
       allBlocks = [...allBlocks, ...extBlocks]
     }
+    return allBlocks
+  }
 
+  useEffect(() => {
+    const allBlocks = buildInitialBlocks()
     setBlocks(allBlocks)
     blocksRef.current = allBlocks
     setTotalTasks(allBlocks.reduce((s, b) => s + b.tasks.length, 0))
@@ -725,8 +762,16 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       const justFinished = blocksRef.current[blockIdxRef.current]
       const insertBlocks: PhaseBlock[] = []
 
-      // After phase 1 (III4e scan): add adaptive refinement + boundary tracing
-      if (blockIdxRef.current === 0) {
+      // After phase 1 (III4e scan): add adaptive refinement + boundary
+      // tracing. Skipped in quick mode — the whole point of quick is "one
+      // sweep, then results". Adaptive + boundary together can add another
+      // ~10 tasks (often more on a noisy run), which would double the
+      // expected duration and break the "~1 min" promise on the home
+      // screen. The outlier/nesting verification path below *is* allowed
+      // through; it's a cheap reliability guard (max one extra block at
+      // a small handful of meridians) and is the same machinery clinicians
+      // would expect for retest-on-disagreement.
+      if (blockIdxRef.current === 0 && speedModeRef.current !== 'quick') {
         const adaptiveTasks = buildAdaptiveTasks(resultsRef.current)
         if (adaptiveTasks.length > 0) {
           insertBlocks.push({
@@ -1229,6 +1274,92 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // ---------- restart whole test ----------
+  // "Restart from the beginning" out of the pause menu. The user chose
+  // to start over (often because the early sweeps felt frustrating);
+  // that's a motivated retry, not an abandon, so we must NOT trip the
+  // `test_aborted` path. Clearing `startedTrackedRef` and
+  // `testStartedAtRef` keeps the unmount/pagehide guard
+  // (`started && !completed && !abortDispatched`) inert for the
+  // discarded attempt; the next sweep that fires advances
+  // `startedTrackedRef` again and emits a fresh `test_started` with a
+  // new start time, so the new attempt is tracked from scratch.
+  //
+  // Every piece of intra-test state has to be reset here: the dynamic
+  // blocks (adaptive/boundary/outlier) inserted during the previous
+  // run were spliced into `blocksRef`/`blocks` mid-flight, and leaving
+  // them in would make the restart inherit a half-finished phase
+  // schedule. `buildInitialBlocks` rebuilds the cold-launch sequence
+  // using the current `speedMode` (which the user may have toggled in
+  // the pause menu) and `extendedField` selection.
+  const handleRestart = useCallback(() => {
+    cancelAnimationFrame(rafRef.current)
+    if (preDelayTimeoutRef.current) {
+      clearTimeout(preDelayTimeoutRef.current)
+      preDelayTimeoutRef.current = null
+    }
+    if (catchStimulusTimeoutRef.current) {
+      clearTimeout(catchStimulusTimeoutRef.current)
+      catchStimulusTimeoutRef.current = null
+    }
+    if (catchResponseTimeoutRef.current) {
+      clearTimeout(catchResponseTimeoutRef.current)
+      catchResponseTimeoutRef.current = null
+    }
+    if (stimulusRef.current) stimulusRef.current.style.opacity = '0'
+
+    // Tracking lifecycle: discard the previous attempt's start so the
+    // abort path stays inert; the restarted attempt will re-arm itself
+    // when the first stimulus moves.
+    startedTrackedRef.current = false
+    testStartedAtRef.current = null
+
+    // Results + progress.
+    resultsRef.current = []
+    setResults([])
+    setCompletedTasks(0)
+    setTaskIdx(0)
+    setCurrentBlockIdx(0)
+    blockIdxRef.current = 0
+    taskIdxRef.current = 0
+
+    // Reliability + catch-trial counters.
+    catchTrialRef.current = []
+    isCatchTrialRef.current = false
+    resumingFromCatchRef.current = false
+    presentCountRef.current = 0
+    truePositivesRef.current = 0
+    fpIsiPressesRef.current = 0
+    isiActiveRef.current = false
+
+    // Per-task transient state.
+    respondedRef.current = false
+    eccRef.current = 0
+    blockMaxEccRef.current = maxEccentricityDeg
+
+    // Fixation: snap back to the eye-default (shifted blocks live in
+    // the extended-field passes; on restart we're back at block 0).
+    setFixationXY(defaultFixation)
+    setPrevFixationXY(null)
+    fixationRef.current = defaultFixation
+
+    // Rebuild block schedule (post-phase-1 dynamic blocks otherwise
+    // linger; speed toggle in the pause menu also takes effect here).
+    const fresh = buildInitialBlocks()
+    setBlocks(fresh)
+    blocksRef.current = fresh
+    setTotalTasks(fresh.reduce((s, b) => s + b.tasks.length, 0))
+
+    // Hand off to the normal countdown flow. enterFullscreen is
+    // idempotent — if we're already fullscreen this is a no-op.
+    startCountdown()
+  // The deps that actually drive `buildInitialBlocks` (speedMode,
+  // extendedField, sp.medium) are captured implicitly via closure;
+  // re-binding this callback on every render would force a fresh
+  // identity for the pause-menu button on every state change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [maxEccentricityDeg])
+
   // ---------- keyboard listener ----------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1503,9 +1634,6 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     lastResultRef.current = result
     saveResult(result)
     setSavedId(result.id)
-    if (localStorage.getItem(sharedFlagKey(result.id)) === '1') {
-      setShareState('shared')
-    }
   }
 
   // If the user signs in after finishing the test (via the SavePrompt on
@@ -1518,50 +1646,6 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     saveResult(lastResultRef.current)
     syncResults()
   }, [user, syncResults])
-
-  /** Anonymous upload — opt-in, fires only when the user taps the
-   *  "Share anonymous result" button on the results screen. Payload is
-   *  the full TestResult JSON; storage key on the server is the device
-   *  UUID, not an account. Persists a localStorage flag so a page reload
-   *  doesn't offer the same result twice. Mirrors StaticTest's handler. */
-  const handleShareAnonymous = async () => {
-    if (!savedId || shareState === 'sharing' || shareState === 'shared') return
-    setShareState('sharing')
-    const consolidated = consolidatePoints(results)
-    const catchTrials = catchTrialRef.current
-    const reliabilityIndices = {
-      catchTrialsPresented: catchTrials.length,
-      catchTrialsFalsePositive: catchTrials.filter(c => c.detected).length,
-      falsePositiveIsiPresses: fpIsiPressesRef.current,
-      truePositiveResponses: truePositivesRef.current,
-    }
-    const result: TestResult = {
-      id: savedId,
-      eye,
-      date: new Date().toISOString(),
-      points: consolidated,
-      isopterAreas: calcIsopterAreas(consolidated),
-      calibration,
-      testType: 'goldmann',
-      durationSeconds: getTestDurationSeconds(),
-      reliabilityIndices,
-    }
-    try {
-      await shareAnonymousVFResult(
-        {
-          id: result.id,
-          eye: result.eye,
-          date: result.date,
-          data: JSON.stringify(result),
-        },
-        getDeviceId(),
-      )
-      localStorage.setItem(sharedFlagKey(result.id), '1')
-      setShareState('shared')
-    } catch {
-      setShareState('error')
-    }
-  }
 
   // HeadGuide is now a shared component (./HeadGuide.tsx).
 
@@ -1647,86 +1731,59 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
 
   if (phase === 'paused') {
     const progressPct = totalTasks > 0 ? (completedTasks / totalTasks) * 100 : 0
-    return (
-      <div className={`min-h-screen ${bgClass} text-white flex items-center justify-center select-none p-6`}>
-        <div className="text-center space-y-6 max-w-sm w-full">
-          <h1 className="text-2xl font-semibold">Paused</h1>
-          <p className="text-gray-400 text-sm">{completedTasks} of {totalTasks} points completed</p>
-
-          {/* Progress bar — teal signals forward motion (owned by teal in
-              this app's palette; amber is for selection/primary-action). */}
-          <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-teal transition-all duration-300"
-              style={{ width: `${progressPct}%` }}
-            />
-          </div>
-
-          {/* Speed toggle — applies on resume. Future tasks picked up by
-              startCurrentTask use the new preset's pre-delay and outer-
-              sweep speed. Already-baked task speeds (phase6 I2e, boundary
-              tracing) keep their build-time values. */}
-          <div className="pt-1">
-            <p className="text-[11px] uppercase tracking-[0.2em] text-gray-500 mb-2">
-              Test speed
-            </p>
-            <div className="flex gap-2" role="radiogroup" aria-label="Test speed">
-              {(['slow', 'normal'] as const).map(mode => (
-                <button
-                  key={mode}
-                  role="radio"
-                  aria-checked={speedMode === mode}
-                  onClick={() => setSpeedMode(mode)}
-                  className={`flex-1 py-2 rounded-lg text-sm font-medium border transition-colors ${
-                    speedMode === mode
-                      ? 'bg-teal/15 border-teal/40 text-teal'
-                      : 'bg-white/[0.02] border-white/[0.08] text-gray-400 hover:text-gray-200 hover:bg-white/[0.05]'
-                  }`}
-                >
-                  {mode === 'slow' ? 'Slow' : 'Normal'}
-                </button>
-              ))}
-            </div>
-            <p className="text-[10px] text-gray-600 mt-2 font-mono">
-              stim {sp.stimulus}°/s · delay {sp.preDelayMin}–{sp.preDelayMax} ms
-            </p>
-          </div>
-
-          <div className="space-y-3 pt-2">
+    // Speed toggle is Goldmann-only — kinetic sweeps respond to live
+    // speed changes (next task's pre-delay + outer-sweep speed pick up
+    // the new preset). Static's threshold staircases don't, so this
+    // chunk lives here, not in PauseScreen. Already-baked task speeds
+    // (phase6 I2e, boundary tracing) keep their build-time values.
+    //
+    // Hidden in quick mode — quick is a scope choice, not a pacing
+    // choice. Switching to slow/normal mid-quick would require
+    // splicing the missing phases (V4e, III2e, I4e, I2e) into the
+    // schedule, which would silently break the "~1 min" expectation
+    // the user opted into. If they want a full test mid-run, the
+    // Restart button takes them home where they can pick again.
+    const speedToggle = speedMode === 'quick' ? null : (
+      <div className="pt-1">
+        <p className="text-[11px] uppercase tracking-[0.2em] text-gray-500 mb-2">
+          Test speed
+        </p>
+        <div className="flex gap-2" role="radiogroup" aria-label="Test speed">
+          {(['slow', 'normal'] as const).map(mode => (
             <button
-              onClick={resume}
-              className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
+              key={mode}
+              role="radio"
+              aria-checked={speedMode === mode}
+              onClick={() => setSpeedMode(mode)}
+              className={`flex-1 py-2 rounded-lg text-sm font-medium border transition-colors ${
+                speedMode === mode
+                  ? 'bg-teal/15 border-teal/40 text-teal'
+                  : 'bg-white/[0.02] border-white/[0.08] text-gray-400 hover:text-gray-200 hover:bg-white/[0.05]'
+              }`}
             >
-              Resume
+              {mode === 'slow' ? 'Slow' : 'Normal'}
             </button>
-            <button
-              onClick={() => {
-                // Always transition to the results phase — if the user hit
-                // "view results" they shouldn't be silently dropped back on
-                // the home screen. The results render handles the empty
-                // case with its own "no measurements yet" state.
-                exitFullscreen()
-                setPhase('results')
-              }}
-              className="w-full py-3 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm text-gray-300 transition-colors"
-            >
-              Stop test &amp; view results
-            </button>
-            <button
-              onClick={handleDone}
-              className="text-gray-500 hover:text-gray-300 text-sm"
-            >
-              Quit without viewing results
-            </button>
-          </div>
-
-          {!isMobileDevice && (
-            <p className="text-xs text-gray-600">
-              Press <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-xs">Esc</kbd> or <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-xs">Space</kbd> to resume
-            </p>
-          )}
+          ))}
         </div>
+        <p className="text-[10px] text-gray-600 mt-2 font-mono">
+          stim {sp.stimulus}°/s · delay {sp.preDelayMin}–{sp.preDelayMax} ms
+        </p>
       </div>
+    )
+    return (
+      <PauseScreen
+        bgClass={bgClass}
+        progressText={`${completedTasks} of ${totalTasks} points completed`}
+        progressPct={progressPct}
+        onResume={resume}
+        onRestart={handleRestart}
+        onStop={() => {
+          exitFullscreen()
+          setPhase('results')
+        }}
+        onQuit={handleDone}
+        extra={speedToggle}
+      />
     )
   }
 
@@ -1927,6 +1984,12 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
               : <>Press <kbd style={{ padding: '2px 6px', background: '#27272a', color: '#e4e4e7', borderRadius: 4, fontSize: 11 }}>Space</kbd> or tap</>
             }
           </p>
+          <p style={{ color: '#71717a', fontSize: 10, marginTop: 8 }}>
+            {isMobileDevice
+              ? <>Tap the <span style={{ color: '#fbbf24' }}>yellow dot</span> to pause</>
+              : <>Press <kbd style={{ padding: '1px 5px', background: '#27272a', color: '#e4e4e7', borderRadius: 4, fontSize: 10 }}>Esc</kbd> to pause</>
+            }
+          </p>
         </div>
       </div>
     )
@@ -2043,91 +2106,11 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
             }}
           />
           <ScenarioOverlay userPoints={standardPoints} userAreas={areas} maxEccentricity={maxEccentricityDeg} />
-          {/* Vision sim — collapsible, gets ALL points including extended */}
-          {!showVisionSim ? (
-            <button
-              onClick={() => setShowVisionSim(true)}
-              className="w-full py-3 bg-gray-900 hover:bg-gray-800 rounded-xl font-medium transition-colors border border-gray-800 hover:border-gray-700 text-sm"
-            >
-              <svg className="inline w-4 h-4 mr-1.5 -mt-0.5 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
-                <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
-                <circle cx="12" cy="12" r="3" />
-              </svg>
-              Vision simulation
-            </button>
-          ) : (
-            <div className="space-y-2">
-              <button onClick={() => setShowVisionSim(false)} className="text-xs text-gray-500 hover:text-gray-300 transition-colors">
-                ▾ Hide vision simulation
-              </button>
-              <VisionSimulator points={consolidated} eye={eye} maxEccentricity={maxEccentricityDeg} />
-            </div>
-          )}
-          {/* Survey — collapsed by default */}
-          {savedId && !surveyDone && !hasSurveyForResult(savedId) && (
-            <details className="group">
-              <summary className="cursor-pointer text-center text-sm text-gray-400 hover:text-gray-300 transition-colors py-2 list-none">
-                <svg className="inline w-4 h-4 mr-1.5 -mt-0.5 text-gray-500 group-open:rotate-90 transition-transform" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                  <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clipRule="evenodd" />
-                </svg>
-                Quick feedback (optional)
-              </summary>
-              <div className="mt-3">
-                <PostTestSurvey
-                  onSubmit={(response: SurveyResponse) => {
-                    saveSurvey(savedId, response)
-                    setSurveyDone(true)
-                  }}
-                  onSkip={() => setSurveyDone(true)}
-                />
-              </div>
-            </details>
-          )}
+          {/* Vision simulation disabled for now — see comment in
+              StaticTest.tsx. VisionSimulator file is preserved so the
+              feature can be re-enabled in place. */}
           {surveyDone && (
             <p className="text-center text-green-400 text-xs">Thank you for your feedback!</p>
-          )}
-
-          {/* Anonymous share — opt-in only. Same device-UUID convention as
-              anonymous surveys; see StaticTest for the original wording. */}
-          {savedId && (
-            <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs text-zinc-400 space-y-2">
-              {shareState === 'idle' && (
-                <>
-                  <p className="leading-relaxed">
-                    Help improve the tool: share this result anonymously.
-                    Only the point data, calibration, and a random device ID
-                    are uploaded — no name, email, or IP.
-                  </p>
-                  <button
-                    onClick={handleShareAnonymous}
-                    className="w-full py-2 bg-gray-800 hover:bg-gray-700 rounded-md text-sm text-gray-200 transition-colors"
-                  >
-                    Share anonymous result
-                  </button>
-                </>
-              )}
-              {shareState === 'sharing' && (
-                <p className="text-center text-gray-300">Uploading…</p>
-              )}
-              {shareState === 'shared' && (
-                <p className="text-center text-green-400">
-                  Shared — thank you, this helps a lot.
-                </p>
-              )}
-              {shareState === 'error' && (
-                <div className="space-y-1">
-                  <p className="text-center text-red-300">
-                    Upload failed. No data was sent.
-                  </p>
-                  <button
-                    onClick={() => setShareState('idle')}
-                    className="w-full py-1.5 bg-gray-800 hover:bg-gray-700 rounded-md text-xs text-gray-200 transition-colors"
-                  >
-                    Try again
-                  </button>
-                </div>
-              )}
-            </div>
           )}
 
           <div className="flex gap-3">
@@ -2157,9 +2140,6 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
               Done
             </button>
           </div>
-          <WhatsAppShareButton
-            message={`I just took a free Goldmann visual-field self-test on ${APP_DOMAIN} (${eye === 'right' ? 'right eye / OD' : 'left eye / OS'}). Try it yourself:`}
-          />
         </main>
 
         {feedbackTrigger && (
@@ -2229,6 +2209,39 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
           marginTop: fixDotRestOffset + fixationXY.y,
         }}
       />
+
+      {/* Mobile pause hit-target — keyboardless devices have no Esc and a
+          persistent pause button anywhere on screen would pull the eye away
+          from fixation (the thing we need it to do *not*). A tap on the
+          fovea, where the user is already looking, is the natural pause
+          trigger. 44×44 matches iOS HIG; stopPropagation prevents the outer
+          "saw a stimulus" handler from also firing. Risk: a stimulus
+          finishing its inward sweep underneath the hit-target gets seen
+          *as* a pause press. Mitigation: pause() cancels the sweep, the
+          resume path re-runs `startCurrentTask` so the meridian gets
+          re-presented — inefficient but never a missed datum.
+          Follows `fixationXY` so the shifted-fixation extended-field
+          blocks still get the target in the right place. */}
+      {isMobileDevice && (
+        <div
+          role="button"
+          aria-label="Pause test"
+          className="absolute"
+          style={{
+            top: '50%',
+            left: '50%',
+            width: 44,
+            height: 44,
+            marginLeft: -22 + fixationXY.x,
+            marginTop: -22 + fixationXY.y,
+            zIndex: 11,
+          }}
+          onPointerDown={e => {
+            e.stopPropagation()
+            pause()
+          }}
+        />
+      )}
 
       {/* Stimulus — positioned relative to fixation via transform */}
       <div

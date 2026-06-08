@@ -3,7 +3,7 @@ import type { Eye } from '../types'
 import {
   DB_MIN,
   DB_MAX,
-  jetReverseColor,
+  sensitivityGreyForT,
   renderSensitivityToCanvas,
 } from '../sensitivity'
 import { formatEyeLabelForResult } from '../eyeLabels'
@@ -19,10 +19,19 @@ interface Props {
   eye: Eye
   maxEccentricity: number
   size?: number
+  /** Optional upper bound for the dB colormap. When the run is
+   *  calibration-limited (the brightness-floor calibration step
+   *  caps the staircase ceiling), passing the effective ceiling
+   *  here normalises the greyscale across the *measurable* range
+   *  instead of -5 → 40 dB — so spatial variation within the
+   *  range you could actually measure becomes visible instead of
+   *  bunching at the dark end. Omit for the absolute-scale view
+   *  (default behaviour, matches legacy callers + PDF export). */
+  dbCeiling?: number
 }
 
-function jetReverseColorCss(t: number): string {
-  const { r, g, b } = jetReverseColor(t)
+function sensitivityGreyCss(t: number): string {
+  const { r, g, b } = sensitivityGreyForT(t)
   return `rgb(${r},${g},${b})`
 }
 
@@ -31,22 +40,49 @@ export function SensitivityMap({
   eye,
   maxEccentricity,
   size = 400,
+  dbCeiling,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  // Clamp the ceiling on the consumer side too, so the legend and
+  // the canvas see identical effective bounds. Rounded to an
+  // integer because the unrounded value is a 16-digit float
+  // (`-10 · log10(0.075) = 11.249387366082999`), and showing that
+  // as a legend label is just noise. Sub-dB precision in the
+  // colormap doesn't buy visible accuracy.
+  const effectiveCeiling = dbCeiling != null
+    ? Math.min(DB_MAX, Math.max(DB_MIN + 1, Math.round(dbCeiling)))
+    : DB_MAX
 
   useEffect(() => {
     const c = canvasRef.current
     if (!c) return
     const ctx = c.getContext('2d')
     if (!ctx) return
-    renderSensitivityToCanvas(ctx, points, size, maxEccentricity)
-  }, [points, size, maxEccentricity])
+    renderSensitivityToCanvas(ctx, points, size, maxEccentricity, effectiveCeiling)
+  }, [points, size, maxEccentricity, effectiveCeiling])
 
-  const midDb = Math.round((DB_MIN + DB_MAX) / 2)
+  // Mean of the test's measured dB values. Used to render a tick
+  // marker on the legend bar at the user's average sensitivity —
+  // single point of reference for "where does this run sit within
+  // the measurable range". `meanPct` is the tick's left-offset
+  // within the bar, clamped to [0, 100] in case the mean lands
+  // slightly outside the colormap bounds (would happen for the
+  // unseen-sentinel value DB_MIN if it dominated the sample).
+  const measuredDbs = points.map(p => p.db).filter(Number.isFinite)
+  const meanDb = measuredDbs.length > 0
+    ? measuredDbs.reduce((a, b) => a + b, 0) / measuredDbs.length
+    : null
+  const meanPct = meanDb != null
+    ? Math.max(0, Math.min(100, ((meanDb - DB_MIN) / (effectiveCeiling - DB_MIN)) * 100))
+    : null
 
-  // Generate 7-stop legend gradient to faithfully match the jet_r colormap
+  // 7-stop greyscale gradient matching the heatmap renderer's
+  // `sensitivityGreyForT` (dark = defect, light = healthy sensitivity).
+  // Mirrors the HFA greyscale plot convention so a clinician (or a user
+  // comparing to their own clinical printout) reads the legend the same
+  // way they'd read a Single Field Analysis page.
   const legendStops = [0, 0.15, 0.3, 0.5, 0.7, 0.85, 1]
-    .map(t => `${jetReverseColorCss(t)} ${Math.round(t * 100)}%`)
+    .map(t => `${sensitivityGreyCss(t)} ${Math.round(t * 100)}%`)
     .join(', ')
 
   // CHART_PADDING must match the value the renderer uses so rings/labels
@@ -161,14 +197,40 @@ export function SensitivityMap({
           ))}
         </svg>
       </div>
-      <div className="flex items-center gap-2 mt-2 text-[10px] text-zinc-400">
-        <span>{DB_MIN} dB (insensitive)</span>
-        <div
-          className="flex-1 h-2 rounded"
-          style={{ background: `linear-gradient(to right, ${legendStops})` }}
-        />
-        <span>{DB_MAX} dB (sensitive)</span>
-        <span className="ml-2">mid {midDb}</span>
+      <div className="mt-2 text-[10px] text-zinc-400">
+        <div className="flex items-center gap-2">
+          <span>{DB_MIN} dB (insensitive)</span>
+          {/* Bar wrapped in `relative` so the mean-dB tick can be
+              absolute-positioned over it. Tick is a thin gold
+              vertical line that extends slightly above and below
+              the bar so it's visible against both ends of the
+              greyscale; aria-hidden because the dB value is
+              already in the label row below. */}
+          <div className="flex-1 relative">
+            <div
+              className="h-2 rounded"
+              style={{ background: `linear-gradient(to right, ${legendStops})` }}
+            />
+            {meanPct !== null && (
+              <div
+                aria-hidden="true"
+                className="absolute w-[2px] bg-accent rounded-full shadow-[0_0_0_1px_rgba(0,0,0,0.6)]"
+                style={{ top: -3, bottom: -3, left: `${meanPct}%`, transform: 'translateX(-50%)' }}
+              />
+            )}
+          </div>
+          {/* Right-end label = effective ceiling. The "(sensitive)"
+              tag stays only when the bar represents the full
+              clinical range; on a capped bar the ceiling isn't
+              clinically sensitive territory, so we drop the
+              parenthetical to avoid mis-implying it is. */}
+          <span>{effectiveCeiling} dB{effectiveCeiling === DB_MAX ? ' (sensitive)' : ''}</span>
+        </div>
+        {meanDb !== null && (
+          <p className="mt-1 text-center text-zinc-500">
+            <span className="text-accent">▌</span>{' '}mean {meanDb.toFixed(1)} dB
+          </p>
+        )}
       </div>
     </div>
   )

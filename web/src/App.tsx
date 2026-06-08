@@ -5,6 +5,7 @@ import { GoldmannTest, type SpeedMode } from './components/GoldmannTest'
 import { StaticTest } from './components/StaticTest'
 import { TestDemo } from './components/TestDemo'
 import { BinocularResults } from './components/BinocularResults'
+import { InfoButton } from './components/InfoButton'
 import { HistoryView } from './components/HistoryView'
 import { ScienceReferences } from './components/ScienceReferences'
 import { MethodsPage } from './components/MethodsPage'
@@ -14,15 +15,16 @@ import { AdminPage } from './components/AdminPage'
 import { AuthModal } from './components/AuthModal'
 import { ClinicalDisclaimer } from './components/ClinicalDisclaimer'
 import { ClinicianPortal } from './components/ClinicianPortal'
+import { CliniciansPage } from './components/CliniciansPage'
 import { useAuth } from './AuthContext'
 import { ADVANCED_SETTINGS_CTX, type AdvancedSettings } from './advancedSettings'
 import type { ReactNode } from 'react'
 import { getDeviceId, getResults } from './storage'
-import { APP_NAME, APP_DOMAIN, APP_TAGLINE, TITLE_SUFFIX, GITHUB_URL, HAS_GITHUB_LINK, whatsappShareUrl } from './branding'
+import { APP_NAME, APP_TAGLINE, TITLE_SUFFIX, GITHUB_URL, HAS_GITHUB_LINK, whatsappShareUrl } from './branding'
 import { trackEvent } from './api'
 import { DEFAULT_STUDY_MODE_STATE, isStudyReady, useSetStudyMode, useStudyMode } from './studyMode'
 
-type Page = 'home' | 'calibration' | 'test' | 'static-test' | 'binocular-switch' | 'binocular-test-left' | 'binocular-results' | 'history' | 'demo' | 'science' | 'methods' | 'contact' | 'privacy' | 'admin' | 'clinician'
+type Page = 'home' | 'calibration' | 'test' | 'static-test' | 'binocular-switch' | 'binocular-test-left' | 'binocular-results' | 'history' | 'demo' | 'science' | 'methods' | 'contact' | 'privacy' | 'admin' | 'clinician' | 'clinicians'
 type TestMode = 'goldmann' | 'static'
 
 const UMAMI_WEBSITE_ID = (import.meta.env.VITE_UMAMI_WEBSITE_ID as string | undefined) ?? ''
@@ -45,6 +47,7 @@ const PAGE_TITLES: Record<Page, string> = {
   privacy: `Privacy Policy${TITLE_SUFFIX}`,
   admin: `Admin${TITLE_SUFFIX}`,
   clinician: `Clinician Portal${TITLE_SUFFIX}`,
+  clinicians: `For clinicians${TITLE_SUFFIX}`,
 }
 
 // Home-picker preference persistence. Tiny, isolated helpers — saved
@@ -88,12 +91,148 @@ function RunAdvancedBoundary({ override, children }: { override: AdvancedSetting
   return <ADVANCED_SETTINGS_CTX.Provider value={override}>{children}</ADVANCED_SETTINGS_CTX.Provider>
 }
 
+/**
+ * Compact perimetry preview chart shown inside the Build-Your-Test
+ * card. Renders the same animated stimuli the test will actually
+ * present (kinetic inward sweeps for Goldmann, briefly-flashed
+ * scatter for Static), so the test-mode tabs above it get a visual
+ * preview the words "Goldmann" / "Static" don't carry. Used to be
+ * the full-screen wallpaper behind the UI card; pulled into a
+ * card-sized box so the preview is paired with the selector that
+ * drives it. Labels and the radial-dim vignette from the wallpaper
+ * version are dropped here — illegible at this size and not
+ * needed without overlapping UI.
+ */
+function PerimetryPreview({ testMode, speedMode }: { testMode: TestMode; speedMode: SpeedMode }) {
+  return (
+    <div
+      className="relative rounded-2xl border border-white/[0.06] bg-black/30 overflow-hidden"
+      aria-hidden="true"
+    >
+      <svg viewBox="0 0 500 500" className="block mx-auto w-auto max-h-[120px]">
+        {/* Concentric rings */}
+        {[40, 80, 120, 160, 200].map((r, i) => (
+          <circle
+            key={r}
+            cx={250} cy={250} r={r}
+            fill="none"
+            stroke={`rgba(200,144,42,${0.32 - i * 0.04})`}
+            strokeWidth={1}
+          />
+        ))}
+        {/* Bold scope ring at 60° eccentricity */}
+        <circle cx={250} cy={250} r={180} fill="none" stroke="rgba(200,144,42,0.42)" strokeWidth={1.4} />
+
+        {/* Meridian lines — every 30°, brighter at cardinals */}
+        {[0, 30, 45, 60, 90, 120, 135, 150].map(deg => {
+          const rad = (deg * Math.PI) / 180
+          const r = 228
+          const isCardinal = deg % 90 === 0
+          const isIntercardinal = deg % 45 === 0 && !isCardinal
+          return (
+            <line
+              key={deg}
+              x1={250 + r * Math.cos(rad)} y1={250 - r * Math.sin(rad)}
+              x2={250 - r * Math.cos(rad)} y2={250 + r * Math.sin(rad)}
+              stroke={`rgba(200,144,42,${isCardinal ? 0.18 : isIntercardinal ? 0.12 : 0.07})`}
+              strokeWidth={isCardinal ? 1 : 0.6}
+            />
+          )
+        })}
+
+        {/* Tick marks every 15° on the scope ring */}
+        {Array.from({ length: 24 }, (_, i) => i * 15).map(deg => {
+          const rad = (deg * Math.PI) / 180
+          const isMajor = deg % 45 === 0
+          const r1 = 180
+          const r2 = 180 - (isMajor ? 12 : 6)
+          return (
+            <line
+              key={`tick-${deg}`}
+              x1={250 + r1 * Math.cos(rad)} y1={250 - r1 * Math.sin(rad)}
+              x2={250 + r2 * Math.cos(rad)} y2={250 - r2 * Math.sin(rad)}
+              stroke={`rgba(200,144,42,${isMajor ? 0.48 : 0.24})`}
+              strokeWidth={isMajor ? 1.2 : 0.8}
+            />
+          )
+        })}
+
+        {/* Animated stimulus — varies by test type */}
+        {testMode === 'goldmann' && (() => {
+          // Kinetic perimetry: dots move inward along meridians.
+          const cycleDur = speedMode === 'slow' ? 12 : 6
+          const dots = [
+            { angle: 25, delay: 0 },
+            { angle: 160, delay: cycleDur / 3 },
+            { angle: 280, delay: (cycleDur * 2) / 3 },
+          ]
+          return dots.map(({ angle, delay }) => {
+            const rad = (angle * Math.PI) / 180
+            const cos = Math.cos(rad)
+            const sin = Math.sin(rad)
+            const sx = Math.round(250 + 195 * cos)
+            const sy = Math.round(250 - 195 * sin)
+            const ex = Math.round(250 + 35 * cos)
+            const ey = Math.round(250 - 35 * sin)
+            return (
+              // Base cx/cy/opacity must be set: SMIL falls back to
+              // attribute defaults before `begin`, parking delayed
+              // dots at the top-left corner otherwise.
+              <circle key={`g-${angle}-${cycleDur}`} cx={sx} cy={sy} r={5} fill="#c8902a" opacity={0}>
+                <animate attributeName="cx" dur={`${cycleDur}s`} repeatCount="indefinite" begin={`${delay}s`}
+                  values={`${sx};${sx};${ex};${ex};${ex}`} keyTimes="0;0.02;0.3;0.33;1" />
+                <animate attributeName="cy" dur={`${cycleDur}s`} repeatCount="indefinite" begin={`${delay}s`}
+                  values={`${sy};${sy};${ey};${ey};${ey}`} keyTimes="0;0.02;0.3;0.33;1" />
+                <animate attributeName="opacity" dur={`${cycleDur}s`} repeatCount="indefinite" begin={`${delay}s`}
+                  values="0;0.85;0.85;0;0" keyTimes="0;0.02;0.28;0.33;1" />
+              </circle>
+            )
+          })
+        })()}
+
+        {testMode === 'static' && [
+          // Static perimetry: dots flash briefly at scattered positions
+          { angle: 35, ecc: 70, delay: 0 },
+          { angle: 110, ecc: 130, delay: 0.6 },
+          { angle: 200, ecc: 90, delay: 1.2 },
+          { angle: 305, ecc: 160, delay: 1.8 },
+          { angle: 70, ecc: 180, delay: 2.4 },
+          { angle: 240, ecc: 50, delay: 3.0 },
+          { angle: 150, ecc: 195, delay: 3.6 },
+          { angle: 350, ecc: 110, delay: 4.2 },
+        ].map(({ angle, ecc, delay }) => {
+          const rad = (angle * Math.PI) / 180
+          const cx = Math.round(250 + ecc * Math.cos(rad))
+          const cy = Math.round(250 - ecc * Math.sin(rad))
+          return (
+            <circle key={`s-${angle}-${ecc}`} cx={cx} cy={cy} r={5} fill="#c8902a" opacity={0}>
+              <animate attributeName="opacity" dur="5s" repeatCount="indefinite" begin={`${delay}s`}
+                values="0;0;0.9;0.9;0;0" keyTimes="0;0.05;0.08;0.16;0.2;1" />
+            </circle>
+          )
+        })}
+
+        {/* Fixation point with pulse */}
+        <circle cx={250} cy={250} r={6} fill="#c8902a" opacity={0.4}>
+          <animate attributeName="r" values="5;9;5" dur="4s" repeatCount="indefinite" />
+          <animate attributeName="opacity" values="0.3;0.55;0.3" dur="4s" repeatCount="indefinite" />
+        </circle>
+      </svg>
+    </div>
+  )
+}
+
 function durationFor(testMode: TestMode, speedMode: SpeedMode, binocular: boolean): string {
   if (testMode === 'goldmann') {
+    if (speedMode === 'quick') return binocular ? '~2 min' : '~1 min'
     if (speedMode === 'slow') return binocular ? '~30 min' : '~15 min'
     return binocular ? '~10 min' : '~5 min'
   }
-  // Static.
+  // Static. Quick = 10-2 grid (central ±9°, 68 points but only the
+  // inner ones at standard staircase tempo — roughly half the time
+  // of a 24-2 normal run because most locations converge fast on a
+  // healthy macula).
+  if (speedMode === 'quick') return binocular ? '~6–8 min' : '~3–4 min'
   if (speedMode === 'slow') return binocular ? '~28–36 min' : '~14–18 min'
   return binocular ? '~14–20 min' : '~7–10 min'
 }
@@ -345,6 +484,7 @@ function App() {
           }}
           skipReactionTime={runConfig.testMode === 'static'}
           testMode={runConfig.testMode}
+          speedMode={runConfig.speedMode}
         />
       </RunAdvancedBoundary>
     )
@@ -533,6 +673,15 @@ function App() {
     return <MethodsPage onBack={() => setPage('home')} />
   }
 
+  if (page === 'clinicians') {
+    return (
+      <CliniciansPage
+        onBack={() => setPage('home')}
+        onContact={() => setPage('contact')}
+      />
+    )
+  }
+
   if (page === 'admin') {
     return <AdminPage onBack={() => setPage('home')} />
   }
@@ -577,198 +726,6 @@ function App() {
 
   return (
     <div className="min-h-[100dvh] bg-base text-white flex flex-col items-center justify-center relative overflow-hidden grain safe-pad">
-      {/* ── Perimetry chart hero ──
-          Aesthetic: the chart is the hero, not wallpaper. Earlier ring
-          opacities (~0.05–0.22) read as a ghost; bumped 2–3× so the
-          chart reads as a real instrument bezel on the page. The UI
-          card's readability is preserved with a radial dim vignette
-          that darkens the centre (where the card sits) while leaving
-          the outer bezel bright. Added:
-            - Bolder "scope ring" at 60° eccentricity with tick marks
-              every 15° (12 ticks, longer at cardinals/intercardinals).
-            - Cardinal AND intercardinal degree labels in mono caps.
-            - Eccentricity annotation on the scope ring.
-            - Tripled meridian/ring/label opacities.
-          All geometry stays in the 500×500 viewBox; no layout churn. */}
-      <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ marginTop: '-6vh' }} aria-hidden="true">
-        <div className="absolute w-[650px] h-[650px] bg-radial-glow" />
-        <svg
-          viewBox="0 0 500 500"
-          className="w-[min(96vw,620px)] h-[min(96vw,620px)] hero-chart-enter chart-breathe"
-        >
-          <defs>
-            <radialGradient id="cg">
-              <stop offset="0%" stopColor="rgba(200,144,42,0.05)" />
-              <stop offset="70%" stopColor="rgba(200,144,42,0)" />
-            </radialGradient>
-            {/* Radial dim — darkens the centre (where the UI card sits)
-                so the scope can be bold without muddying the foreground.
-                Applied AFTER the chart elements, BEFORE the animated
-                stimuli so the moving dots still pop. */}
-            <radialGradient id="dim" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stopColor="rgba(8,8,13,0.88)" />
-              <stop offset="30%" stopColor="rgba(8,8,13,0.68)" />
-              <stop offset="58%" stopColor="rgba(8,8,13,0)" />
-            </radialGradient>
-          </defs>
-          <circle cx={250} cy={250} r={230} fill="url(#cg)" />
-
-          {/* Meridian lines — dialled back ~25% from the first bezel
-              rework to let the UI card breathe. Still clearly visible,
-              no longer competing with the foreground. */}
-          {[0, 30, 45, 60, 90, 120, 135, 150].map(deg => {
-            const rad = (deg * Math.PI) / 180
-            const r = 228
-            const isCardinal = deg % 90 === 0
-            const isIntercardinal = deg % 45 === 0 && !isCardinal
-            return (
-              <line
-                key={deg}
-                x1={250 + r * Math.cos(rad)} y1={250 - r * Math.sin(rad)}
-                x2={250 - r * Math.cos(rad)} y2={250 + r * Math.sin(rad)}
-                stroke={`rgba(200,144,42,${isCardinal ? 0.14 : isIntercardinal ? 0.09 : 0.05})`}
-                strokeWidth={isCardinal ? 0.9 : 0.5}
-              />
-            )
-          })}
-
-          {/* Concentric rings — scope ring at r=180 (60° ecc) is still
-              the bold one; others recede as ambient context. Opacities
-              brought down ~20% so the chart reads as a present-but-
-              secondary layer behind the UI, not a competing element. */}
-          {[40, 80, 120, 160, 200].map((r, i) => (
-            <circle
-              key={r}
-              cx={250} cy={250} r={r}
-              fill="none"
-              stroke={`rgba(200,144,42,${0.28 - i * 0.04})`}
-              strokeWidth={1}
-            />
-          ))}
-          <circle cx={250} cy={250} r={180} fill="none" stroke="rgba(200,144,42,0.34)" strokeWidth={1.2} />
-
-          {/* Tick marks every 15° on the scope ring — longer at
-              cardinals/intercardinals (every 45°). Reads as a
-              calibrated bezel. */}
-          {Array.from({ length: 24 }, (_, i) => i * 15).map(deg => {
-            const rad = (deg * Math.PI) / 180
-            const isMajor = deg % 45 === 0
-            const r1 = 180
-            const r2 = 180 - (isMajor ? 10 : 5)
-            return (
-              <line
-                key={`tick-${deg}`}
-                x1={250 + r1 * Math.cos(rad)} y1={250 - r1 * Math.sin(rad)}
-                x2={250 + r2 * Math.cos(rad)} y2={250 - r2 * Math.sin(rad)}
-                stroke={`rgba(200,144,42,${isMajor ? 0.38 : 0.2})`}
-                strokeWidth={isMajor ? 1.1 : 0.7}
-              />
-            )
-          })}
-
-          {/* Degree labels — cardinals + intercardinals, mono for that
-              instrument-panel feel. Positioned just outside r=200 so
-              they sit in the brighter outer zone of the dim vignette. */}
-          {[
-            { deg: 90, x: 250, y: 26, anchor: 'middle' as const },
-            { deg: 45, x: 420, y: 86, anchor: 'middle' as const },
-            { deg: 0, x: 478, y: 254, anchor: 'end' as const },
-            { deg: 315, x: 420, y: 422, anchor: 'middle' as const },
-            { deg: 270, x: 250, y: 480, anchor: 'middle' as const },
-            { deg: 225, x: 80, y: 422, anchor: 'middle' as const },
-            { deg: 180, x: 24, y: 254, anchor: 'start' as const },
-            { deg: 135, x: 80, y: 86, anchor: 'middle' as const },
-          ].map(({ deg, x, y, anchor }) => (
-            <text
-              key={`label-${deg}`}
-              x={x} y={y}
-              textAnchor={anchor}
-              fill={`rgba(200,144,42,${deg % 90 === 0 ? 0.38 : 0.26})`}
-              fontSize={10.5}
-              letterSpacing="1"
-              fontFamily="ui-monospace, 'SF Mono', monospace"
-            >{deg}°</text>
-          ))}
-
-          {/* Eccentricity annotation on the scope ring — tiny label
-              near the top tick, naming what the bold ring represents. */}
-          <text
-            x={258} y={68}
-            fill="rgba(200,144,42,0.28)"
-            fontSize={8}
-            letterSpacing="2"
-            fontFamily="ui-monospace, 'SF Mono', monospace"
-          >60° ECC</text>
-
-          {/* Dim radial vignette — drawn AFTER all the chart strokes so
-              it tones them down where the UI card lives, but BEFORE the
-              animated stimuli so those stay crisp. */}
-          <circle cx={250} cy={250} r={250} fill="url(#dim)" />
-
-          {/* Animated stimulus — varies by test type */}
-          {testMode === 'goldmann' && (() => {
-            // Kinetic perimetry: dots move inward along meridians. Normal is
-            // the shorter Goldmann pace; slow preserves the older long pace.
-            const cycleDur = speedMode === 'slow' ? 12 : 6
-            const dots = [
-              { angle: 25, delay: 0 },
-              { angle: 160, delay: cycleDur / 3 },
-              { angle: 280, delay: (cycleDur * 2) / 3 },
-            ]
-            return dots.map(({ angle, delay }) => {
-              const rad = (angle * Math.PI) / 180
-              const cos = Math.cos(rad)
-              const sin = Math.sin(rad)
-              const sx = Math.round(250 + 195 * cos)
-              const sy = Math.round(250 - 195 * sin)
-              const ex = Math.round(250 + 35 * cos)
-              const ey = Math.round(250 - 35 * sin)
-              return (
-                // Base cx/cy/opacity must be set: SMIL falls back to attribute
-                // defaults (cx=0, cy=0, opacity=1) before `begin`, which would
-                // park the delayed dots at the chart's top-left corner.
-                <circle key={`g-${angle}-${cycleDur}`} cx={sx} cy={sy} r={3} fill="#c8902a" opacity={0}>
-                  <animate attributeName="cx" dur={`${cycleDur}s`} repeatCount="indefinite" begin={`${delay}s`}
-                    values={`${sx};${sx};${ex};${ex};${ex}`} keyTimes="0;0.02;0.3;0.33;1" />
-                  <animate attributeName="cy" dur={`${cycleDur}s`} repeatCount="indefinite" begin={`${delay}s`}
-                    values={`${sy};${sy};${ey};${ey};${ey}`} keyTimes="0;0.02;0.3;0.33;1" />
-                  <animate attributeName="opacity" dur={`${cycleDur}s`} repeatCount="indefinite" begin={`${delay}s`}
-                    values="0;0.35;0.35;0;0" keyTimes="0;0.02;0.28;0.33;1" />
-                </circle>
-              )
-            })
-          })()}
-
-          {testMode === 'static' && [
-            // Static perimetry: dots flash briefly at scattered positions
-            { angle: 35, ecc: 70, delay: 0 },
-            { angle: 110, ecc: 130, delay: 0.6 },
-            { angle: 200, ecc: 90, delay: 1.2 },
-            { angle: 305, ecc: 160, delay: 1.8 },
-            { angle: 70, ecc: 180, delay: 2.4 },
-            { angle: 240, ecc: 50, delay: 3.0 },
-            { angle: 150, ecc: 195, delay: 3.6 },
-            { angle: 350, ecc: 110, delay: 4.2 },
-          ].map(({ angle, ecc, delay }) => {
-            const rad = (angle * Math.PI) / 180
-            const cx = Math.round(250 + ecc * Math.cos(rad))
-            const cy = Math.round(250 - ecc * Math.sin(rad))
-            return (
-              <circle key={`s-${angle}-${ecc}`} cx={cx} cy={cy} r={3} fill="#c8902a" opacity={0}>
-                <animate attributeName="opacity" dur="5s" repeatCount="indefinite" begin={`${delay}s`}
-                  values="0;0;0.45;0.45;0;0" keyTimes="0;0.05;0.08;0.16;0.2;1" />
-              </circle>
-            )
-          })}
-
-          {/* Fixation point with pulse */}
-          <circle cx={250} cy={250} r={5} fill="#c8902a" opacity={0.28}>
-            <animate attributeName="r" values="4;7;4" dur="4s" repeatCount="indefinite" />
-            <animate attributeName="opacity" values="0.18;0.32;0.18" dur="4s" repeatCount="indefinite" />
-          </circle>
-        </svg>
-      </div>
-
       {/* ── Top-right GitHub link — absolute positioned so it scrolls
             away with the page content rather than hovering on every screen. */}
       {HAS_GITHUB_LINK && (
@@ -789,38 +746,54 @@ function App() {
 
       {/* ── Content ── */}
       <main className="relative z-10 max-w-md w-full px-6 py-10 space-y-7 text-center">
-        {/* Specimen label — sits above the brand like a clinical card
-            header. Hairlines with a tiny diamond ornament echo the
-            calibration-target aesthetic of the perimetry chart behind it,
-            and folds the domain into the header so it doesn't read as
-            standalone debug info. */}
-        <div className="fade-up fade-up-1 pt-4">
-          <p className="mx-auto inline-flex items-center gap-2 rounded-full border border-white/8 bg-black/20 px-3 py-1 text-[11px] font-medium text-zinc-300">
-            <span>{APP_NAME}</span>
-            <span aria-hidden="true" className="text-zinc-500">•</span>
-            <span className="text-zinc-400">{APP_DOMAIN}</span>
+        {/* Brand — at the fixation point of the chart. Two-line H1:
+            big bold APP_NAME (whatever the deployment is branded as)
+            + smaller tracked gold "Visual Field Check" descriptor.
+            Previously this line was the test-mode label ("Goldmann"
+            vs "Static"), which made the home page feel like it
+            shifted brand identity every time you toggled the tabs.
+            The brand is the app, not the test mode — the test mode
+            is selected inside the build-your-test card below.
+
+            The gold "Visual Field Check" descriptor is suppressed
+            when APP_NAME already contains "visual field" (e.g. a
+            "Visual Field Check" / "VisualFieldCheck" branded
+            deployment) — otherwise the title reads as the same
+            phrase twice. Detection is whitespace- and
+            case-insensitive so variants like "VisualFieldCheck"
+            also collapse correctly. */}
+        <div className="fade-up fade-up-2 pb-2">
+          {(() => {
+            const brandHasVisualField = APP_NAME.replace(/\s+/g, '').toLowerCase().includes('visualfield')
+            return (
+              <h1
+                className={
+                  brandHasVisualField
+                    ? 'min-h-[5rem] sm:min-h-[6rem] flex items-center justify-center'
+                    : 'min-h-[5.5rem] sm:min-h-[6.5rem] flex flex-col items-center justify-center'
+                }
+              >
+                <span className="text-5xl sm:text-6xl font-heading font-extrabold tracking-tight text-white leading-[0.95]">
+                  {APP_NAME}
+                </span>
+                {!brandHasVisualField && (
+                  <span className="block text-accent text-xl sm:text-2xl tracking-[0.08em] uppercase font-heading font-bold mt-1">
+                    Visual Field Check
+                  </span>
+                )}
+              </h1>
+            )
+          })()}
+          {/* Plain-language value prop — a name is not a reason. This one
+              line tells a first-time visitor what the test is, where it
+              happens, and roughly how long, so they can decide to start
+              without inferring purpose from the brand alone. Kept high-
+              contrast (zinc-200) and at a legible size for the low-vision
+              audience this tool serves. */}
+          <p className="mt-2 mx-auto max-w-md text-center text-[15px] leading-relaxed text-zinc-200">
+            Check your vision at home in about 5 minutes, for free.
           </p>
         </div>
-
-        {/* Brand — at the fixation point of the chart */}
-        <div className="fade-up fade-up-2 pb-2">
-          <h1 className="min-h-[5.5rem] sm:min-h-[6.5rem] flex flex-col items-center justify-center">
-            <span className="text-5xl sm:text-6xl font-heading font-extrabold tracking-tight text-white leading-[0.95]">
-              {testMode === 'static' ? 'Static' : 'Goldmann'}
-            </span>
-            <span className="block text-accent text-xl sm:text-2xl tracking-[0.08em] uppercase font-heading font-bold mt-1">
-              Visual Field
-            </span>
-          </h1>
-        </div>
-
-        <p className="fade-up fade-up-2 text-zinc-300 text-base max-w-sm mx-auto min-h-[2.5rem] flex items-center justify-center -mt-2 leading-relaxed">
-          <span>
-            {testMode === 'static'
-              ? 'HFA-style static field self-check'
-              : <>Kinetic perimetry self-check for <abbr title="Retinitis Pigmentosa" className="no-underline">RP</abbr></>}
-          </span>
-        </p>
 
         {/* ── Build-your-test card ──
             Single compact container holding eye selection, test mode, and
@@ -855,7 +828,51 @@ function App() {
               Card border upgraded to accent/20 so the corner brackets
               feel like extensions of the card's own rim. */}
           <div className="relative">
-            <div className="bg-[#0b0b12]/80 border border-white/10 rounded-[20px] p-5 space-y-4 shadow-[0_18px_60px_rgba(0,0,0,0.45)]">
+            {/* Tick-mark overlay — 24 radial pins every 15° around the
+                card perimeter, echoing the scope-ring tick marks on
+                the inner preview chart. SVG uses preserveAspectRatio
+                = none so its 500×500 viewBox stretches to fit the
+                card; ticks land at the card's relative angular
+                positions. vector-effect="non-scaling-stroke" keeps
+                the tick stroke width constant regardless of stretch,
+                so we don't get thicker ticks on the taller axis.
+                Cardinals/intercardinals are slightly longer + more
+                opaque than the intermediate ticks, matching how a
+                real instrument bezel reads. */}
+            <svg
+              className="absolute pointer-events-none"
+              aria-hidden="true"
+              viewBox="0 0 500 500"
+              preserveAspectRatio="none"
+              style={{ top: -22, left: -22, width: 'calc(100% + 44px)', height: 'calc(100% + 44px)', zIndex: 1 }}
+            >
+              {Array.from({ length: 24 }, (_, i) => i * 15).map(deg => {
+                const rad = (deg * Math.PI) / 180
+                const isMajor = deg % 45 === 0
+                const r1 = 250
+                const r2 = 250 - (isMajor ? 16 : 8)
+                return (
+                  <line
+                    key={`outer-tick-${deg}`}
+                    x1={250 + r1 * Math.cos(rad)} y1={250 - r1 * Math.sin(rad)}
+                    x2={250 + r2 * Math.cos(rad)} y2={250 - r2 * Math.sin(rad)}
+                    stroke={`rgba(200,144,42,${isMajor ? 0.5 : 0.28})`}
+                    strokeWidth={isMajor ? 1.4 : 0.9}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                )
+              })}
+            </svg>
+            {/* `scope-bezel` adds 3 concentric gold ring outlines
+                around the card (with the body bg showing through the
+                gaps), giving the card the same instrument-panel
+                aesthetic as the perimetry preview chart inside it.
+                Heavy `rounded-[3rem]` so the rings curve smoothly
+                rather than reading as a boxy frame. The original
+                drop shadow is folded into `.scope-bezel` so we don't
+                stack two shadow declarations. `relative z-[2]` so
+                the card sits above the tick-mark SVG. */}
+            <div className="relative z-[2] bg-[#0b0b12]/80 border border-white/10 rounded-[3rem] p-5 space-y-4 scope-bezel">
 
             {/* Card header — accessibility: earlier draft used zinc-500
                 mono + 0.1em tracking for the duration, which sat
@@ -947,57 +964,171 @@ function App() {
                 now makes it clear that this affects test duration and
                 confirmation repeats rather than just "animation speed". */}
             <div className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex gap-1" role="tablist" aria-label="Test mode">
+              {/* Tabs and pace pill always stack vertically. Both rows
+                  picked up info-icon buttons after the layout was
+                  last restored to side-by-side, and the combined
+                  width of Goldmann/Static tabs + Q/N/S pill + their
+                  info icons now overshoots the bezel card's inner
+                  edge on viewports we actually ship to (a 20 px
+                  overhang on ~800 px wide). Stacking always is the
+                  simple, robust fix — costs one row of vertical
+                  space, keeps every control firmly inside the
+                  scope-bezel rim. */}
+              {/* Both rows centred within the card. With the
+                  always-stack layout, content was left-aligned and
+                  felt off-axis against the symmetric scope-bezel
+                  frame around it; centring puts the controls on the
+                  same vertical midline as the eye-select cards
+                  above and the preview chart below. */}
+              <div className="flex flex-col gap-3 items-center">
+                <div className="flex gap-3" role="tablist" aria-label="Test mode">
                   {(['goldmann', 'static'] as const).map(mode => (
-                    <button
-                      key={mode}
-                      onClick={() => {
-                        if (!studyLocked) setTestMode(mode)
-                      }}
-                      role="tab"
-                      disabled={studyLocked}
-                      aria-selected={testMode === mode}
-                      className={`relative min-h-[40px] px-4 pb-1.5 pt-2 text-sm font-medium transition-colors duration-200 ${
-                        testMode === mode ? 'text-white' : studyLocked ? 'text-zinc-500' : 'text-zinc-400 hover:text-zinc-200'
-                      }`}
-                    >
-                      {mode === 'goldmann' ? 'Goldmann' : 'Static'}
-                      <span className={`absolute bottom-0.5 inset-x-3 h-[2px] rounded-full bg-accent transition-all duration-300 origin-center ${
-                        testMode === mode ? 'opacity-100 scale-x-100' : 'opacity-0 scale-x-0'
-                      }`} />
-                    </button>
+                    <div key={mode} className="flex items-center">
+                      <button
+                        onClick={() => {
+                          if (studyLocked) return
+                          setTestMode(mode)
+                          // Both test modes support 'quick' now (Goldmann
+                          // quick = single III4e isopter; Static quick =
+                          // 10-2 central grid), so no cross-mode reset
+                          // is needed — the pace selection carries over
+                          // and means a "shorter test" in both cases.
+                        }}
+                        role="tab"
+                        disabled={studyLocked}
+                        aria-selected={testMode === mode}
+                        // Asymmetric horizontal padding (pl-4 pr-1) so the
+                        // info icon sits visually attached to the label
+                        // rather than detached at the far side of the
+                        // tab's right padding. Underline below uses
+                        // `inset-x-3` which still tracks the text
+                        // closely enough that the small offset reads as
+                        // intentional spacing.
+                        className={`relative min-h-[40px] pl-4 pr-1 pb-1.5 pt-2 text-sm font-medium transition-colors duration-200 ${
+                          testMode === mode ? 'text-white' : studyLocked ? 'text-zinc-500' : 'text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        {mode === 'goldmann' ? 'Goldmann' : 'Static'}
+                        <span className={`absolute bottom-0.5 left-3 right-1 h-[2px] rounded-full bg-accent transition-all duration-300 origin-center ${
+                          testMode === mode ? 'opacity-100 scale-x-100' : 'opacity-0 scale-x-0'
+                        }`} />
+                      </button>
+                      <InfoButton
+                        label={mode === 'goldmann' ? 'Goldmann test' : 'Static test'}
+                        className="mb-1.5"
+                      >
+                        {mode === 'goldmann' ? (
+                          <>
+                            <strong className="text-accent block mb-1">Goldmann (kinetic) perimetry</strong>
+                            Moving stimuli sweep inward from the screen edge along meridians; you press the moment you see one. Maps the outer <em>boundary</em> of your visual field as isopters. Clinical standard for tracking peripheral field loss like retinitis pigmentosa.
+                          </>
+                        ) : (
+                          <>
+                            <strong className="text-accent block mb-1">Static (HFA-style) perimetry</strong>
+                            Stimuli flash briefly at fixed grid locations; an adaptive 4-2 dB staircase finds your detection threshold at each. Produces a <em>sensitivity heatmap</em>. Standard for tracking glaucoma and macular disease.
+                          </>
+                        )}
+                      </InfoButton>
+                    </div>
                   ))}
                 </div>
 
-                <button
-                  onClick={() => {
-                    if (!studyLocked) {
-                      setSpeedMode(s => (s === 'slow' ? 'normal' : 'slow'))
-                    }
-                  }}
-                  role="switch"
-                  disabled={studyLocked}
-                  aria-checked={speedMode === 'normal'}
-                  className={`inline-flex items-center gap-1.5 self-start rounded-full border px-3 py-1.5 text-[12px] font-medium transition-colors ${
-                    speedMode === 'normal'
-                      ? 'bg-teal/15 border-teal/40 text-teal'
-                      : studyLocked
-                        ? 'bg-white/[0.03] border-white/[0.08] text-zinc-400'
-                        : 'bg-white/[0.03] border-white/[0.08] text-zinc-300 hover:text-white hover:bg-white/[0.05]'
-                  }`}
-                  aria-label={
-                    speedMode === 'slow'
-                      ? 'Slow pace enabled — tap to switch to normal pace'
-                      : 'Normal pace enabled — tap to switch to slow pace'
-                  }
-                >
-                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                    <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-                  </svg>
-                  {speedMode === 'slow' ? 'Slow pace' : 'Normal pace'}
-                </button>
+                {/* Pace picker. Both modes get three options now:
+                    - Goldmann Quick: single III4e isopter (~1 min)
+                    - Static Quick: 10-2 grid, central ±9° (~3-4 min)
+                    Both Quick variants are scope-shrinks, not pacing
+                    tweaks, and both are positioned as
+                    "between-proper-exams checks". The remaining
+                    Normal/Slow distinction is per-mode: kinetic
+                    sweep speed for Goldmann; reversal count + per-
+                    stim timing for Static. */}
+                {(() => {
+                  const options = ['quick', 'normal', 'slow'] as const
+                  const labelFor = (m: typeof options[number]) =>
+                    m === 'quick' ? 'Quick' : m === 'normal' ? 'Normal' : 'Slow'
+                  // Pace info content varies by test mode — Quick /
+                  // Normal / Slow mean different things in Goldmann
+                  // (sweep speed + isopter count) vs Static (grid +
+                  // staircase reversal count). The popover lists all
+                  // three for the currently-selected mode so a user
+                  // can browse before picking.
+                  const paceInfoEntries = testMode === 'goldmann'
+                    ? [
+                        ['Quick', 'Single III4e isopter only (~1 min). The clinical reportable outer boundary — handy for serial monitoring between full tests.'],
+                        ['Normal', 'Full battery (V4e + III4e + III2e + I4e + I2e) at standard sweep speed (~5 min). The default Goldmann test.'],
+                        ['Slow', 'Full battery with slower sweeps and longer pre-stim delay (~15 min). More reaction time per sweep, fewer false negatives.'],
+                      ] as const
+                    : [
+                        ['Quick', 'HFA 10-2 grid (central ±9°, ~3-4 min). Suited to tracking macular involvement. Not the right scan for RP peripheral monitoring.'],
+                        ['Normal', '24-2 grid with 2 staircase reversals per location (~7-10 min). The default static threshold test.'],
+                        ['Slow', '24-2 grid with 4 reversals + longer per-stim timing (~14-18 min). Lower threshold variance at the cost of duration.'],
+                      ] as const
+                  return (
+                    // Outer rounded container groups the radio pills AND
+                    // the info button as a single visual unit, so the (i)
+                    // sits inside the same pill-background as the
+                    // options it describes rather than floating off to
+                    // the side and pushing past the card edge.
+                    // `role="radiogroup"` lives on the inner pill row
+                    // (containing only the three radios) so a11y stays
+                    // strict — the info button is a sibling, not part
+                    // of the radio group.
+                    <div className="inline-flex items-center gap-1 rounded-full border border-white/[0.08] bg-white/[0.02] p-1">
+                      <div
+                        role="radiogroup"
+                        aria-label="Test pace"
+                        className="inline-flex gap-1"
+                      >
+                        {options.map(mode => {
+                          const selected = speedMode === mode
+                          return (
+                            <button
+                              key={mode}
+                              role="radio"
+                              disabled={studyLocked}
+                              aria-checked={selected}
+                              onClick={() => { if (!studyLocked) setSpeedMode(mode) }}
+                              // Selected state uses the app's primary
+                              // accent gold (matches the eye-selection
+                              // card and Begin CTA) for palette
+                              // consistency. The previous teal was the
+                              // only teal on the home screen — recoloured
+                              // so the pace pill belongs to the same
+                              // visual system as the rest of the card.
+                              className={`rounded-full px-3 py-1 text-[12px] font-medium transition-colors ${
+                                selected
+                                  ? 'bg-accent/15 text-accent'
+                                  : studyLocked
+                                    ? 'text-zinc-500'
+                                    : 'text-zinc-300 hover:text-white hover:bg-white/[0.05]'
+                              }`}
+                            >
+                              {labelFor(mode)}
+                            </button>
+                          )
+                        })}
+                      </div>
+                      <InfoButton label="Test pace options" className="mr-1">
+                        <strong className="text-accent block mb-2">Pace options</strong>
+                        <div className="space-y-2">
+                          {paceInfoEntries.map(([name, desc]) => (
+                            <div key={name}>
+                              <span className="text-white font-medium">{name}</span>
+                              <span className="text-zinc-400"> — {desc}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </InfoButton>
+                    </div>
+                  )
+                })()}
               </div>
+
+              {/* Preview chart — visual explanation of what the selected
+                  test mode actually does. Sits as a full-width row
+                  below the tabs+pill so the pill can sit next to the
+                  tabs on desktop again. */}
+              <PerimetryPreview testMode={testMode} speedMode={speedMode} />
 
               {studyLocked && (
                 <p className="text-left text-xs leading-relaxed text-teal">
@@ -1024,9 +1155,9 @@ function App() {
           <button
             onClick={() => startTest(eye)}
             disabled={!studyReady}
-            className={`group w-full min-h-[60px] rounded-xl border py-4 text-white transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base ${
+            className={`group w-full min-h-[60px] rounded-xl border py-4 transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base ${
               studyReady
-                ? 'border-accent/40 bg-accent shadow-[0_4px_24px_rgba(200,144,42,0.22)] hover:scale-[1.01] hover:bg-accent-light hover:shadow-[0_6px_32px_rgba(200,144,42,0.32)]'
+                ? 'border-accent/40 bg-accent text-[#1f1605] shadow-[0_4px_24px_rgba(200,144,42,0.22)] hover:scale-[1.01] hover:bg-accent-light hover:shadow-[0_6px_32px_rgba(200,144,42,0.32)]'
                 : 'border-white/10 bg-zinc-700 text-zinc-300 shadow-none'
             }`}
             aria-label={`Start test: ${testMode} on ${eye === 'both' ? 'both eyes' : eye + ' eye'}`}
@@ -1045,14 +1176,27 @@ function App() {
                 preserves word-shape, which matters under reduced
                 acuity). Dividers are 75% so they recede without
                 bleaching. */}
-            <span className="mt-1 block text-[12px] font-medium tracking-[0.02em] text-white/95">
+            <span className="mt-1 block text-[12px] font-medium tracking-[0.02em] text-[#1f1605]">
               {eye === 'both' ? 'OU' : eye === 'left' ? 'OS' : 'OD'}
-              <span className="mx-2 text-white/75">·</span>
+              <span className="mx-2 text-[#1f1605]/60">·</span>
               {testMode === 'goldmann' ? 'Goldmann' : 'Static'}
-              <span className="mx-2 text-white/75">·</span>
+              <span className="mx-2 text-[#1f1605]/60">·</span>
               {durationSelected.replace('~', '')}
             </span>
           </button>
+          {/* Reassurance + expectations, directly under the commit moment.
+              Placed BELOW the CTA so it never pushes Begin test off-screen,
+              but close enough that a hesitant first-timer reads it before
+              deciding. Answers the three things a cautious visitor wants to
+              know at the button: is it safe to try (screening, not a
+              diagnosis), is it low-commitment (no account), and what will it
+              ask of me (so setup needs aren't a surprise only after Begin). */}
+          <p className="mt-2.5 text-center text-[13px] leading-relaxed text-zinc-300">
+            Screening only — not a diagnosis. No account needed to start.
+          </p>
+          <p className="mt-1 text-center text-[12px] leading-relaxed text-zinc-400">
+            You'll need a screen at arm's length and to cover one eye when prompted.
+          </p>
           {!studyReady && (
             <p className="mt-2 text-sm text-amber-200/85">
               Study mode requires both a participant ID and session ID before the test can start.
@@ -1160,6 +1304,7 @@ function App() {
             <button onClick={() => setPage('demo')} className="text-zinc-500 hover:text-zinc-300 text-xs transition-colors min-h-[44px] px-1">Demos</button>
             <button onClick={() => setPage('methods')} className="text-zinc-500 hover:text-zinc-300 text-xs transition-colors min-h-[44px] px-1">Methods</button>
             <button onClick={() => setPage('science')} className="text-zinc-500 hover:text-zinc-300 text-xs transition-colors min-h-[44px] px-1">References</button>
+            <button onClick={() => setPage('clinicians')} className="text-zinc-500 hover:text-zinc-300 text-xs transition-colors min-h-[44px] px-1">Clinicians</button>
             <button onClick={() => setPage('contact')} className="text-zinc-500 hover:text-zinc-300 text-xs transition-colors min-h-[44px] px-1">Contact</button>
             <button onClick={() => setPage('privacy')} className="text-zinc-500 hover:text-zinc-300 text-xs transition-colors min-h-[44px] px-1">Privacy</button>
           </div>

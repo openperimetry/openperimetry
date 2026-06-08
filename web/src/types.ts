@@ -1,5 +1,15 @@
 export type Eye = 'left' | 'right' | 'both'
-export type RunSpeedMode = 'slow' | 'normal'
+/** Run-pace selector used at the home screen and persisted into result
+ *  protocol metadata.
+ *
+ *  - `slow` / `normal` — full test (every isopter), different pacing.
+ *  - `quick` — Goldmann-only scope shrink: a single III4e sweep
+ *    (~1 min vs ~5–15 min for the full run). The "between-proper-exams
+ *    check" that lets serial monitoring actually happen weekly. Static
+ *    treats `quick` as `normal` — there's already a `10-2` advanced
+ *    grid setting that fills the same role for static perimetry.
+ */
+export type RunSpeedMode = 'slow' | 'normal' | 'quick'
 
 export type StimulusKey = 'V4e' | 'III4e' | 'III2e' | 'I4e' | 'I2e'
 

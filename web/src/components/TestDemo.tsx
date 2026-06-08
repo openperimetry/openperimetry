@@ -10,7 +10,6 @@ import { VisualFieldMap } from './VisualFieldMap'
 import { SensitivityMap } from './SensitivityMap'
 import { calcIsopterAreas } from '../isopterCalc'
 import { Interpretation } from './Interpretation'
-import { VisionSimulator } from './VisionSimulator'
 import { STIMULI, ISOPTER_ORDER } from '../types'
 
 /** HFA 24-2 grid fits within ~28° eccentricity; round up for a snug view. */
@@ -136,12 +135,12 @@ function ScenarioCard({ scenario, mapSize }: { scenario: ReturnType<typeof getAl
             </div>
           </div>
 
-          <VisionSimulator
-            points={scenario.points}
-            eye="right"
-            maxEccentricity={scenario.maxEccentricity}
-            minimal
-          />
+          {/* Vision simulation disabled for now (also disabled on the
+              actual results pages — see comment in StaticTest.tsx).
+              The demo scenarios remain valuable for the heatmap +
+              interpretation copy below; once VisionSimulator handles
+              static threshold data more sensibly we'll restore it
+              here too. */}
 
           <Interpretation
             points={scenario.points}

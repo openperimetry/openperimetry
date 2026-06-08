@@ -191,9 +191,12 @@ async function renderRadarImage(result: TestResult, sizePx: number): Promise<str
 }
 
 /** Render the measured sensitivity heatmap (threshold-mode only) to a
- *  PNG data URL. Returns null when the result has no per-location
- *  thresholdDb (Goldmann or legacy suprathreshold static) — caller
- *  should skip the sensitivity section in that case. */
+ *  PNG data URL with the same chrome the in-app SensitivityMap shows:
+ *  concentric eccentricity rings + degree labels + N/T/S/I cardinal
+ *  labels + a small ceiling/legend strip. Returns null when the result
+ *  has no per-location thresholdDb. Background is white because the
+ *  PDF is printed/shared with clinicians, where white-on-white is
+ *  the established convention. */
 async function renderSensitivityImage(result: TestResult, sizePx: number): Promise<string | null> {
   const measured = result.points
     .filter(p => p.thresholdDb != null && !p.catchTrial)
@@ -208,14 +211,31 @@ async function renderSensitivityImage(result: TestResult, sizePx: number): Promi
   src.width = sizePx
   src.height = sizePx
   const srcCtx = src.getContext('2d')!
-  srcCtx.fillStyle = '#0f172a'
+  // White background so the printed/shared PDF reads as a
+  // clinical-style page. The heatmap renderer paints only where
+  // it has data, so the unmeasured periphery shows the white bg.
+  srcCtx.fillStyle = '#ffffff'
   srcCtx.fillRect(0, 0, sizePx, sizePx)
 
+  const dbCeiling = result.calibration.brightnessFloor > 0
+    ? -10 * Math.log10(result.calibration.brightnessFloor)
+    : undefined
   renderSensitivityToCanvas(
     srcCtx,
     measured,
     sizePx,
     result.calibration.maxEccentricityDeg,
+    dbCeiling,
+  )
+
+  // Chrome overlay: rings, degree labels, cardinal direction labels.
+  // Draw straight onto the same canvas — saves a compositing pass
+  // and the rings sit cleanly on top of the heatmap.
+  drawSensitivityChrome(
+    srcCtx,
+    sizePx,
+    result.calibration.maxEccentricityDeg,
+    result.eye,
   )
 
   const dst = document.createElement('canvas')
@@ -224,6 +244,158 @@ async function renderSensitivityImage(result: TestResult, sizePx: number): Promi
   const dstCtx = dst.getContext('2d')!
   dstCtx.drawImage(src, 0, 0, sizePx * 2, sizePx * 2)
   return dst.toDataURL('image/png')
+}
+
+const SENSITIVITY_CHART_PADDING_FRAC = 40 / 400 // matches in-app SensitivityMap
+
+/** Draw the SensitivityMap's SVG-overlay chrome directly on the
+ *  canvas: concentric eccentricity rings with degree labels, plus
+ *  N / T / S / I cardinal direction labels. Sized off the canvas
+ *  dimensions so it scales with the requested sizePx. */
+function drawSensitivityChrome(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  maxEccentricityDeg: number,
+  eye: 'left' | 'right',
+): void {
+  const center = size / 2
+  const padding = size * SENSITIVITY_CHART_PADDING_FRAC
+  const radius = center - padding
+
+  const ringStep = maxEccentricityDeg <= 15 ? 3 : 10
+  const rings: number[] = []
+  for (let r = ringStep; r <= maxEccentricityDeg + 0.5; r += ringStep) {
+    rings.push(r)
+  }
+
+  // Dashed concentric rings — dark stroke for contrast against the
+  // greyscale heatmap, matching the in-app SVG overlay style.
+  ctx.strokeStyle = 'rgba(0,0,0,0.5)'
+  ctx.lineWidth = Math.max(1, size * 0.0025)
+  ctx.setLineDash([Math.max(2, size * 0.006), Math.max(3, size * 0.01)])
+  for (const r of rings) {
+    const px = (r / maxEccentricityDeg) * radius
+    ctx.beginPath()
+    ctx.arc(center, center, px, 0, Math.PI * 2)
+    ctx.stroke()
+  }
+  ctx.setLineDash([])
+
+  // Degree labels on the rings, top-right of each ring
+  ctx.fillStyle = 'rgba(0,0,0,0.85)'
+  ctx.font = `${Math.round(size * 0.025)}px sans-serif`
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'alphabetic'
+  for (const r of rings) {
+    const px = (r / maxEccentricityDeg) * radius
+    ctx.fillText(`${r}°`, center + px + size * 0.008, center - size * 0.008)
+  }
+
+  // Cardinal labels (N/T/S/I). Eye determines whether the temporal
+  // side is the right or left of the chart.
+  const temporalLabel = eye === 'right' ? 'T' : 'N'
+  const nasalLabel = eye === 'right' ? 'N' : 'T'
+  ctx.fillStyle = 'rgba(0,0,0,0.9)'
+  ctx.font = `bold ${Math.round(size * 0.035)}px sans-serif`
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(nasalLabel, padding / 2, center)
+  ctx.fillText(temporalLabel, size - padding / 2, center)
+  ctx.fillText('S', center, padding / 2)
+  ctx.fillText('I', center, size - padding / 2)
+}
+
+/** Render the threshold-numbers grid (one dB value per measured
+ *  location, laid out at the location's projected (x, y) position)
+ *  to a PNG data URL. Mirrors the in-app HFAResultsView's threshold
+ *  block. Returns null when the result has no per-location
+ *  thresholdDb. */
+async function renderThresholdGridImage(result: TestResult, sizePx: number): Promise<string | null> {
+  const measured = result.points
+    .filter(p => p.thresholdDb != null && !p.catchTrial)
+  if (measured.length === 0) return null
+
+  // Snap rendering to the data's max eccentricity (+ a small buffer)
+  // rather than the screen's maxEccentricityDeg — keeps the grid
+  // visually packed for 10-2 results instead of vast empty space.
+  const dataMaxEcc = Math.max(...measured.map(p => p.eccentricityDeg))
+  const extentDeg = Math.max(1, dataMaxEcc) * 1.15
+
+  const canvas = document.createElement('canvas')
+  canvas.width = sizePx
+  canvas.height = sizePx
+  const ctx = canvas.getContext('2d')!
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, sizePx, sizePx)
+
+  const center = sizePx / 2
+  // 1 unit in viewBox-degrees → this many pixels:
+  const pxPerDeg = (sizePx / 2) / extentDeg
+
+  // Axis crosshair — full-width horizontal + vertical at fixation
+  ctx.strokeStyle = 'rgba(0,0,0,0.25)'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(0, center)
+  ctx.lineTo(sizePx, center)
+  ctx.moveTo(center, 0)
+  ctx.lineTo(center, sizePx)
+  ctx.stroke()
+
+  // Numbers
+  const fontSize = Math.max(10, Math.round(sizePx / extentDeg * 0.8))
+  ctx.fillStyle = '#000000'
+  ctx.font = `${fontSize}px ui-monospace, "SF Mono", monospace`
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  for (const p of measured) {
+    const rad = (p.meridianDeg * Math.PI) / 180
+    const x = center + Math.cos(rad) * p.eccentricityDeg * pxPerDeg
+    // Screen y-axis inverted: + ecc points up visually, so subtract.
+    const y = center - Math.sin(rad) * p.eccentricityDeg * pxPerDeg
+    ctx.fillText(p.thresholdDb!.toFixed(0), x, y)
+  }
+
+  // Upscale to 2× for crisp embedding
+  const dst = document.createElement('canvas')
+  dst.width = sizePx * 2
+  dst.height = sizePx * 2
+  const dstCtx = dst.getContext('2d')!
+  dstCtx.imageSmoothingEnabled = false
+  dstCtx.drawImage(canvas, 0, 0, sizePx * 2, sizePx * 2)
+  return dst.toDataURL('image/png')
+}
+
+/** Mean / PSD / hemifield-asymmetry indices for a static result.
+ *  Mirrors HFAResultsView.computeIndices — both call sites compute
+ *  the same numbers, so the PDF and in-app reads can't diverge. */
+function computeStaticIndices(points: TestPoint[]): {
+  meanDb: number
+  psd: number
+  asymmetry: number | null
+} {
+  const measured = points.filter(p => p.thresholdDb != null && Number.isFinite(p.thresholdDb) && !p.catchTrial)
+  if (measured.length === 0) return { meanDb: 0, psd: 0, asymmetry: null }
+  const dbs = measured.map(p => p.thresholdDb!)
+  const meanDb = dbs.reduce((a, b) => a + b, 0) / dbs.length
+  const variance = dbs.reduce((a, b) => a + (b - meanDb) ** 2, 0) / dbs.length
+  const psd = Math.sqrt(variance)
+
+  const sup: number[] = []
+  const inf: number[] = []
+  for (const p of measured) {
+    const rad = (p.meridianDeg * Math.PI) / 180
+    const y = p.eccentricityDeg * Math.sin(rad)
+    if (y > 0.5) sup.push(p.thresholdDb!)
+    else if (y < -0.5) inf.push(p.thresholdDb!)
+  }
+  let asymmetry: number | null = null
+  if (sup.length > 0 && inf.length > 0) {
+    const sMean = sup.reduce((a, b) => a + b, 0) / sup.length
+    const iMean = inf.reduce((a, b) => a + b, 0) / inf.length
+    asymmetry = sMean - iMean
+  }
+  return { meanDb, psd, asymmetry }
 }
 
 // ── PDF text helpers ──
@@ -271,6 +443,11 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
   const isDemo = options?.isDemo ?? false
   const visionSimImage = options?.visionSimImage
   const isBinocular = options?.binocular ?? false
+  // Which map/report vocabulary to render is determined by test type:
+  // Goldmann produces isopters; Static threshold produces per-location
+  // dB values. Keep this near the top so the info table does not use
+  // Goldmann "detected points" language for static tests.
+  const showGoldmannMap = isGoldmannResult(result)
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
   const pageW = doc.internal.pageSize.getWidth()
   const pageH = doc.internal.pageSize.getHeight()
@@ -321,14 +498,36 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
   const dateStr = testDate.toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' })
   const timeStr = testDate.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
 
-  const info = [
+  const info: string[][] = [
     ['Eye tested:', eyeLabel],
     ['Date:', `${dateStr} at ${timeStr}`],
     ['Viewing distance:', `${result.calibration.viewingDistanceCm} cm`],
     ['Max eccentricity:', `${result.calibration.maxEccentricityDeg.toFixed(1)} deg`],
-    ['Total test points:', `${result.points.length}`],
-    ['Detected points:', `${result.points.filter(p => p.detected).length}`],
   ]
+
+  if (showGoldmannMap) {
+    info.push(
+      ['Total test points:', `${result.points.length}`],
+      ['Detected points:', `${result.points.filter(p => p.detected).length}`],
+    )
+  } else {
+    const measured = result.points.filter(p => p.thresholdDb != null && Number.isFinite(p.thresholdDb) && !p.catchTrial)
+    const dbs = measured.map(p => p.thresholdDb!)
+    const lowSensitivity = dbs.filter(db => db < 10).length
+    const nearCeiling = dbs.filter(db => db >= 34).length
+    const presented = result.gridCoverage?.presentedLocations ?? measured.length
+    info.push(
+      ['Measured locations:', `${measured.length}/${presented}`],
+      ['Low-sensitivity locations:', `${lowSensitivity} below 10 dB`],
+      ['Near-ceiling locations:', `${nearCeiling} at or above 34 dB`],
+    )
+    if (result.gridCoverage && result.gridCoverage.presentedLocations < result.gridCoverage.totalLocations) {
+      info.push([
+        'Grid coverage:',
+        `${result.gridCoverage.presentedLocations}/${result.gridCoverage.totalLocations} locations presented`,
+      ])
+    }
+  }
 
   const reliabilityIdx = computeReliabilityIndices(result)
   if (reliabilityIdx.fa) {
@@ -359,47 +558,42 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
   }
   y += 4
 
-  // Isopter areas table
-  y = drawSection(doc, 'Isopter Areas', y, margin)
+  if (showGoldmannMap) {
+    // Isopter areas table
+    y = drawSection(doc, 'Isopter Areas', y, margin)
 
-  doc.setFillColor(245, 245, 245)
-  doc.rect(margin, y - 3.5, pageW - 2 * margin, 5, 'F')
-  doc.setFont('helvetica', 'bold')
-  doc.setFontSize(8)
-  doc.setTextColor(60, 60, 60)
-  doc.text('Isopter', margin + 2, y)
-  doc.text('Size', margin + 30, y)
-  doc.text('Intensity', margin + 55, y)
-  doc.text('Area (deg2)', margin + 85, y)
-  doc.text('Equiv. radius', margin + 115, y)
-  doc.text('Points', margin + 145, y)
-  y += 5
+    doc.setFillColor(245, 245, 245)
+    doc.rect(margin, y - 3.5, pageW - 2 * margin, 5, 'F')
+    doc.setFont('helvetica', 'bold')
+    doc.setFontSize(8)
+    doc.setTextColor(60, 60, 60)
+    doc.text('Isopter', margin + 2, y)
+    doc.text('Size', margin + 30, y)
+    doc.text('Intensity', margin + 55, y)
+    doc.text('Area (deg2)', margin + 85, y)
+    doc.text('Equiv. radius', margin + 115, y)
+    doc.text('Points', margin + 145, y)
+    y += 5
 
-  doc.setFont('helvetica', 'normal')
-  for (const stim of ISOPTER_ORDER) {
-    const area = result.isopterAreas[stim]
-    const pts = result.points.filter(p => p.stimulus === stim)
-    const detected = pts.filter(p => p.detected).length
-    const def = STIMULI[stim]
+    doc.setFont('helvetica', 'normal')
+    for (const stim of ISOPTER_ORDER) {
+      const area = result.isopterAreas[stim]
+      const pts = result.points.filter(p => p.stimulus === stim)
+      const detected = pts.filter(p => p.detected).length
+      const def = STIMULI[stim]
 
-    doc.setTextColor(0, 0, 0)
-    doc.text(def.label, margin + 2, y)
-    doc.setTextColor(80, 80, 80)
-    doc.text(`${def.sizeDeg.toFixed(2)} deg`, margin + 30, y)
-    doc.text(`${(def.intensityFrac * 100).toFixed(0)}%`, margin + 55, y)
-    doc.text(area != null ? area.toFixed(0) : '-', margin + 85, y)
-    doc.text(area != null ? `~${Math.sqrt(area / Math.PI).toFixed(1)} deg` : '-', margin + 115, y)
-    doc.text(`${detected}/${pts.length}`, margin + 145, y)
-    y += 4.5
+      doc.setTextColor(0, 0, 0)
+      doc.text(def.label, margin + 2, y)
+      doc.setTextColor(80, 80, 80)
+      doc.text(`${def.sizeDeg.toFixed(2)} deg`, margin + 30, y)
+      doc.text(`${(def.intensityFrac * 100).toFixed(0)}%`, margin + 55, y)
+      doc.text(area != null ? area.toFixed(0) : '-', margin + 85, y)
+      doc.text(area != null ? `~${Math.sqrt(area / Math.PI).toFixed(1)} deg` : '-', margin + 115, y)
+      doc.text(`${detected}/${pts.length}`, margin + 145, y)
+      y += 4.5
+    }
+    y += 6
   }
-  y += 6
-
-  // Which map to render is determined by test type: Goldmann (kinetic)
-  // produces isopters → draw the visual-field / isopter plot. Static
-  // (threshold or suprathreshold grid) produces per-location sensitivity
-  // → draw the dB heatmap. Legacy results with no testType are treated
-  // as Goldmann via the shared helper.
-  const showGoldmannMap = isGoldmannResult(result)
 
   const mapSizeMm = 85
 
@@ -431,29 +625,83 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
     }
     y += 6
   } else {
-    // Sensitivity heatmap — measured dB from threshold static tests. Uses
-    // the same IDW + jet_r rendering as the on-screen SensitivityMap. If
-    // the result has no measured thresholds the section is skipped.
+    // Static (threshold) result. Mirrors the in-app HFAResultsView:
+    // threshold-numbers grid + greyscale heatmap side by side, then
+    // summary indices, then the "no TD/PD" caveat. Skipped entirely
+    // when the result has no measured thresholdDb (legacy
+    // suprathreshold static imports).
+    const thresholdImg = await renderThresholdGridImage(result, 800)
     const sensImg = await renderSensitivityImage(result, 800)
-    if (sensImg) {
-      const sensNeeded = mapSizeMm + 20
-      if (y + sensNeeded > pageH - 15) {
+    if (thresholdImg && sensImg) {
+      // Side-by-side block needs ~paneSize × 2 + gap + section
+      // header. New page if we wouldn't fit cleanly.
+      const paneSize = 70
+      const paneGap = 6
+      const totalW = paneSize * 2 + paneGap
+      const startX = (pageW - totalW) / 2
+      const sectionNeeded = paneSize + 30
+      if (y + sectionNeeded > pageH - 15) {
         doc.addPage()
         y = margin
       }
 
-      y = drawSection(doc, 'Sensitivity Map', y, margin)
+      y = drawSection(doc, 'Single Field Analysis', y, margin)
       y += 2
 
-      const sensX = (pageW - mapSizeMm) / 2
-      doc.addImage(sensImg, 'PNG', sensX, y, mapSizeMm, mapSizeMm)
-      y += mapSizeMm + 4
-
+      // Pane sublabels — "Threshold (dB)" / "Greyscale"
       doc.setFontSize(7)
+      doc.setFont('helvetica', 'bold')
+      doc.setTextColor(80, 80, 80)
+      doc.text('Threshold (dB)', startX + paneSize / 2, y + 3, { align: 'center' })
+      doc.text('Greyscale', startX + paneSize + paneGap + paneSize / 2, y + 3, { align: 'center' })
+      y += 5
+
+      doc.addImage(thresholdImg, 'PNG', startX, y, paneSize, paneSize)
+      doc.addImage(sensImg, 'PNG', startX + paneSize + paneGap, y, paneSize, paneSize)
+      y += paneSize + 3
+
+      // Greyscale legend strip — matches the in-app legend's
+      // capped range. Without `brightnessFloor` we fall back to
+      // the absolute DB_MAX (40 dB) bound.
+      const ceilDb = result.calibration.brightnessFloor > 0
+        ? Math.round(-10 * Math.log10(result.calibration.brightnessFloor))
+        : 40
+      doc.setFontSize(6)
       doc.setFont('helvetica', 'normal')
-      doc.setTextColor(100, 100, 100)
-      doc.text('-5 dB (insensitive, red)  <->  40 dB (sensitive, blue)', pageW / 2, y, { align: 'center' })
+      doc.setTextColor(110, 110, 110)
+      doc.text(
+        `Greyscale: -5 dB (insensitive)  →  ${ceilDb} dB (max measurable)`,
+        pageW / 2,
+        y + 2,
+        { align: 'center' },
+      )
       y += 6
+
+      // Summary indices — Mean dB, PSD, hemifield asymmetry.
+      const indices = computeStaticIndices(result.points)
+      doc.setFontSize(8)
+      doc.setFont('helvetica', 'bold')
+      doc.setTextColor(60, 60, 60)
+      doc.text('Summary indices', margin, y)
+      y += 4
+      doc.setFont('helvetica', 'normal')
+      doc.setTextColor(70, 70, 70)
+      const indexLines: string[] = [
+        `Mean dB: ${indices.meanDb.toFixed(1)} dB    PSD: ${indices.psd.toFixed(1)} dB`,
+      ]
+      if (indices.asymmetry !== null) {
+        const sign = indices.asymmetry > 0 ? '+' : ''
+        indexLines.push(`Hemifield Δ (S − I): ${sign}${indices.asymmetry.toFixed(1)} dB`)
+      }
+      for (const line of indexLines) {
+        doc.text(line, margin, y)
+        y += 4
+      }
+      y += 2
+
+      // Caveat about missing TD/PD plots removed per user request
+      // to match the in-app HFAResultsView. Same rationale (long
+      // wall-of-text on every result) applies to both views.
 
       if (result.gridCoverage && result.gridCoverage.presentedLocations < result.gridCoverage.totalLocations) {
         doc.setFontSize(7)
@@ -464,7 +712,7 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
           y,
           { align: 'center', maxWidth: pageW - margin * 2 },
         )
-        y += 6
+        y += 5
       }
     }
   }
@@ -532,11 +780,22 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
     y += 5
   }
 
-  // Quick summary on page 1
+  // Quick summary on page 1. Classification + III4e-isopter blurb
+  // are Goldmann-only: the classification thresholds compare the
+  // kinetic III4e isopter area to a full-field "expected normal"
+  // area. For static results, `isopterAreas['III4e']` is just the
+  // seen-points hull (a polygon over locations where the staircase
+  // converged), not a kinetic boundary — and the hull is
+  // geometrically bounded by the grid extent (a 10-2 hull caps at
+  // ~200 deg² regardless of vision), so static-Quick always
+  // dropped into the "Very severe constriction" band even with
+  // moderate-RP central vision intact. Misleading + demoralising.
+  // Static results' useful signals (Mean dB, PSD, hemifield Δ)
+  // live in the threshold/greyscale section below.
   const iii4eArea = result.isopterAreas['III4e']
   const maxEccDeg = result.calibration.maxEccentricityDeg
   const expectedArea = expectedNormalArea(maxEccDeg, result.calibration)
-  if (iii4eArea != null) {
+  if (iii4eArea != null && isGoldmannResult(result)) {
     const classification = classifyField(iii4eArea, maxEccDeg, result.calibration)
     doc.setFont('helvetica', 'bold')
     doc.setFontSize(10)
@@ -618,7 +877,10 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
   y += 4
 
   // ── Field classification ──
-  if (iii4eArea != null) {
+  // Same Goldmann-only gate as the page-1 summary. Static results
+  // can't be validly classified by the kinetic-isopter-area
+  // method — see comment at the earlier classification call.
+  if (iii4eArea != null && isGoldmannResult(result)) {
     const classification = classifyField(iii4eArea, maxEccDeg, result.calibration)
     y = drawSection(doc, 'Field Classification', y, margin)
 
@@ -712,13 +974,21 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
 
   // ── RP-specific indicators ──
   // Filtered to `present` findings to match the in-app panel — a long
-  // list of "not detected" cards is noise in a printed report.
-  const rpFindings = detectRPFindings(
-    result.points,
-    result.isopterAreas,
-    maxEccDeg,
-    result.calibration,
-  ).filter(f => f.present)
+  // list of "not detected" cards is noise in a printed report. The
+  // entire section is gated to Goldmann results: the findings logic
+  // compares kinetic isopter areas (V4e / III4e / III2e / I4e / I2e
+  // boundaries), which static-test "isopter areas" are NOT — those
+  // are seen-points hulls and aren't apples-to-apples comparable to
+  // kinetic boundaries. Showing the analysis for a static run was
+  // misleading at best and demoralising at worst.
+  const rpFindings = isGoldmannResult(result)
+    ? detectRPFindings(
+        result.points,
+        result.isopterAreas,
+        maxEccDeg,
+        result.calibration,
+      ).filter(f => f.present)
+    : []
   if (rpFindings.length > 0) {
     if (y > pageH - 40) {
       doc.addPage()
@@ -768,7 +1038,10 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
   }
 
   // ── Clinical comparison ──
-  {
+  // Goldmann-only: this compares kinetic isopter areas against
+  // kinetic demo scenarios. Static threshold maps are per-location dB
+  // estimates, so treating their grid hulls as isopters is misleading.
+  if (showGoldmannMap) {
     const scenarios = getAllScenarios()
     const scenarioAreas = scenarios.map(s => ({ ...s, areas: calcIsopterAreas(s.points) }))
 

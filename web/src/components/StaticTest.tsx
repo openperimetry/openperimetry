@@ -36,27 +36,24 @@
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import type { CalibrationData, ResultQualityMetrics, StoredEye, TestPoint, TestResult } from '../types'
+import type { CalibrationData, ResultQualityMetrics, RunSpeedMode, StoredEye, TestPoint, TestResult } from '../types'
 import { STIMULI } from '../types'
-import { SensitivityMap } from './SensitivityMap'
+import { HFAResultsView } from './HFAResultsView'
+import { PauseScreen } from './PauseScreen'
 import { SavePrompt } from './SavePrompt'
-import { WhatsAppShareButton } from './WhatsAppShareButton'
-import { APP_DOMAIN } from '../branding'
 import { dbToOpacity } from '../sensitivity'
 import {
   initStaircase,
   stepStaircase,
   type StaircaseState,
 } from '../staircase'
-import { VisionSimulator } from './VisionSimulator'
 import { saveResult, saveSurvey, hasSurveyForResult, hasBeenPromptedForFeedback, markFeedbackPrompted, getDeviceId, getDeviceInfo } from '../storage'
 import { useAuth } from '../AuthContext'
-import { trackEvent, trackEventBeacon, shareAnonymousVFResult } from '../api'
+import { trackEvent, trackEventBeacon } from '../api'
 import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { PostTestSurvey } from './PostTestSurvey'
 import type { SurveyResponse } from './PostTestSurvey'
 import { ClinicalDisclaimer } from './ClinicalDisclaimer'
-import { ScenarioOverlay } from './ScenarioOverlay'
 import { calcIsopterAreas } from '../isopterCalc'
 import { STATIC_TEST } from '../constants'
 import { formatEyeLabel } from '../eyeLabels'
@@ -66,6 +63,7 @@ import { stimulusDisplayColor } from '../stimulusDisplay'
 import { SPEED_PRESETS } from '../testDefaults'
 import { useAdvancedSettings } from '../advancedSettings'
 import { useStudyMode } from '../studyMode'
+import { isPhoneLikeDevice } from '../deviceMode'
 import {
   getStaticGrid,
   type GridPoint,
@@ -90,9 +88,6 @@ const RESCUE_AFTER_MISSES = 5
 /** Starting dB for every staircase. 0 = maximum on-screen brightness. */
 const PRIOR_DB = 0
 
-/** localStorage key guarding against double-upload of an anonymous share. */
-const sharedFlagKey = (resultId: string) => `vfc-shared-result-${resultId}`
-
 // 'position-check' is a one-shot pre-flight fired when the user taps Ready
 // in the instructions phase. The patient has just read the sitting
 // instructions (HeadGuide + "cover your X eye, sit at Y cm"), so the
@@ -104,9 +99,7 @@ type Phase = 'instructions' | 'position-check' | 'countdown' | 'testing' | 'paus
 // "press Space" copy in the instructions and pause screens is just
 // noise there. Computed once at module load — orientation doesn't
 // change whether the device has a hardware keyboard.
-const isMobileDevice = typeof navigator !== 'undefined'
-  && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
-  && navigator.maxTouchPoints > 0
+const isMobileDevice = isPhoneLikeDevice()
 
 interface Props {
   eye: StoredEye
@@ -114,16 +107,30 @@ interface Props {
   extendedField: boolean
   onDone: () => void
   onComplete?: (points: TestPoint[]) => void
-  /** Timing preset selected from the home-screen toggle. Defaults to
-   *  'normal' (the faster pace — the new default). 'slow' uses longer
-   *  timings and more staircase reversals. An explicit Advanced
-   *  Settings speed-preset override still wins over this prop. */
-  speedMode?: 'normal' | 'slow'
+  /** Pace selected from the home-screen toggle.
+   *
+   *  - `'normal'` / `'slow'` — same 24-2 grid (or whatever the user
+   *    chose in Advanced Settings); `'slow'` uses longer per-trial
+   *    timings and more staircase reversals.
+   *  - `'quick'` — scope shrink: forces the 10-2 grid (central ±9°
+   *    only) regardless of the Advanced Settings selection. Timing /
+   *    reversal count borrow the `'normal'` preset (a quick scan is
+   *    about smaller spatial scope, not about racing through each
+   *    location). Best for tracking macular involvement; **not**
+   *    suitable for RP peripheral-field monitoring — the 10-2's
+   *    central 10° is the part RP preserves longest. The Ready
+   *    screen surfaces that caveat. */
+  speedMode?: RunSpeedMode
 }
 
 export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = 'normal' }: Props) {
   const { user, syncResults } = useAuth()
   const { pixelsPerDegree, maxEccentricityDeg, fixationOffsetPx } = calibration
+  // `presetKey` resolves the SPEED_PRESETS lookup. Quick uses the
+  // same per-trial timings + reversal count as Normal; the time
+  // savings come from running fewer locations (10-2 instead of 24-2),
+  // not from racing through each one.
+  const presetKey: 'normal' | 'slow' = speedMode === 'quick' ? 'normal' : speedMode
 
   // Fixation-dot sizing — fixed px so the countdown dot and the test-phase
   // dot match size, and the first flashFixation() call doesn't visibly
@@ -136,8 +143,15 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
   // ---------- advanced settings ----------
   const advanced = useAdvancedSettings()
   const studyMode = useStudyMode()
-  const gridPattern: StaticGridPattern = advanced.staticGridPattern
-  const customGrid = advanced.customGrid
+  // Quick scan forces the 10-2 grid (central ±9° only — for macular
+  // tracking) regardless of the user's Advanced Settings grid
+  // preference. This is the scope-shrink that earns the ~3-4 min
+  // duration; without it Quick would be indistinguishable from
+  // Normal. Custom grid is dropped in Quick (10-2 is the fixed
+  // central-field option). Normal/Slow honour the user's grid
+  // selection as before.
+  const gridPattern: StaticGridPattern = speedMode === 'quick' ? '10-2' : advanced.staticGridPattern
+  const customGrid = speedMode === 'quick' ? undefined : advanced.customGrid
   // Ref mirror so tracking callbacks (unmount cleanup, async trackEvent)
   // can read the grid pattern without adding it to their deps and causing
   // spurious re-runs.
@@ -160,36 +174,70 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
         responseMs: advanced.speedPreset.responseMs,
         gapMinMs: advanced.speedPreset.gapMinMs,
         gapMaxMs: advanced.speedPreset.gapMaxMs,
-        reversalsRequired: SPEED_PRESETS[speedMode].reversalsRequired,
+        reversalsRequired: SPEED_PRESETS[presetKey].reversalsRequired,
       }
-    : SPEED_PRESETS[speedMode]
+    : SPEED_PRESETS[presetKey]
 
   const fixationXY = { x: fixationOffsetPx, y: 0 }
 
   // ---------- grid coverage ----------
   // The HFA grids are defined in visual-angle degrees (±27° for 24-2,
-  // ±30° for 30-2, ±10° for 10-2). When `maxEccentricityDeg` — the field
-  // actually reachable on the calibrated screen at the current viewing
-  // distance — is smaller than the grid's outermost radius, those outer
-  // locations cannot be presented. Filter them out rather than firing
-  // stimuli off-screen (which would otherwise converge to a bogus "not
-  // seen" for the patient).
+  // ±30° for 30-2, ±10° for 10-2). Each location has to land inside the
+  // visible viewport when projected with the same `degToPx` +
+  // `fixationOffsetPx` math the renderer uses — otherwise the dot
+  // flashes off-screen and the staircase converges to a bogus
+  // "not seen" the patient never had a chance to detect.
+  //
+  // The earlier version filtered by a single scalar
+  // `r <= maxEccentricityDeg`, where `maxEccentricityDeg` is the
+  // *furthest* edge distance from fixation. That kept points whose
+  // actual rendered position fell off the opposite (closer) edge — the
+  // problem is acute with fixation shifted 20% toward the nose, which
+  // leaves the nasal field covering only ~30% of screen width while
+  // the temporal field gets ~70%. A point at (-15°, 9°) clears
+  // `r=17.5 ≤ 22°` even though only ~9° of nasal space exists. Result:
+  // ~⅓ of 24-2 locations rendered off-screen at typical desktop
+  // geometries. Direction-aware projection fixes this.
+  //
+  // Viewport dimensions are read from `window` (matched by the resize
+  // listener below) rather than `calibration.screenWidthPx`, because
+  // the renderer positions stimuli relative to the *live* viewport
+  // (`top:50% / left:50%`) — not the screen the calibration was
+  // captured at. A browser windowed below screen size, or fullscreen
+  // entering between calibration and test, would otherwise diverge.
+  const [viewportTick, setViewportTick] = useState(0)
+  useEffect(() => {
+    const onResize = () => setViewportTick(t => t + 1)
+    window.addEventListener('resize', onResize)
+    window.addEventListener('orientationchange', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      window.removeEventListener('orientationchange', onResize)
+    }
+  }, [])
   const gridCoverage = useMemo(() => {
+    void viewportTick
+    const screenW = typeof window !== 'undefined' ? window.innerWidth : 0
+    const screenH = typeof window !== 'undefined' ? window.innerHeight : 0
     const fullGrid = getStaticGrid(
       gridPattern,
       eye,
       gridPattern === 'custom' ? customGrid : undefined,
     )
     const fitting = fullGrid.filter(p => {
-      const r = Math.sqrt(p.xDeg * p.xDeg + p.yDeg * p.yDeg)
-      return r <= maxEccentricityDeg
+      const offsetXPx = degToPx(p.xDeg, calibration)
+      const offsetYPx = degToPx(p.yDeg, calibration)
+      const absX = screenW / 2 + fixationOffsetPx + offsetXPx
+      const absY = screenH / 2 - offsetYPx
+      return absX >= 0 && absX <= screenW
+        && absY >= 0 && absY <= screenH
     })
     return {
       totalLocations: fullGrid.length,
       grid: fitting,
       dropped: fullGrid.length - fitting.length,
     }
-  }, [gridPattern, eye, customGrid, maxEccentricityDeg])
+  }, [gridPattern, eye, customGrid, calibration, fixationOffsetPx, viewportTick])
 
   // ---------- phase ----------
   const [phase, setPhase] = useState<Phase>('instructions')
@@ -243,18 +291,11 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
   // user signs in *after* finishing the test. saveResult no-ops for
   // anonymous users.
   const lastResultRef = useRef<TestResult | null>(null)
-  const [showVisionSim, setShowVisionSim] = useState(false)
   const [surveyDone, setSurveyDone] = useState(false)
   // Active-prompt feedback modal — fires once per device, on either
   // Done or Export PDF. `'done'` runs handleDone() on close; `'pdf'`
   // closes the modal in place so the user keeps seeing the results.
   const [feedbackTrigger, setFeedbackTrigger] = useState<'done' | 'pdf' | null>(null)
-  // Anonymous-share state for the opt-in "Share to help improve" button.
-  // Separate from `savedId` (local save) — "shared" means uploaded to the
-  // server for maintainer debugging, which is opt-in and privacy-policy-
-  // gated. Persisted in localStorage so a refresh doesn't re-offer a
-  // result that's already been uploaded.
-  const [shareState, setShareState] = useState<'idle' | 'sharing' | 'shared' | 'error'>('idle')
 
   // ---------- tracking ----------
   const startedTrackedRef = useRef(false)
@@ -465,7 +506,12 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
       responseTimeoutRef.current = setTimeout(() => {
         if (!respondedRef.current && currentStaircaseKeyRef.current === thePoint.key) {
           hideStimulus()
-          flashFixation('#ef4444', 200)
+          // No fixation flash on miss. Missing dots is the *normal* state
+          // of a static perimetry trial (it's literally how the staircase
+          // walks dimmer), and a red flash made every dimming step feel
+          // like a failure — demoralising on a self-test, and a fresh
+          // peripheral red flicker also pulls saccades away from
+          // fixation, which is exactly what we don't want.
           if (theRescue) {
             // Rescue miss: unusual, but don't feed the staircase. Reset
             // the streak regardless so we don't loop rescues forever.
@@ -493,7 +539,6 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
     finishTest,
     showStimulus,
     hideStimulus,
-    flashFixation,
     recordThresholdPoint,
     countPendingStaircases,
     sp.gapMaxMs,
@@ -658,6 +703,25 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
     setCountdown(3)
   }, [])
 
+  // ---------- restart ----------
+  // "Restart from the beginning" out of the pause menu. Crucially this
+  // must NOT trip the abort path: the user *chose* to start over (often
+  // because the early presentations felt frustrating), they didn't
+  // abandon the test. Resetting `startedTrackedRef` before calling
+  // `startTest` keeps the unmount/pagehide guard
+  // (`started && !completed && !abortDispatched`) inert for the
+  // discarded attempt; the new attempt re-fires `test_started` on its
+  // own countdown→testing transition, so telemetry tracks the fresh
+  // run from its actual start time. `startTest` itself re-initialises
+  // staircases, queue, results, counters and rescue/FP state, so the
+  // restarted run is indistinguishable from a cold launch.
+  const handleRestart = useCallback(() => {
+    clearAllTimeouts()
+    startedTrackedRef.current = false
+    testStartedAtRef.current = null
+    startTest()
+  }, [clearAllTimeouts, startTest])
+
   // ---------- countdown ----------
   useEffect(() => {
     if (phase !== 'countdown') return
@@ -798,12 +862,14 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
 
   const handleSave = () => {
     // Static points are tagged stimulus='III4e' and `detected=true` for
-    // every location where the staircase converged. Running them through
-    // calcIsopterAreas produces a III4e-equivalent visible-field area so
-    // the ScenarioOverlay (kinetic clinical references keyed on III4e /
-    // V4e areas) has something meaningful to compare against. Previously
-    // we saved isopterAreas={} which made the scenario picker always
-    // land on "Normal" regardless of actual result quality.
+    // every location where the staircase converged. We still run them
+    // through calcIsopterAreas so a III4e seen-points area lands in
+    // the saved record — the III4e-over-time chart on the History
+    // page uses it, and the (Goldmann-only) clinical scenario
+    // comparison reads from this field too. The scenario comparison
+    // itself is no longer shown on the static results page because
+    // the static seen-points hull and the kinetic isopter boundary
+    // are different things and can't be apples-to-apples compared.
     const qualityMetrics: ResultQualityMetrics = {
       falsePositiveIsiPresses: fpIsiPressesRef.current,
       rescueTrialsFired: rescueFiredRef.current,
@@ -843,11 +909,6 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
     lastResultRef.current = result
     saveResult(result)
     setSavedId(result.id)
-    // If this result was previously shared (unlikely on fresh id, but
-    // harmless to check), skip the offer to re-share.
-    if (localStorage.getItem(sharedFlagKey(result.id)) === '1') {
-      setShareState('shared')
-    }
   }
 
   // If the user signs in after finishing the test (via SavePrompt on the
@@ -858,59 +919,6 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
     saveResult(lastResultRef.current)
     syncResults()
   }, [user, syncResults])
-
-  /** Anonymous upload — opt-in, fires only when the user taps the
-   *  "Share anonymous result" button on the results screen. Payload is
-   *  the full TestResult JSON; storage key on the server is the device
-   *  UUID, not an account. Persist a localStorage flag so a page reload
-   *  doesn't offer the same result twice. */
-  const handleShareAnonymous = async () => {
-    if (!savedId || shareState === 'sharing' || shareState === 'shared') return
-    setShareState('sharing')
-    const qualityMetrics: ResultQualityMetrics = {
-      falsePositiveIsiPresses: fpIsiPressesRef.current,
-      rescueTrialsFired: rescueFiredRef.current,
-      truePositiveResponses: results.length,
-    }
-    const result: TestResult = {
-      id: savedId,
-      eye,
-      date: new Date().toISOString(),
-      points: results,
-      isopterAreas: calcIsopterAreas(results),
-      calibration,
-      testType: 'static',
-      testMode: 'threshold',
-      durationSeconds: getTestDurationSeconds(),
-      protocol: buildProtocolSnapshot({
-        studyMode,
-        testType: 'static',
-        testMode: 'threshold',
-        speedMode,
-        staticGridPattern: gridPattern,
-        advancedSettings: advanced,
-      }),
-      ...(buildStudyMetadata(studyMode) ? { study: buildStudyMetadata(studyMode) } : {}),
-      device: captureDeviceMetadata(),
-      provenance: buildNativeProvenance(),
-      ...(buildQualityMetrics(qualityMetrics) ? { qualityMetrics: buildQualityMetrics(qualityMetrics) } : {}),
-    }
-    try {
-      await shareAnonymousVFResult(
-        {
-          id: result.id,
-          eye: result.eye,
-          date: result.date,
-          data: JSON.stringify(result),
-        },
-        getDeviceId(),
-      )
-      localStorage.setItem(sharedFlagKey(result.id), '1')
-      setShareState('shared')
-    } catch {
-      setShareState('error')
-    }
-  }
 
   // ==================== RENDER ====================
 
@@ -938,11 +946,13 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
             <p>5. It's <em>normal</em> to miss many flashes — that's how the test finds your threshold</p>
           </div>
 
-          {!isMobileDevice && (
-            <p className="text-xs text-gray-500">
-              Press <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-[10px] font-mono text-gray-300">Esc</kbd> any time to pause the test or exit.
-            </p>
-          )}
+          <p className="text-xs text-gray-500">
+            {isMobileDevice ? (
+              <>Tap the <span className="text-yellow-400">yellow dot</span> any time to pause the test or exit.</>
+            ) : (
+              <>Press <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-[10px] font-mono text-gray-300">Esc</kbd> any time to pause the test or exit.</>
+            )}
+          </p>
 
           <p className="text-xs text-gray-500">
             Self-monitoring tool, not a clinical diagnosis. Always consult your ophthalmologist.
@@ -954,10 +964,10 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
               className="text-left text-sm bg-amber-900/30 border border-amber-600/50 rounded-lg px-4 py-3 text-amber-200"
             >
               <strong className="block mb-1">Grid not fully covered</strong>
-              At this viewing distance your screen reaches ±{maxEccentricityDeg.toFixed(0)}° eccentricity, so{' '}
               {gridCoverage.dropped} of {gridCoverage.totalLocations} locations in the{' '}
-              {gridPattern === 'custom' ? 'custom' : `HFA ${gridPattern}`} pattern fall outside the display and will be
-              skipped. Sit closer to the screen (and recalibrate) to cover more of the pattern.
+              {gridPattern === 'custom' ? 'custom' : `HFA ${gridPattern}`} pattern fall outside your
+              screen at this viewing distance and will be skipped. Sit closer to the screen
+              (and recalibrate) to cover more of the pattern.
             </div>
           )}
 
@@ -1019,58 +1029,24 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
 
   if (phase === 'paused') {
     // Completed so far = number of staircases that already have a
-    // recorded threshold.
+    // recorded threshold. Stop-and-view-results lands the user on the
+    // results phase even with zero converged points; the results render
+    // shows an empty-state instead of silently bouncing them home.
     const done = thresholdResultsRef.current.length
     const progressPct = totalPoints > 0 ? (done / totalPoints) * 100 : 0
     return (
-      <div className={`min-h-screen ${bgClass} text-white flex items-center justify-center select-none p-6`}>
-        <main className="text-center space-y-6 max-w-sm w-full">
-          <h1 className="text-2xl font-semibold">Paused</h1>
-          <p className="text-gray-400 text-sm">
-            {done} / {totalPoints} points measured
-          </p>
-
-          {/* Progress bar — matches GoldmannTest pause screen. Teal owns
-              forward-motion indicators in this app's palette. */}
-          <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-teal transition-all duration-300"
-              style={{ width: `${progressPct}%` }}
-            />
-          </div>
-
-          <div className="space-y-3 pt-2">
-            <button
-              onClick={resume}
-              className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
-            >
-              Resume
-            </button>
-            <button
-              onClick={() => {
-                // Always go to the results phase, even when no staircase has
-                // converged yet — otherwise the user thinks "view results"
-                // silently sent them home. The results screen renders an
-                // empty-state when there is nothing to show.
-                setResults([...thresholdResultsRef.current])
-                setPhase('results')
-              }}
-              className="w-full py-3 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm text-gray-300 transition-colors"
-            >
-              Stop test &amp; view results
-            </button>
-            <button onClick={handleDone} className="text-gray-500 hover:text-gray-300 text-sm">
-              Quit without viewing results
-            </button>
-          </div>
-
-          {!isMobileDevice && (
-            <p className="text-xs text-gray-600">
-              Press <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-xs">Esc</kbd> or <kbd className="px-1.5 py-0.5 bg-gray-800 rounded text-xs">Space</kbd> to resume
-            </p>
-          )}
-        </main>
-      </div>
+      <PauseScreen
+        bgClass={bgClass}
+        progressText={`${done} / ${totalPoints} points measured`}
+        progressPct={progressPct}
+        onResume={resume}
+        onRestart={handleRestart}
+        onStop={() => {
+          setResults([...thresholdResultsRef.current])
+          setPhase('results')
+        }}
+        onQuit={handleDone}
+      />
     )
   }
 
@@ -1126,16 +1102,21 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
     return (
       <div className={`min-h-screen ${bgClass} text-white p-6 overflow-y-auto`}>
         <main className="max-w-lg mx-auto space-y-6 pb-12">
-          <h1 className="text-2xl font-semibold text-center">Results</h1>
-          <p className="text-center text-xs text-gray-500">
-            {gridPattern === 'custom' ? 'Custom' : `HFA ${gridPattern}`} · {formatEyeLabel(eye)}
-          </p>
           {savedId && <SavePrompt />}
-          <SensitivityMap
-            points={measuredDbPoints}
+          {/* HFA-style result page — threshold map, greyscale plot,
+              and summary indices laid out the same way a Humphrey
+              Single Field Analysis prints them. Replaces the prior
+              ad-hoc heatmap-plus-scenario layout. */}
+          <HFAResultsView
+            points={results}
             eye={eye}
-            maxEccentricity={maxEccentricityDeg}
-            size={Math.min(600, window.innerWidth - 48)}
+            gridPattern={gridPattern}
+            date={lastResultRef.current?.date}
+            durationSeconds={getTestDurationSeconds()}
+            brightnessFloor={calibration.brightnessFloor}
+            maxEccentricityDeg={maxEccentricityDeg}
+            fpIsiPresses={fpIsiPressesRef.current}
+            truePositiveResponses={results.length}
           />
           {gridCoverage.dropped > 0 && (
             <p className="text-center text-xs text-amber-400">
@@ -1144,101 +1125,12 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
             </p>
           )}
           <ClinicalDisclaimer variant="results" />
-          {/* Clinical comparison — parity with Goldmann and binocular
-              results screens. ScenarioOverlay matches on III4e/V4e
-              isopter areas; for static tests we derive a III4e-
-              equivalent area from the detected grid points above (see
-              handleSave) so the picker can pick a meaningful closest
-              reference. */}
-          <ScenarioOverlay
-            userPoints={results}
-            userAreas={calcIsopterAreas(results)}
-            maxEccentricity={maxEccentricityDeg}
-          />
-          {!showVisionSim ? (
-            <button
-              onClick={() => setShowVisionSim(true)}
-              className="w-full py-3 bg-gray-900 hover:bg-gray-800 rounded-xl font-medium transition-colors border border-gray-800 hover:border-gray-700 text-sm"
-            >
-              <svg className="inline w-4 h-4 mr-1.5 -mt-0.5 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
-                <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
-                <circle cx="12" cy="12" r="3" />
-              </svg>
-              Vision simulation
-            </button>
-          ) : (
-            <div className="space-y-2">
-              <button onClick={() => setShowVisionSim(false)} className="text-xs text-gray-500 hover:text-gray-300 transition-colors">
-                ▾ Hide vision simulation
-              </button>
-              <VisionSimulator points={results} eye={eye} maxEccentricity={maxEccentricityDeg} />
-            </div>
-          )}
-          {savedId && !surveyDone && !hasSurveyForResult(savedId) && (
-            <details className="group">
-              <summary className="cursor-pointer text-center text-sm text-gray-400 hover:text-gray-300 transition-colors py-2 list-none">
-                <svg className="inline w-4 h-4 mr-1.5 -mt-0.5 text-gray-500 group-open:rotate-90 transition-transform" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                  <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clipRule="evenodd" />
-                </svg>
-                Quick feedback (optional)
-              </summary>
-              <div className="mt-3">
-                <PostTestSurvey
-                  onSubmit={(response: SurveyResponse) => {
-                    saveSurvey(savedId, response)
-                    setSurveyDone(true)
-                  }}
-                  onSkip={() => setSurveyDone(true)}
-                />
-              </div>
-            </details>
-          )}
+          {/* Prior content here was the RP scenario comparison and a
+              "Vision simulation" expander. Both have been removed —
+              see commits e7fefa7 (scenario picker) and b8ec08f
+              (vision simulator) for the rationale. */}
           {surveyDone && (
             <p className="text-center text-green-400 text-xs">Thank you for your feedback!</p>
-          )}
-
-          {/* Anonymous share — opt-in only. Keeps the "nothing is sent"
-              promise in the privacy policy intact for users who don't tap.
-              Uses the same device UUID convention as anonymous surveys. */}
-          {savedId && (
-            <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs text-zinc-400 space-y-2">
-              {shareState === 'idle' && (
-                <>
-                  <p className="leading-relaxed">
-                    Help improve the tool: share this result anonymously.
-                    Only the point data, calibration, and a random device ID
-                    are uploaded — no name, email, or IP.
-                  </p>
-                  <button
-                    onClick={handleShareAnonymous}
-                    className="w-full py-2 bg-gray-800 hover:bg-gray-700 rounded-md text-sm text-gray-200 transition-colors"
-                  >
-                    Share anonymous result
-                  </button>
-                </>
-              )}
-              {shareState === 'sharing' && (
-                <p className="text-center text-gray-300">Uploading…</p>
-              )}
-              {shareState === 'shared' && (
-                <p className="text-center text-green-400">
-                  Shared — thank you, this helps a lot.
-                </p>
-              )}
-              {shareState === 'error' && (
-                <div className="space-y-1">
-                  <p className="text-center text-red-300">
-                    Upload failed. No data was sent.
-                  </p>
-                  <button
-                    onClick={() => setShareState('idle')}
-                    className="w-full py-1.5 bg-gray-800 hover:bg-gray-700 rounded-md text-xs text-gray-200 transition-colors"
-                  >
-                    Try again
-                  </button>
-                </div>
-              )}
-            </div>
           )}
 
           <div className="flex gap-3">
@@ -1269,9 +1161,6 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
               Done
             </button>
           </div>
-          <WhatsAppShareButton
-            message={`I just took a free static visual-field self-test on ${APP_DOMAIN} (${eye === 'right' ? 'right eye / OD' : 'left eye / OS'}). Try it yourself:`}
-          />
         </main>
 
         {feedbackTrigger && (
@@ -1372,6 +1261,38 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
           zIndex: 10,
         }}
       />
+
+      {/* Mobile pause hit-target — keyboardless devices have no Esc, and a
+          persistent pause button anywhere on screen would pull the eye away
+          from fixation (the very thing we need it to do *not*). The fovea
+          is the one place the user is already looking, so a tap on the
+          fixation dot is the natural pause trigger. 44×44 matches the iOS
+          minimum tappable size; smaller targets force the user to look down
+          at their finger to aim, which defeats the point. stopPropagation
+          stops the outer "saw a stimulus" handler from also firing.
+          Static 24-2's innermost points sit at r≈4°, well outside this
+          ~½° hit zone at typical viewing distances, so it doesn't intercept
+          real responses. */}
+      {isMobileDevice && (
+        <div
+          role="button"
+          aria-label="Pause test"
+          className="absolute"
+          style={{
+            top: '50%',
+            left: '50%',
+            width: 44,
+            height: 44,
+            marginLeft: -22 + fixationXY.x,
+            marginTop: -22 + fixationXY.y,
+            zIndex: 11,
+          }}
+          onPointerDown={e => {
+            e.stopPropagation()
+            pauseTest()
+          }}
+        />
+      )}
 
       {/* Active stimulus */}
       <div

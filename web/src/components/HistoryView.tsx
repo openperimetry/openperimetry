@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import type { TestResult } from '../types'
 import { STIMULI, ISOPTER_ORDER, isGoldmannResult } from '../types'
-import { getResults, deleteResult, saveResult, saveSurvey, hasSurveyForResult } from '../storage'
+import { getResults, deleteResult, removeTombstone, saveResult, saveSurvey, hasSurveyForResult } from '../storage'
 import { VisualFieldMap } from './VisualFieldMap'
-import { SensitivityMap } from './SensitivityMap'
+import { HFAResultsView } from './HFAResultsView'
+import type { StaticGridPattern } from '../grids'
 import { Interpretation } from './Interpretation'
-import { VisionSimulator } from './VisionSimulator'
 import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { downloadOvfx, parseOvfxFile, OvfxImportError } from '../ovfx'
 import { useAuth } from '../AuthContext'
@@ -37,7 +37,13 @@ function describeProtocol(result: TestResult): string[] {
   if (protocol.label) out.push(`${protocol.label}${protocol.version ? ` (v${protocol.version})` : ''}`)
   out.push(protocol.testType === 'static' ? 'Static' : 'Goldmann')
   if (protocol.testMode) out.push(protocol.testMode)
-  if (protocol.speedMode) out.push(protocol.speedMode === 'slow' ? 'Slow pace' : 'Normal pace')
+  if (protocol.speedMode) {
+    out.push(
+      protocol.speedMode === 'slow' ? 'Slow pace'
+        : protocol.speedMode === 'quick' ? 'Quick scan'
+          : 'Normal pace',
+    )
+  }
   if (protocol.staticGridPattern) out.push(`Grid ${protocol.staticGridPattern}`)
   if (protocol.extendedField != null) out.push(protocol.extendedField ? 'Extended field on' : 'Extended field off')
   return out
@@ -76,7 +82,12 @@ export function HistoryView({ onBack }: Props) {
     getResults().sort((a, b) => b.date.localeCompare(a.date))
   )
   const [selected, setSelected] = useState<TestResult | null>(null)
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  // Pending delete-confirmation target. Single-eye results hold one id;
+  // binocular pair-cards in the list hold both ids so a single confirm
+  // tap nukes both eyes of that session (deleting half a pair would
+  // leave an orphan that silently shape-shifts the list entry — worse
+  // UX than just confirming the whole thing).
+  const [confirmDeleteIds, setConfirmDeleteIds] = useState<string[] | null>(null)
   const [syncedIds, setSyncedIds] = useState<Set<string>>(new Set())
   const [importMessage, setImportMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
   const [showOvfxHelp, setShowOvfxHelp] = useState(false)
@@ -122,13 +133,26 @@ export function HistoryView({ onBack }: Props) {
       .catch(() => {})
   }, [user])
 
-  const handleDelete = (id: string) => {
-    deleteResult(id)
-    setResults(prev => prev.filter(r => r.id !== id))
-    if (selected?.id === id) setSelected(null)
-    setConfirmDeleteId(null)
-    // Also delete from server if logged in
-    if (user) api.deleteVFResult(id).catch(() => {})
+  const handleDelete = (ids: string[]) => {
+    for (const id of ids) {
+      // Local removal + tombstone (deleteResult writes both — see
+      // storage.ts). The tombstone protects the delete against the
+      // next mergeFromServer pulling the record back in.
+      deleteResult(id)
+      // Best-effort server delete. On success, clear the tombstone
+      // immediately so it doesn't get retried next sync. On failure
+      // (network, 5xx, expired session), the tombstone stays and the
+      // sync loop in AuthContext will retry until the server agrees.
+      if (user) {
+        api.deleteVFResult(id)
+          .then(() => removeTombstone(id))
+          .catch(() => { /* tombstone retains; sync loop retries */ })
+      }
+    }
+    const idSet = new Set(ids)
+    setResults(prev => prev.filter(r => !idSet.has(r.id)))
+    if (selected && idSet.has(selected.id)) setSelected(null)
+    setConfirmDeleteIds(null)
   }
 
   const resultHasSurvey = (id: string) => surveyDoneIds.has(id) || hasSurveyForResult(id)
@@ -164,6 +188,25 @@ export function HistoryView({ onBack }: Props) {
   // binocular session.
   const rightEyeResults = results.filter(r => r.eye === 'right' && !pairedIds.has(r.id))
   const leftEyeResults = results.filter(r => r.eye === 'left' && !pairedIds.has(r.id))
+  // Orphan bucket — anything in `results` that didn't land in a
+  // paired binocular group OR a left/right single. Catches:
+  //   • Legacy results with `eye === 'both'` from before the
+  //     single-row binocular format was deprecated.
+  //   • Half-deleted binocular pairs (only one eye still on disk;
+  //     the pair filter `g.right && g.left` rejects the half-group).
+  //   • Hex-grid era runs (pre-24-2) where some fields were
+  //     differently named — they have `eye` set but may be missing
+  //     other expected fields, and shouldn't be silently dropped.
+  // Before this catch-all existed, such results showed up in the
+  // "III4e isopter area over time" chart (which only checks for an
+  // III4e area) but were invisible in the list — so the user saw a
+  // phantom data point they couldn't inspect or delete.
+  const placedIds = new Set([
+    ...pairedIds,
+    ...rightEyeResults.map(r => r.id),
+    ...leftEyeResults.map(r => r.id),
+  ])
+  const orphanResults = results.filter(r => !placedIds.has(r.id))
 
   if (selected) {
     // Filter out extended-field points for radar/areas/interpretation
@@ -206,78 +249,104 @@ export function HistoryView({ onBack }: Props) {
               enableVerify
             />
           )}
-          <div className="space-y-2">
-            <div className="grid grid-cols-2 gap-2 text-sm">
-              {ISOPTER_ORDER.map(key => {
-                const area = selected.isopterAreas[key]
-                if (area == null) return null
-                return (
-                  <div key={key} className="bg-surface rounded-xl px-3 py-2 flex items-center gap-2 border border-white/[0.06]">
-                    <span className="w-4 text-center" style={{ color: STIMULI[key].color }} aria-hidden="true">{ISOPTER_SHAPES[key] || '●'}</span>
-                    <span className="text-zinc-400">{STIMULI[key].label}</span>
-                    <span className="ml-auto font-mono" title={isopterStrategyHint(selected.testType)}>
-                      {area.toFixed(0)} deg²
-                    </span>
-                  </div>
-                )
-              })}
-            </div>
-            {selected.testType && (selected.testType === 'static' || selected.testType === 'goldmann') && (
-              <p className="text-[11px] text-zinc-500 leading-snug">
-                Areas measured via{' '}
-                <span className="text-zinc-400">{selected.testType === 'static' ? 'static scatter' : 'Goldmann kinetic'}</span>
-                . {isopterStrategyHint(selected.testType)}
-              </p>
-            )}
-          </div>
-          {!isGoldmannResult(selected) && (() => {
-            // Static threshold-mode tests carry per-location thresholdDb.
-            // Legacy suprathreshold static imports have no measured dB
-            // and therefore render no heatmap here.
-            const measured = standardPoints
-              .filter(p => p.thresholdDb != null && !p.catchTrial)
-              .map(p => ({
-                meridianDeg: p.meridianDeg,
-                eccentricityDeg: p.eccentricityDeg,
-                db: p.thresholdDb!,
-              }))
-            if (measured.length === 0) return null
-            return (
-              <SensitivityMap
-                points={measured}
-                eye={selected.eye}
-                maxEccentricity={maxEcc}
+          {/* Layout splits by test type. Static results show only the
+              HFA-style block (matches what the post-test results phase
+              renders), no per-isopter areas grid or narrative
+              Interpretation — those weren't on the post-test page so
+              including them here was the only inconsistency between
+              "just finished" and "re-opened from history" for the same
+              run. Goldmann results keep their existing layout
+              (per-isopter areas grid + Interpretation + ScenarioOverlay
+              below) — those *are* on Goldmann's post-test results
+              phase too, so they stay consistent there. */}
+          {!isGoldmannResult(selected) ? (
+            <HFAResultsView
+              points={standardPoints.filter(p => !p.catchTrial)}
+              eye={selected.eye}
+              gridPattern={(selected.protocol?.staticGridPattern as StaticGridPattern | undefined) ?? '24-2'}
+              date={selected.date}
+              durationSeconds={selected.durationSeconds}
+              brightnessFloor={selected.calibration.brightnessFloor}
+              maxEccentricityDeg={maxEcc}
+              fpIsiPresses={selected.qualityMetrics?.falsePositiveIsiPresses}
+              truePositiveResponses={selected.qualityMetrics?.truePositiveResponses}
+            />
+          ) : (
+            <>
+              <div className="space-y-2">
+                <div className="grid grid-cols-2 gap-2 text-sm">
+                  {ISOPTER_ORDER.map(key => {
+                    const area = selected.isopterAreas[key]
+                    if (area == null) return null
+                    return (
+                      <div key={key} className="bg-surface rounded-xl px-3 py-2 flex items-center gap-2 border border-white/[0.06]">
+                        <span className="w-4 text-center" style={{ color: STIMULI[key].color }} aria-hidden="true">{ISOPTER_SHAPES[key] || '●'}</span>
+                        <span className="text-zinc-400">{STIMULI[key].label}</span>
+                        <span className="ml-auto font-mono" title={isopterStrategyHint(selected.testType)}>
+                          {area.toFixed(0)} deg²
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+                <p className="text-[11px] text-zinc-500 leading-snug">
+                  Areas measured via <span className="text-zinc-400">Goldmann kinetic</span>.
+                  {' '}{isopterStrategyHint(selected.testType)}
+                </p>
+              </div>
+              <Interpretation
+                points={standardPoints}
+                areas={selected.isopterAreas}
+                maxEccentricityDeg={selected.calibration.maxEccentricityDeg}
+                calibration={selected.calibration}
+                reliabilityIndices={selected.reliabilityIndices}
               />
-            )
-          })()}
-          <Interpretation points={standardPoints} areas={selected.isopterAreas} maxEccentricityDeg={selected.calibration.maxEccentricityDeg} calibration={selected.calibration} reliabilityIndices={selected.reliabilityIndices} />
-          <ScenarioOverlay userPoints={standardPoints} userAreas={selected.isopterAreas} maxEccentricity={maxEcc} />
-          {/* Vision sim gets ALL points including extended for wider coverage */}
-          <VisionSimulator
-            points={selected.points}
-            eye={selected.eye}
-            maxEccentricity={maxEcc}
-          />
+            </>
+          )}
+          {/* Scenario comparison (Normal / Early RP / … / Very
+              Severe RP) is Goldmann-only. The RP reference
+              scenarios derive from full-field kinetic isopter
+              areas; static scatter tests (especially Quick / 10-2)
+              cap out at a tiny seen-points hull that geometrically
+              can't reach the Normal reference area, so static
+              results always landed in the most-severe bucket.
+              Static reads are still summarised by the
+              Interpretation block above. */}
+          {selected.testType !== 'static' && (
+            <ScenarioOverlay userPoints={standardPoints} userAreas={selected.isopterAreas} maxEccentricity={maxEcc} />
+          )}
+          {/* Vision simulation disabled for now — see comment in
+              StaticTest.tsx. Component file preserved so the feature
+              can be re-enabled in place once it handles static
+              threshold data more sensibly. */}
           <div className="text-sm text-zinc-500 space-y-1">
             <p>Viewing distance: {selected.calibration.viewingDistanceCm} cm</p>
             <p>Max eccentricity: {selected.calibration.maxEccentricityDeg}°</p>
             <p>Total points: {selected.points.length} ({selected.points.filter(p => p.detected).length} detected)</p>
           </div>
-          {(selected.protocol || selected.study || selected.device || selected.provenance || selected.qualityMetrics) && (
+          {/* Clinician / study metadata block only renders for runs
+              started from the clinician portal. The `study` field is
+              the discriminant — it's populated only when a clinician
+              kicks off a session with a study profile attached. The
+              other metadata fields (`protocol`, `device`, `provenance`,
+              `qualityMetrics`) are always set by the native test
+              flow, so gating on "any of these exist" used to show the
+              metadata block for every saved result, which was noise
+              for self-monitoring users and only meaningful for
+              study-tracked runs. */}
+          {selected.study && (
             <div className="space-y-3 rounded-xl border border-white/[0.06] bg-surface p-4">
               <h2 className="text-sm font-medium text-white">Clinician / study metadata</h2>
-              {selected.study && (
-                <div className="space-y-1 text-sm text-zinc-300">
-                  <p className="text-xs uppercase tracking-[0.08em] text-zinc-500">Study</p>
-                  <p>
-                    Study {selected.study.studyId} · Participant {selected.study.participantId} · Session {selected.study.sessionId}
-                    {selected.study.visitId ? ` · Visit ${selected.study.visitId}` : ''}
-                    {selected.study.repeatIndex != null ? ` · Repeat ${selected.study.repeatIndex}` : ''}
-                    {selected.study.siteId ? ` · Site ${selected.study.siteId}` : ''}
-                    {selected.study.operatorId ? ` · Operator ${selected.study.operatorId}` : ''}
-                  </p>
-                </div>
-              )}
+              <div className="space-y-1 text-sm text-zinc-300">
+                <p className="text-xs uppercase tracking-[0.08em] text-zinc-500">Study</p>
+                <p>
+                  Study {selected.study.studyId} · Participant {selected.study.participantId} · Session {selected.study.sessionId}
+                  {selected.study.visitId ? ` · Visit ${selected.study.visitId}` : ''}
+                  {selected.study.repeatIndex != null ? ` · Repeat ${selected.study.repeatIndex}` : ''}
+                  {selected.study.siteId ? ` · Site ${selected.study.siteId}` : ''}
+                  {selected.study.operatorId ? ` · Operator ${selected.study.operatorId}` : ''}
+                </p>
+              </div>
               {selected.protocol && (
                 <div className="space-y-1 text-sm text-zinc-300">
                   <p className="text-xs uppercase tracking-[0.08em] text-zinc-500">Protocol</p>
@@ -357,45 +426,16 @@ export function HistoryView({ onBack }: Props) {
               Export OVFX
             </button>
             <button
-              onClick={() => setConfirmDeleteId(selected.id)}
+              onClick={() => setConfirmDeleteIds([selected.id])}
               className="py-2.5 px-4 bg-surface hover:bg-elevated rounded-xl text-sm text-red-400 hover:text-red-300 transition-colors border border-white/[0.06]"
             >
               Delete
             </button>
           </div>
 
-          {/* Delete confirmation dialog */}
-          {confirmDeleteId && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="presentation">
-              <div
-                role="alertdialog"
-                aria-modal="true"
-                aria-labelledby="delete-confirm-title"
-                aria-describedby="delete-confirm-desc"
-                className="bg-surface border border-white/[0.08] rounded-2xl p-6 w-full max-w-xs space-y-4 shadow-2xl animate-page-in"
-              >
-                <h2 id="delete-confirm-title" className="text-lg font-heading font-bold text-white">Delete result?</h2>
-                <p id="delete-confirm-desc" className="text-zinc-400 text-sm">
-                  This will permanently remove this test result. This action cannot be undone.
-                </p>
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setConfirmDeleteId(null)}
-                    className="flex-1 py-2.5 bg-elevated hover:bg-overlay rounded-xl text-sm font-medium transition-colors"
-                    autoFocus
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={() => handleDelete(confirmDeleteId)}
-                    className="flex-1 py-2.5 bg-red-600 hover:bg-red-500 rounded-xl text-sm font-medium transition-colors"
-                  >
-                    Delete
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+          {/* Delete confirmation modal is rendered once at the
+              page-level bottom of HistoryView, shared across both the
+              detail view (here) and the list-card trash buttons. */}
         </main>
       </div>
     )
@@ -554,28 +594,22 @@ export function HistoryView({ onBack }: Props) {
 
         {results.length >= 2 && <AreaChart results={results} />}
 
-        {/* Binocular combined view — uses latest result from each eye */}
-        {rightEyeResults.length > 0 && leftEyeResults.length > 0 && (
-          <div className="space-y-3">
-            <h2 className="text-lg font-heading font-semibold text-zinc-200">Combined binocular vision</h2>
-            <p className="text-xs text-zinc-500">
-              Simulates what you see with both eyes open — visible if either eye can see the area.
-            </p>
-            <VisionSimulator
-              points={rightEyeResults[0].points}
-              eye="right"
-              maxEccentricity={rightEyeResults[0].calibration.maxEccentricityDeg}
-              secondEyePoints={leftEyeResults[0].points}
-              secondEyeMaxEccentricity={leftEyeResults[0].calibration.maxEccentricityDeg}
-            />
-          </div>
-        )}
+        {/* Binocular combined view used to live here as a VisionSimulator
+            preview. Removed — it was a heavy compute-on-every-render
+            block stacked above the list, the list itself is the focus
+            of this page, and the same combined-binocular sim is still
+            available inside any individual result's detail view via the
+            "Vision simulation" collapsible. Keeping it on the list
+            crowded the page and made every history visit do the work
+            of rendering it, even when the user just wanted to find or
+            delete a specific past result. */}
 
-        {(binocularGroups.length > 0 || rightEyeResults.length > 0 || leftEyeResults.length > 0) && (
+        {(binocularGroups.length > 0 || rightEyeResults.length > 0 || leftEyeResults.length > 0 || orphanResults.length > 0) && (
           <ResultsList
             binocularGroups={binocularGroups}
-            singleResults={[...rightEyeResults, ...leftEyeResults]}
+            singleResults={[...rightEyeResults, ...leftEyeResults, ...orphanResults]}
             onSelect={setSelected}
+            onDelete={ids => setConfirmDeleteIds(ids)}
             onExportPDF={entry => {
               if (entry.kind === 'single') {
                 exportTrackedResultPDF(entry.result, undefined, 'history_list')
@@ -598,6 +632,46 @@ export function HistoryView({ onBack }: Props) {
           />
         )}
       </main>
+
+      {/* Delete confirmation dialog — shared by both the detail view
+          and the list-card trash buttons. `confirmDeleteIds` is a list
+          because binocular pair cards delete both eyes of a session as
+          a unit; the copy below pluralises when there's more than one. */}
+      {confirmDeleteIds && confirmDeleteIds.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="presentation">
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-confirm-title"
+            aria-describedby="delete-confirm-desc"
+            className="bg-surface border border-white/[0.08] rounded-2xl p-6 w-full max-w-xs space-y-4 shadow-2xl animate-page-in"
+          >
+            <h2 id="delete-confirm-title" className="text-lg font-heading font-bold text-white">
+              Delete {confirmDeleteIds.length > 1 ? 'both results' : 'result'}?
+            </h2>
+            <p id="delete-confirm-desc" className="text-zinc-400 text-sm">
+              {confirmDeleteIds.length > 1
+                ? 'This will permanently remove both eyes of this binocular session. This action cannot be undone.'
+                : 'This will permanently remove this test result. This action cannot be undone.'}
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setConfirmDeleteIds(null)}
+                className="flex-1 py-2.5 bg-elevated hover:bg-overlay rounded-xl text-sm font-medium transition-colors"
+                autoFocus
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleDelete(confirmDeleteIds)}
+                className="flex-1 py-2.5 bg-red-600 hover:bg-red-500 rounded-xl text-sm font-medium transition-colors"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -643,6 +717,7 @@ function ResultsList({
   binocularGroups,
   singleResults,
   onSelect,
+  onDelete,
   onExportPDF,
   syncedIds,
   showSync,
@@ -650,6 +725,12 @@ function ResultsList({
   binocularGroups: { groupId: string; right?: TestResult; left?: TestResult; date: string }[]
   singleResults: TestResult[]
   onSelect: (r: TestResult) => void
+  /** Called when the trash button on a card is tapped. The parent
+   *  handles the actual confirmation+deletion; this callback just
+   *  signals "the user wants to delete these ids". Single-eye cards
+   *  pass [id]; binocular pair cards pass both eye ids so a single
+   *  confirm nukes the whole session. */
+  onDelete: (ids: string[]) => void
   onExportPDF: (entry: ListEntry) => void
   syncedIds: Set<string>
   showSync: boolean
@@ -676,17 +757,21 @@ function ResultsList({
           // Resolve the two slots up front so every card has the same layout:
           // OS on the left, OD on the right. Pairs fill both; single-eye
           // entries fill only their side and leave the other as a placeholder.
+          // Orphan results with a non-standard `eye` field (legacy
+          // `'both'`, missing, etc.) fall through both side-checks and
+          // get rendered as a "legacy OU" entry with no per-eye open
+          // buttons — surfaced only so the user can see and delete them.
+          const isStandardEye = entry.kind === 'single'
+            && (entry.result.eye === 'left' || entry.result.eye === 'right')
           const leftResult = entry.kind === 'single'
             ? (entry.result.eye === 'left' ? entry.result : undefined)
             : entry.left
           const rightResult = entry.kind === 'single'
             ? (entry.result.eye === 'right' ? entry.result : undefined)
             : entry.right
-          const eyeBadgeCls = entry.kind === 'single'
-            ? 'bg-accent/10 text-accent'
-            : 'bg-accent/10 text-accent'
+          const eyeBadgeCls = 'bg-accent/10 text-accent'
           const eyeBadgeLabel: 'OD' | 'OS' | 'OU' = entry.kind === 'single'
-            ? formatEyeLabel(entry.result.eye)
+            ? (isStandardEye ? formatEyeLabel(entry.result.eye) : 'OU')
             : 'OU'
           const keyId = entry.kind === 'single' ? `single-${entry.result.id}` : `pair-${entry.groupId || i}`
           const anyR = entry.kind === 'single' ? entry.result : (entry.right ?? entry.left)
@@ -719,10 +804,57 @@ function ResultsList({
                       <path d="M9 13h6M9 17h4" />
                     </svg>
                   </button>
+                  {/* Delete — trash icon. Single-eye entries hand a
+                      one-element list to the parent; binocular pair
+                      cards hand both eye ids so the confirm dialog
+                      surfaces "Delete both results?" and a single
+                      tap removes the whole session. */}
+                  <button
+                    onClick={e => {
+                      e.stopPropagation()
+                      if (entry.kind === 'single') {
+                        onDelete([entry.result.id])
+                      } else {
+                        const ids: string[] = []
+                        if (entry.left) ids.push(entry.left.id)
+                        if (entry.right) ids.push(entry.right.id)
+                        if (ids.length > 0) onDelete(ids)
+                      }
+                    }}
+                    aria-label="Delete result"
+                    title="Delete result"
+                    className="w-7 h-7 flex items-center justify-center rounded text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                  >
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={1.6} aria-hidden="true">
+                      <path d="M3 6h18" />
+                      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                      <path d="M10 11v6M14 11v6" />
+                    </svg>
+                  </button>
                 </div>
               </div>
               <div className="flex gap-2">
-                {leftResult ? (
+                {entry.kind === 'single' && !isStandardEye ? (
+                  // Orphan single-eye entry — non-standard `eye` field
+                  // (legacy 'both' or unknown). Render one full-width
+                  // "open" button so the user can inspect what's in it
+                  // and then decide whether to keep or delete via the
+                  // trash icon above. Skip the per-eye OS / OD layout
+                  // because we have no eye to assign it to.
+                  <button
+                    onClick={() => onSelect(entry.result)}
+                    className="flex-1 px-3 py-2 bg-elevated hover:bg-overlay rounded-xl text-xs text-left transition-colors border border-white/[0.04] flex items-center gap-2"
+                  >
+                    {showSync && <SyncIndicator synced={syncedIds.has(entry.result.id)} />}
+                    <span className="text-zinc-300 font-medium">Legacy result — tap to view</span>
+                    {entry.result.isopterAreas['III4e'] != null && (
+                      <span className="ml-auto font-mono text-teal">
+                        {entry.result.isopterAreas['III4e']!.toFixed(0)} deg²
+                      </span>
+                    )}
+                  </button>
+                ) : leftResult ? (
                   <button
                     onClick={() => onSelect(leftResult)}
                     className="flex-1 px-3 py-2 bg-elevated hover:bg-overlay rounded-xl text-xs text-left transition-colors border border-white/[0.04] flex items-center gap-2"
@@ -746,7 +878,7 @@ function ResultsList({
                     OS (Left) — not tested
                   </div>
                 )}
-                {rightResult ? (
+                {entry.kind === 'single' && !isStandardEye ? null : rightResult ? (
                   <button
                     onClick={() => onSelect(rightResult)}
                     className="flex-1 px-3 py-2 bg-elevated hover:bg-overlay rounded-xl text-xs text-left transition-colors border border-white/[0.04] flex items-center gap-2"

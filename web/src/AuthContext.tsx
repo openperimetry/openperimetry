@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react'
 import type { AuthUser } from './api'
 import * as api from './api'
-import { syncToServer, mergeFromServer, setPersistenceEnabled, clearLocalResults } from './storage'
+import { syncToServer, mergeFromServer, setPersistenceEnabled, clearLocalResults, getTombstones, removeTombstone } from './storage'
 
 interface AuthContextValue {
   user: AuthUser | null
@@ -46,6 +46,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // every auto-sync and were shipping to production browsers before —
     // gate behind the Vite DEV flag so prod consoles stay clean.
     const debug = import.meta.env.DEV
+
+    // Flush pending tombstones (deletes the user made locally that
+    // haven't been confirmed by the server yet). Done BEFORE the push/
+    // pull so that when mergeFromServer runs below, any tombstoned id
+    // still on the server is filtered out anyway — and on success the
+    // tombstone gets cleared so we don't try to re-delete it forever.
+    // 404 from the server counts as success (it's already gone, which
+    // is what we wanted). Other errors keep the tombstone for next
+    // sync to retry.
+    for (const id of getTombstones()) {
+      try {
+        await api.deleteVFResult(id)
+        removeTombstone(id)
+        if (debug) console.log(`[Sync] Tombstone cleared: ${id}`)
+      } catch (err) {
+        if (err instanceof api.ApiError && err.status === 404) {
+          removeTombstone(id)
+          if (debug) console.log(`[Sync] Tombstone cleared (already gone server-side): ${id}`)
+        } else if (debug) {
+          console.warn(`[Sync] Tombstone ${id} delete failed, will retry next sync:`, err)
+        }
+      }
+    }
+
     try {
       const localResults = syncToServer()
       if (debug) console.log(`[Sync] Starting sync: ${localResults.length} local results`)

@@ -44,13 +44,9 @@ interface DbSample {
  *  Mirrors SPECVIS's `cmap='jet_r'` in DisplayResults.py so the visual
  *  encoding is familiar. Returns 0–255 RGB.
  *
- *  We remap the input into jet_r's [0.15, 0.95] subrange to skip the two
- *  darkest extremes of the raw colormap (pure `jet_r` bottoms out at
- *  `rgb(128, 0, 0)` maroon and tops out at `rgb(0, 0, 128)` navy, both of
- *  which read as "dark spots" rather than colored values). The clipped
- *  subrange preserves the warm→cool semantic while keeping the whole image
- *  legible, especially when unseen-sentinel points (`db = DB_MIN`) would
- *  otherwise paint the sample grid as near-black dots on a reddish field. */
+ *  Kept exported because some legacy call sites still use it; the
+ *  primary heatmap renderer has switched to {@link sensitivityGreyForT}
+ *  to match the HFA-style clinical greyscale plot convention. */
 export function jetReverseColor(t: number): { r: number; g: number; b: number } {
   const clamped = Math.min(1, Math.max(0, t))
   const remapped = 0.15 + 0.8 * clamped
@@ -59,6 +55,18 @@ export function jetReverseColor(t: number): { r: number; g: number; b: number } 
   const g = Math.round(255 * Math.max(0, Math.min(1, 1.5 - Math.abs(4 * x - 2))))
   const b = Math.round(255 * Math.max(0, Math.min(1, 1.5 - Math.abs(4 * x - 1))))
   return { r, g, b }
+}
+
+/** Greyscale colour for a normalised sensitivity value t ∈ [0,1]. Matches
+ *  the HFA Single-Field-Analysis greyscale plot convention: white = normal
+ *  sensitivity, dark = defect. Floors at ~20 (very-dark grey, not pure
+ *  black) so a profound defect is still distinguishable from the canvas
+ *  background, and ceilings at ~250 so the brightest pixel doesn't fully
+ *  saturate against the surrounding chrome. */
+export function sensitivityGreyForT(t: number): { r: number; g: number; b: number } {
+  const clamped = Math.min(1, Math.max(0, t))
+  const v = Math.round(20 + (250 - 20) * clamped)
+  return { r: v, g: v, b: v }
 }
 
 /** Paint a sensitivity heatmap onto the given 2D canvas context.
@@ -79,11 +87,31 @@ export function renderSensitivityToCanvas(
   points: DbSample[],
   size: number,
   maxEccentricityDeg: number,
+  /** Optional dB upper bound for the colormap. When the test is
+   *  calibration-limited (e.g. a brightnessFloor of 0.075 caps
+   *  thresholds at ~11 dB), pass the effective ceiling so the
+   *  greyscale uses its full range across the *measurable* span
+   *  instead of bunching all the data at the dark end of a
+   *  fixed -5 → 40 scale. Defaults to DB_MAX for callers that
+   *  want the legacy absolute-scale rendering (e.g. the PDF
+   *  export, where the bar's full range is part of the clinical
+   *  reading). */
+  dbCeiling: number = DB_MAX,
 ): void {
   ctx.clearRect(0, 0, size, size)
   const validPoints = points.filter(p => Number.isFinite(p.db))
   if (validPoints.length === 0) return
   if (maxEccentricityDeg <= 0) return
+  // Clamp + round the ceiling. Clamp keeps the normalised range
+  // sane (below DB_MIN+1 every pixel collapses to the same grey;
+  // above DB_MAX gains no extra colour resolution at 8-bit).
+  // Round to match what the legend label shows — the unrounded
+  // value is a 16-digit float and using two different precisions
+  // for the colormap normalisation vs the legend label would mean
+  // "the bar's right edge is at 11 dB" but the heatmap treats
+  // values up to 11.249 as the same maximum grey. Sub-dB
+  // precision in the colormap doesn't buy visible accuracy.
+  const effectiveCeiling = Math.min(DB_MAX, Math.max(DB_MIN + 1, Math.round(dbCeiling)))
 
   const center = size / 2
   const radius = center - CHART_PADDING
@@ -95,6 +123,19 @@ export function renderSensitivityToCanvas(
     return { x: center + r * Math.cos(rad), y: center - r * Math.sin(rad), db }
   })
 
+  // Clamp rendering to the data's actual extent. Without this the
+  // Gaussian-weighted-mean loop at low total weight falls back to the
+  // DB_MIN sentinel (-5 dB), so untested space well outside any test
+  // point's halo rendered as "deeply blind" — a 10-2 result on a
+  // 50°-radius canvas painted the outer ~80% in deep red even though
+  // those locations were never measured. Computing a max-data
+  // eccentricity (with a small buffer to absorb the Gaussian halo) and
+  // skipping pixels beyond it lets the canvas background show through
+  // there, making "untested" visually distinct from "blind".
+  const dataMaxEccDeg = Math.max(...validPoints.map(p => p.eccentricityDeg))
+  const dataExtentPx = ((dataMaxEccDeg + 1.5) / maxEccentricityDeg) * radius
+  const dataExtentPx2 = dataExtentPx * dataExtentPx
+
   // σ controls how far each sample's influence spreads. 9% of radius keeps
   // each cluster's aura roughly the size of the cluster itself — smooth
   // concentric rings around it but tight enough that real asymmetries in
@@ -102,6 +143,10 @@ export function renderSensitivityToCanvas(
   // produce a visible aura.
   const sigma = Math.max(8, radius * 0.09)
   const twoSigma2 = 2 * sigma * sigma
+  // Below this total weight the pixel is so far from any sample that
+  // the weighted mean would be dominated by floating-point noise — treat
+  // as untested rather than painting a colour.
+  const minWeight = 1e-4
 
   const img = ctx.createImageData(size, size)
   const step = 2
@@ -109,7 +154,10 @@ export function renderSensitivityToCanvas(
     for (let px = 0; px < size; px += step) {
       const dx = px - center
       const dy = py - center
-      if (dx * dx + dy * dy > radius * radius) continue
+      const r2 = dx * dx + dy * dy
+      if (r2 > radius * radius) continue
+      if (r2 > dataExtentPx2) continue // outside data extent — leave bg
+
       let wSum = 0
       let wdbSum = 0
       for (let i = 0; i < samples.length; i++) {
@@ -119,9 +167,10 @@ export function renderSensitivityToCanvas(
         wSum += w
         wdbSum += w * s.db
       }
-      const meanDb = wSum > 0 ? wdbSum / wSum : DB_MIN
-      const t = (meanDb - DB_MIN) / (DB_MAX - DB_MIN)
-      const { r, g, b } = jetReverseColor(t)
+      if (wSum < minWeight) continue
+      const meanDb = wdbSum / wSum
+      const t = (meanDb - DB_MIN) / (effectiveCeiling - DB_MIN)
+      const { r, g, b } = sensitivityGreyForT(t)
       for (let ky = 0; ky < step && py + ky < size; ky++) {
         for (let kx = 0; kx < step && px + kx < size; kx++) {
           const idx = ((py + ky) * size + (px + kx)) * 4
@@ -135,8 +184,9 @@ export function renderSensitivityToCanvas(
   }
   ctx.putImageData(img, 0, 0)
 
-  // Fixation crosshair (SPECVIS overlays a '+' at fixation)
-  ctx.strokeStyle = '#000'
+  // Fixation crosshair. White-on-grey works against any greyscale
+  // intensity the heatmap renders at the centre.
+  ctx.strokeStyle = '#ffffff'
   ctx.lineWidth = 1.5
   ctx.beginPath()
   ctx.moveTo(center - 6, center)

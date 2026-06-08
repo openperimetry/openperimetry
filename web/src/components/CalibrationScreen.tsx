@@ -21,14 +21,16 @@ function effectiveTestDims(isMobile: boolean): { width: number; height: number }
     height: typeof screen !== 'undefined' ? screen.height : window.innerHeight,
   }
 }
-import type { CalibrationData, Eye } from '../types'
+import type { CalibrationData, Eye, RunSpeedMode } from '../types'
 import { BackButton } from './AccessibleNav'
 import { CALIBRATION } from '../constants'
 import { formatEyeLabelLong } from '../eyeLabels'
 import { AdvancedSettingsPanel } from './AdvancedSettingsPanel'
 import { useAdvancedSettings } from '../advancedSettings'
 import { STATIC_GRID_INFO, countCustomGridPoints } from '../grids'
+import type { StaticGridPattern } from '../grids'
 import { useStudyMode } from '../studyMode'
+import { isPhoneLikeDevice } from '../deviceMode'
 import {
   addScreen,
   clearActiveScreen,
@@ -48,6 +50,13 @@ interface Props {
   skipReactionTime?: boolean
   /** Test mode label for the summary screen */
   testMode?: 'goldmann' | 'static'
+  /** Pace selection from the home screen. Drives the Ready-screen
+   *  Goldmann summary (quick mode is a single-isopter scope shrink,
+   *  not just a pacing change, so the stimulus + adaptive lines need
+   *  to reflect that or the user will think we're running the whole
+   *  battery). Defaults to `normal`. Static ignores this; its
+   *  Ready-screen copy is the same regardless of pace. */
+  speedMode?: RunSpeedMode
 }
 
 type Step = 'screen' | 'distance' | 'brightness' | 'reaction' | 'ready'
@@ -70,7 +79,7 @@ function StepProgress({ current, total }: { current: number; total: number }) {
   )
 }
 
-export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime, testMode }: Props) {
+export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime, testMode, speedMode = 'normal' }: Props) {
   // Pull the live static-grid pattern and custom-grid params so the
   // "Ready to test" summary can show the exact grid (and point count)
   // the user will run, rather than claiming a generic "54 points".
@@ -95,8 +104,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   // most adults' near point of accommodation, defocus-blurring every
   // stimulus into a starburst. Users who specifically want more field
   // coverage can still drag the slider down to 10.
-  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
-    && navigator.maxTouchPoints > 0
+  const isMobile = isPhoneLikeDevice()
   const minDistanceCm = isMobile ? 10 : 20
   const defaultMinDistanceCm = 20
 
@@ -403,10 +411,12 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
             <AdvancedSettingsPanel testMode={testMode} />
           )}
 
-          <button
-            onClick={handleScreenDone}
-            className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
-          >Next</button>
+          <div className="action-footer">
+            <button
+              onClick={handleScreenDone}
+              className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
+            >Next</button>
+          </div>
         </main>
       </div>
     )
@@ -759,10 +769,12 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
             )
           })()}
 
-          <button
-            onClick={handleDistanceDone}
-            className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
-          >Next</button>
+          <div className="action-footer">
+            <button
+              onClick={handleDistanceDone}
+              className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
+            >Next</button>
+          </div>
         </main>
       </div>
     )
@@ -822,10 +834,12 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
             <span>brighter (clearly visible) →</span>
           </div>
 
-          <button
-            onClick={handleBrightnessDone}
-            className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
-          >This is the dimmest I can see — continue</button>
+          <div className="action-footer">
+            <button
+              onClick={handleBrightnessDone}
+              className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
+            >This is the dimmest I can see — continue</button>
+          </div>
         </main>
       </div>
     )
@@ -862,10 +876,12 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
               Individual times: {rtTimes.map(t => `${t.toFixed(0)}ms`).join(', ')}
             </div>
 
-            <button
-              onClick={() => setStep('ready')}
-              className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
-            >Next</button>
+            <div className="action-footer">
+              <button
+                onClick={() => setStep('ready')}
+                className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
+              >Next</button>
+            </div>
           </main>
         </div>
       )
@@ -895,10 +911,12 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
               </p>
             </div>
 
-            <button
-              onClick={() => setRtStarted(true)}
-              className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
-            >Start</button>
+            <div className="action-footer">
+              <button
+                onClick={() => setRtStarted(true)}
+                className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
+              >Start</button>
+            </div>
           </main>
         </div>
       )
@@ -966,29 +984,55 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
               <span className="font-mono">{medianRt.toFixed(0)} ms (+{((3 * medianRt) / 1000).toFixed(1)}°)</span>
             </div>
           )}
-          {testMode === 'static' ? (
+          {testMode === 'static' ? (() => {
+            // Static Quick forces the 10-2 grid (central ±9°) regardless
+            // of the user's Advanced Settings selection. We display the
+            // effective grid, not what's saved in settings — otherwise
+            // the Ready screen would lie about what's about to happen.
+            const effectiveGrid: StaticGridPattern = speedMode === 'quick' ? '10-2' : advanced.staticGridPattern
+            const info = STATIC_GRID_INFO[effectiveGrid]
+            const points = effectiveGrid === 'custom'
+              ? countCustomGridPoints(advanced.customGrid)
+              : info.points
+            return (
+              <>
+                {speedMode === 'quick' && (
+                  <div className="flex justify-between">
+                    <span className="text-zinc-400">Mode</span>
+                    <span>Quick scan (central 10°)</span>
+                  </div>
+                )}
+                <div className="flex justify-between">
+                  <span className="text-zinc-400">Grid</span>
+                  <span>{info.label} — {points} points</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-400">Stimuli</span>
+                  <span>Goldmann III, 0–35 dB</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-400">Staircase</span>
+                  <span>4-2 dB adaptive</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-400">Pacing</span>
+                  <span>Timed flashes — tap when seen</span>
+                </div>
+              </>
+            )
+          })() : speedMode === 'quick' ? (
             <>
               <div className="flex justify-between">
-                <span className="text-zinc-400">Grid</span>
-                <span>
-                  {STATIC_GRID_INFO[advanced.staticGridPattern].label} —{' '}
-                  {advanced.staticGridPattern === 'custom'
-                    ? countCustomGridPoints(advanced.customGrid)
-                    : STATIC_GRID_INFO[advanced.staticGridPattern].points}
-                  {' '}points
-                </span>
+                <span className="text-zinc-400">Mode</span>
+                <span>Quick scan (single isopter)</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-zinc-400">Stimuli</span>
-                <span>Goldmann III, 0–35 dB</span>
+                <span className="text-zinc-400">Stimulus</span>
+                <span>III4e only — 12 meridians</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-zinc-400">Staircase</span>
-                <span>4-2 dB adaptive</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-zinc-400">Pacing</span>
-                <span>Timed flashes — tap when seen</span>
+                <span className="text-zinc-400">Adaptive</span>
+                <span>Outlier retest only</span>
               </div>
             </>
           ) : (
@@ -1035,8 +1079,12 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
             two surfaces drifting out of sync. */}
         <p className="text-xs text-zinc-500">
           {testMode === 'static'
-            ? 'Briefly-flashed dots at 54 fixed grid points. Tap the screen each time you see one.'
-            : `The test runs in phases: initial scan, adaptive refinement, outer boundary, sensitivity, and central detail.${extendedField ? ' Plus 2 extended-field passes (up/down).' : ''}`
+            ? speedMode === 'quick'
+              ? <>Central 10° only (HFA 10-2 grid). Best for tracking <strong className="text-amber-300/80 font-medium">macular involvement</strong> — not the right scan for monitoring RP, where the peripheral field shrinks first; use Normal or the Goldmann test for that.</>
+              : 'Briefly-flashed dots at 54 fixed grid points. Tap the screen each time you see one.'
+            : speedMode === 'quick'
+              ? 'One pass at the III4e isopter — the clinical reportable boundary. Use this for serial monitoring between full tests; a full test maps inner isopters too and is more sensitive to relative scotomas.'
+              : `The test runs in phases: initial scan, adaptive refinement, outer boundary, sensitivity, and central detail.${extendedField ? ' Plus 2 extended-field passes (up/down).' : ''}`
           }
         </p>
 
@@ -1045,10 +1093,12 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
             picker, so users can adjust in place instead of navigating
             back from this summary. */}
 
-        <button
-          onClick={handleStart}
-          className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
-        >Start test</button>
+        <div className="action-footer">
+          <button
+            onClick={handleStart}
+            className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
+          >Start test</button>
+        </div>
       </main>
     </div>
   )

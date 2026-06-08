@@ -663,49 +663,6 @@ app.delete('/api/users/me/vf-results/:id', requireAuth, async (req, res) => {
   res.status(204).send()
 })
 
-// ── Anonymous VF result sharing (opt-in, not tied to a user account) ──
-//
-// Users on the results page can explicitly tap "Share anonymous result" to
-// upload their full TestResult JSON to help me debug the tool. Stored under
-// a synthetic userId of `device:<deviceId>` — same convention as anonymous
-// surveys — so accounts and anonymous uploads share the table without
-// colliding. No auth, just the device UUID.
-
-const vfAnonymousResultSchema = z.object({
-  id: z.string().min(1),
-  eye: z.enum(['left', 'right', 'both']),
-  date: z.string().min(4),
-  data: z.string().min(10).max(2_000_000),
-  deviceId: z.string().uuid(),
-})
-
-app.post('/api/vf-results/anonymous', async (req, res) => {
-  const parsed = vfAnonymousResultSchema.safeParse(req.body)
-  if (!parsed.success) {
-    res.status(400).json({ error: 'Invalid visual field result data.' })
-    return
-  }
-  const storageKey = `device:${parsed.data.deviceId}`
-  await addVFResult(storageKey, {
-    id: parsed.data.id,
-    eye: parsed.data.eye,
-    date: parsed.data.date,
-    data: parsed.data.data,
-  })
-  // Fire-and-forget notification event so the admin events feed surfaces
-  // new shares at a glance. Meta stays minimal (eye + resultId) — the
-  // full result is already in the vf_results table, we just need a
-  // pointer. Swallow errors; if event logging is down the share itself
-  // still succeeded and that's what matters.
-  void trackEvent(parsed.data.deviceId, 'result_shared_anonymously', {
-    eye: parsed.data.eye,
-    resultId: parsed.data.id,
-  }).catch((err) => {
-    console.error('Failed to log result_shared_anonymously event', err)
-  })
-  res.status(201).json({ ok: true })
-})
-
 // ── Visual Field Surveys (public, not tied to user accounts) ──
 
 const vfSurveySchema = z.object({
@@ -812,7 +769,7 @@ app.get('/api/admin/vf-results/detail', requireAuth, requireAdmin, async (req, r
 // Clinician-scope counterpart: returns only study-tagged results
 // (anything with a studyId set), regardless of which user ran them.
 // "Study-tagged" maps to "ran from the clinician portal" in this app
-// — personal account runs and anonymous shares stay out of this view.
+// — personal account runs stay out of this view.
 app.get('/api/clinician/vf-results', requireAuth, requireClinician, async (_req, res) => {
   const all = await listAllVFResults()
   res.json({ results: all.filter(r => r.studyId != null) })
@@ -848,7 +805,6 @@ const eventSchema = z.object({
     'page_view',
     'pdf_exported',
     'whatsapp_shared',
-    'result_shared_anonymously',
     // account_created is fired server-side in /api/auth/register and is
     // listed here for EventType parity; clients don't need to submit it.
     'account_created',

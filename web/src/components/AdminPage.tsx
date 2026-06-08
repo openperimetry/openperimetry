@@ -1,35 +1,25 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   getAdminStats,
   getAdminUsers,
   setAdminUserClinicianRole,
   deleteAdminUser,
-  getAdminSessions,
-  getAdminVFResults,
   getAdminSurveys,
   getAdminEvents,
-  getAdminVFResultDetail,
   type AdminStats,
   type AdminUserRecord,
-  type AdminSessionRecord,
-  type AdminVFResultRecord,
   type AdminSurveyRecord,
   type AdminEventRecord,
 } from '../api'
 import { BackButton } from './AccessibleNav'
-import { formatEyeLabelForResult } from '../eyeLabels'
-import { SensitivityMap } from './SensitivityMap'
-import { VisualFieldMap } from './VisualFieldMap'
 import { useAuth } from '../AuthContext'
-import type { TestResult } from '../types'
-import { isGoldmannResult } from '../types'
 import { BUILD_SHA, BUILD_TIME, COMMIT_SOURCE_URL } from '../branding'
 
 interface Props {
   onBack: () => void
 }
 
-type Tab = 'events' | 'users' | 'sessions' | 'results' | 'surveys'
+type Tab = 'events' | 'users' | 'surveys'
 
 const CLINICAL_LABELS: Record<string, string> = {
   never_had_clinical: 'Never had clinical test',
@@ -38,23 +28,9 @@ const CLINICAL_LABELS: Record<string, string> = {
   less_sensitive: 'Clinical detects more',
 }
 
-const TEST_TYPE_LABELS: Record<string, string> = {
-  goldmann: 'Goldmann',
-  ring: 'Ring',
-  static: 'Static',
-}
-
 function labelOf(map: Record<string, string>, value: string | null): string {
   if (!value) return '—'
   return map[value] ?? value
-}
-
-function formatDuration(seconds: number | null): string {
-  if (seconds == null) return '—'
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  const remainder = seconds % 60
-  return `${minutes}m ${remainder.toString().padStart(2, '0')}s`
 }
 
 export function AdminPage({ onBack }: Props) {
@@ -64,8 +40,6 @@ export function AdminPage({ onBack }: Props) {
   const [stats, setStats] = useState<AdminStats | null>(null)
   const [users, setUsers] = useState<AdminUserRecord[]>([])
   const [events, setEvents] = useState<AdminEventRecord[]>([])
-  const [sessions, setSessions] = useState<AdminSessionRecord[]>([])
-  const [vfResults, setVfResults] = useState<AdminVFResultRecord[]>([])
   const [surveys, setSurveys] = useState<AdminSurveyRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -77,31 +51,13 @@ export function AdminPage({ onBack }: Props) {
   const [deleteTarget, setDeleteTarget] = useState<AdminUserRecord | null>(null)
   const [deleteTyped, setDeleteTyped] = useState('')
   const [deletingUserId, setDeletingUserId] = useState<string | null>(null)
-  // Drill-down modal for a single VF result. We track just the summary
-  // row here and fetch the full `data` JSON lazily — keeps the list
-  // payload small but lets the modal render the SensitivityMap without
-  // round-trip per keystroke.
-  const [detail, setDetail] = useState<{ row: AdminVFResultRecord; result: TestResult | null; error: string | null } | null>(null)
-  const pdfExportCount = events.filter(e => e.event === 'pdf_exported').length
-  const whatsappShareCount = events.filter(e => e.event === 'whatsapp_shared').length
-  // Admin's results view is intentionally narrow: only the anonymously
-  // shared results (synthetic `device:<uuid>` userIds). Study-tagged
-  // runs live in the clinician portal; personal runs live in the
-  // user's own history. Keeps admin focused on app-level moderation,
-  // not study management.
-  const anonymousResults = useMemo(
-    () => vfResults.filter(r => r.userId.startsWith('device:')),
-    [vfResults],
-  )
 
   useEffect(() => {
-    Promise.all([getAdminStats(), getAdminUsers(), getAdminEvents(), getAdminSessions(), getAdminVFResults(), getAdminSurveys()])
-      .then(([statsRes, usersRes, eventsRes, sessionsRes, resultsRes, surveysRes]) => {
+    Promise.all([getAdminStats(), getAdminUsers(), getAdminEvents(), getAdminSurveys()])
+      .then(([statsRes, usersRes, eventsRes, surveysRes]) => {
         setStats(statsRes)
         setUsers(usersRes.users)
         setEvents(eventsRes.events)
-        setSessions(sessionsRes.sessions)
-        setVfResults(resultsRes.results)
         setSurveys(surveysRes.surveys)
       })
       .catch(err => setError(err.message ?? 'Failed to load admin data'))
@@ -114,11 +70,6 @@ export function AdminPage({ onBack }: Props) {
     try {
       const { user: updated } = await setAdminUserClinicianRole(target.id, isClinician)
       setUsers(current => current.map(row => row.id === updated.id ? updated : row))
-      setSessions(current => current.map(row => (
-        row.userId === updated.id
-          ? { ...row, isAdmin: updated.isAdmin, isClinician: updated.isClinician }
-          : row
-      )))
       setRoleNotice({
         tone: 'success',
         message: `${updated.displayName} ${updated.isClinician ? 'can now access' : 'no longer has access to'} clinician tools.`,
@@ -138,7 +89,6 @@ export function AdminPage({ onBack }: Props) {
     try {
       await deleteAdminUser(target.id)
       setUsers(current => current.filter(row => row.id !== target.id))
-      setSessions(current => current.filter(row => row.userId !== target.id))
       setRoleNotice({ tone: 'success', message: `Deleted ${target.displayName} (${target.email}) and all associated data.` })
       setDeleteTarget(null)
       setDeleteTyped('')
@@ -146,17 +96,6 @@ export function AdminPage({ onBack }: Props) {
       setRoleNotice({ tone: 'error', message: (err as Error).message ?? 'Failed to delete user.' })
     } finally {
       setDeletingUserId(null)
-    }
-  }
-
-  async function openResultDetail(row: AdminVFResultRecord): Promise<void> {
-    setDetail({ row, result: null, error: null })
-    try {
-      const { result } = await getAdminVFResultDetail(row.userId, row.id)
-      const parsed = JSON.parse(result.data) as TestResult
-      setDetail({ row, result: parsed, error: null })
-    } catch (err) {
-      setDetail({ row, result: null, error: (err as Error).message ?? 'Failed to load result' })
     }
   }
 
@@ -174,19 +113,15 @@ export function AdminPage({ onBack }: Props) {
         <BuildInfo />
 
 
-        {/* Stats */}
+        {/* Stat tiles row removed — the same counts are visible
+            in each tab's heading (Events (N), Users (N), Surveys
+            (N)) so an always-on summary band was duplicating info,
+            and the unique signals (PDF exports, WhatsApp shares,
+            session-start count) were rarely the thing being
+            looked at. Keeps the overview focused on the charts
+            and the tab content below. */}
         {stats && (
           <>
-            <div className="grid grid-cols-2 sm:grid-cols-7 gap-3">
-              <StatCard label="Users" value={stats.totalUsers} />
-              <StatCard label="Sessions" value={stats.activeSessions} />
-              <StatCard label="VF synced" value={stats.totalVFResults} />
-              <StatCard label="Surveys" value={stats.totalSurveys} />
-              <StatCard label="PDF exports" value={pdfExportCount} />
-              <StatCard label="WhatsApp" value={whatsappShareCount} />
-              <StatCard label="VF total" value={stats.totalVFResults + stats.totalVFResultsByDevice} sub={`${stats.totalVFResultsByDevice} anon`} />
-            </div>
-
             {/* Results over time chart */}
             {stats.resultsByDay.some(d => d.count > 0) && (
               <div className="bg-gray-900/50 rounded-xl border border-gray-800/40 p-4 space-y-2">
@@ -213,7 +148,7 @@ export function AdminPage({ onBack }: Props) {
 
         {/* Tab toggle */}
         <div className="flex bg-gray-900/70 rounded-xl p-1 gap-1">
-          {(['events', 'users', 'sessions', 'results', 'surveys'] as const).map(t => (
+          {(['events', 'users', 'surveys'] as const).map(t => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -223,8 +158,6 @@ export function AdminPage({ onBack }: Props) {
             >
               {t === 'events' ? `Events (${events.length})`
                 : t === 'users' ? `Users (${users.length})`
-                : t === 'sessions' ? `Sessions (${sessions.length})`
-                : t === 'results' ? `Anon shares (${anonymousResults.length})`
                 : `Surveys (${surveys.length})`}
             </button>
           ))}
@@ -271,7 +204,6 @@ export function AdminPage({ onBack }: Props) {
 	                          : e.event === 'test_aborted' ? 'bg-amber-600/20 text-amber-400'
 	                          : e.event === 'pdf_exported' ? 'bg-violet-600/20 text-violet-400'
 	                          : e.event === 'whatsapp_shared' ? 'bg-emerald-600/20 text-emerald-400'
-	                          : e.event === 'result_shared_anonymously' ? 'bg-pink-600/20 text-pink-400'
 	                          : e.event === 'account_created' ? 'bg-cyan-600/20 text-cyan-400'
 	                          : 'bg-gray-700/50 text-gray-300'
 	                        }`}>
@@ -324,6 +256,8 @@ export function AdminPage({ onBack }: Props) {
                       <th className="px-3 py-3">Email</th>
                       <th className="px-3 py-3">Roles</th>
                       <th className="px-3 py-3">Created</th>
+                      <th className="px-3 py-3">Last login</th>
+                      <th className="px-3 py-3">Logins</th>
                       <th className="px-3 py-3">Clinician Access</th>
                       <th className="px-3 py-3">Delete</th>
                     </tr>
@@ -345,6 +279,12 @@ export function AdminPage({ onBack }: Props) {
                           <td className="px-3 py-2.5 text-gray-500 whitespace-nowrap">
                             {new Date(row.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
                           </td>
+                          <td className="px-3 py-2.5 text-gray-500 whitespace-nowrap">
+                            {row.lastLoginAt
+                              ? new Date(row.lastLoginAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+                              : <span className="text-gray-600">Never</span>}
+                          </td>
+                          <td className="px-3 py-2.5 text-gray-400 tabular-nums">{row.totalLogins}</td>
                           <td className="px-3 py-2.5">
                             <button
                               className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
@@ -430,101 +370,6 @@ export function AdminPage({ onBack }: Props) {
           </div>
         )}
 
-        {/* Sessions tab */}
-        {!loading && !error && tab === 'sessions' && (
-          sessions.length === 0 ? (
-            <p className="text-gray-500 text-center py-12">No sessions.</p>
-          ) : (
-            <div className="overflow-x-auto rounded-xl border border-gray-800/60">
-              <table className="w-full text-sm text-left">
-                <thead className="bg-gray-900/80 text-gray-400 text-xs uppercase tracking-wider">
-                  <tr>
-                    <th className="px-3 py-3">User</th>
-                    <th className="px-3 py-3">Email</th>
-                    <th className="px-3 py-3">Session start</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-800/30">
-                  {sessions.map((s, i) => (
-                    <tr key={`${s.userId}-${i}`} className="hover:bg-gray-900/40">
-                      <td className="px-3 py-2.5 text-gray-300">{s.displayName}</td>
-                      <td className="px-3 py-2.5 text-gray-400">{s.email}</td>
-                      <td className="px-3 py-2.5 whitespace-nowrap text-gray-300">
-                        {new Date(s.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
-                        <span className="text-gray-600 ml-1">
-                          {new Date(s.createdAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )
-        )}
-
-        {/* VF Results tab */}
-        {!loading && !error && tab === 'results' && (
-          anonymousResults.length === 0 ? (
-            <p className="text-gray-500 text-center py-12">No anonymously shared results yet.</p>
-          ) : (
-            <div className="space-y-3">
-              <p className="text-xs text-gray-500">
-                Anonymously shared results only. Study-tagged runs live in the clinician portal; personal account runs in each user's own history.
-              </p>
-              <div className="overflow-x-auto rounded-xl border border-gray-800/60">
-                <table className="w-full text-sm text-left">
-                  <thead className="bg-gray-900/80 text-gray-400 text-xs uppercase tracking-wider">
-                    <tr>
-                      <th className="px-3 py-3">Date</th>
-                      <th className="px-3 py-3">Eye</th>
-                      <th className="px-3 py-3">Test Type</th>
-                      <th className="px-3 py-3">Points</th>
-                      <th className="px-3 py-3">Duration</th>
-                      <th className="px-3 py-3">Device</th>
-                      <th className="px-3 py-3 w-16"></th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-800/30">
-                    {anonymousResults.map(r => (
-                      <tr key={`${r.userId}-${r.id}`} className="hover:bg-gray-900/40">
-                        <td className="px-3 py-2.5 text-gray-300 whitespace-nowrap">
-                          {new Date(r.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
-                          <span className="text-gray-600 ml-2">
-                            {new Date(r.date).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                            r.eye === 'right' ? 'bg-green-600/20 text-green-400' : r.eye === 'left' ? 'bg-blue-600/20 text-blue-400' : 'bg-purple-600/20 text-purple-400'
-                          }`}>
-                            {formatEyeLabelForResult(r.eye as 'right' | 'left' | 'both')}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 text-gray-400">{labelOf(TEST_TYPE_LABELS, r.testType)}</td>
-                        <td className="px-3 py-2.5 text-gray-400 font-mono text-xs">
-                          <span className="text-green-400">{r.detectedPoints}</span>
-                          <span className="text-gray-600">/{r.totalPoints}</span>
-                        </td>
-                        <td className="px-3 py-2.5 text-gray-400 font-mono text-xs">{formatDuration(r.durationSeconds)}</td>
-                        <td className="px-3 py-2.5 text-gray-600 font-mono text-xs">{r.userId.replace(/^device:/, '').slice(0, 8)}</td>
-                        <td className="px-3 py-2.5">
-                          <button
-                            className="text-blue-400 hover:text-blue-300 text-xs"
-                            onClick={() => void openResultDetail(r)}
-                          >
-                            View
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )
-        )}
-
         {/* Surveys tab */}
         {!loading && !error && tab === 'surveys' && (
           surveys.length === 0 ? (
@@ -571,141 +416,6 @@ export function AdminPage({ onBack }: Props) {
           )
         )}
       </main>
-
-      {detail && (
-        <VFResultDetailModal
-          row={detail.row}
-          result={detail.result}
-          error={detail.error}
-          onClose={() => setDetail(null)}
-        />
-      )}
-    </div>
-  )
-}
-
-/** Modal that renders a shared result's full point-by-point map. Opens
- *  from the Admin VF Results table; fetches the full `data` JSON lazily
- *  so the list endpoint stays small. The SensitivityMap is identical to
- *  the post-test results screen — admin and user see the same picture,
- *  which makes it much easier to reason about a user's complaint.
- *  Falls back to a meta-only summary for threshold tests whose meta
- *  shape is unrecognised (future-proofing for pre-threshold results). */
-function VFResultDetailModal({
-  row,
-  result,
-  error,
-  onClose,
-}: {
-  row: AdminVFResultRecord
-  result: TestResult | null
-  error: string | null
-  onClose: () => void
-}) {
-  // Static threshold-mode tests carry per-location thresholdDb; derive
-  // an array of {meridian, eccentricity, db} for the heatmap. Goldmann
-  // and any legacy suprathreshold-tagged static imports carry no
-  // thresholdDb and therefore render no heatmap (isopters only, shown
-  // separately below).
-  const measuredDbPoints = result?.points
-    .filter(p => p.thresholdDb != null && !p.catchTrial)
-    .map(p => ({
-      meridianDeg: p.meridianDeg,
-      eccentricityDeg: p.eccentricityDeg,
-      db: p.thresholdDb!,
-    })) ?? []
-  const eye = (result?.eye ?? (row.eye === 'left' ? 'left' : 'right')) as 'left' | 'right'
-  const maxEcc = result?.calibration?.maxEccentricityDeg ?? 30
-  const isAnonymous = row.userId.startsWith('device:')
-  // Goldmann tests render as isopter plots (clinical convention for a
-  // suprathreshold sweep). Static tests render as a dB heatmap when they
-  // carry per-point thresholds (threshold-mode); legacy suprathreshold
-  // static imports render nothing in the heatmap slot.
-  const isGoldmann = result !== null && isGoldmannResult(result)
-  const nonCatchPoints = result?.points.filter(p => !p.catchTrial) ?? []
-
-  return (
-    <div
-      className="fixed inset-0 z-50 bg-black/80 flex items-start justify-center overflow-y-auto p-4"
-      onClick={onClose}
-    >
-      <div
-        className="bg-gray-950 border border-gray-800 rounded-xl max-w-2xl w-full my-8 p-6 space-y-4"
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-white">VF Result</h2>
-            <p className="text-xs text-gray-500 mt-0.5">
-              {new Date(row.date).toLocaleString('en-GB')} · {formatEyeLabelForResult(eye)} ·{' '}
-              {labelOf(TEST_TYPE_LABELS, row.testType)}
-              {isAnonymous && <span className="ml-2 text-pink-400">anonymous share</span>}
-            </p>
-            <p className="text-[10px] text-gray-700 font-mono mt-0.5">
-              userId: {row.userId} · id: {row.id}
-            </p>
-          </div>
-          <button className="text-gray-500 hover:text-gray-300 text-xl leading-none" onClick={onClose} aria-label="Close">
-            ×
-          </button>
-        </div>
-
-        {error && (
-          <p className="text-red-400 text-sm">Failed to load: {error}</p>
-        )}
-        {!error && !result && (
-          <p className="text-gray-500 text-sm text-center py-8">Loading…</p>
-        )}
-        {result && isGoldmann && nonCatchPoints.length > 0 && (
-          <div className="flex justify-center">
-            <VisualFieldMap
-              points={nonCatchPoints}
-              eye={eye}
-              maxEccentricity={maxEcc}
-              size={500}
-              showLabels
-            />
-          </div>
-        )}
-        {result && !isGoldmann && measuredDbPoints.length > 0 && (
-          <div className="flex justify-center">
-            <SensitivityMap
-              points={measuredDbPoints}
-              eye={eye}
-              maxEccentricity={maxEcc}
-              size={500}
-            />
-          </div>
-        )}
-        {result && nonCatchPoints.length === 0 && (
-          <p className="text-gray-500 text-sm text-center py-8">
-            No points in this result — the full JSON is still available via the admin API.
-          </p>
-        )}
-
-        {result && (
-          <div className="grid grid-cols-2 gap-2 text-xs text-gray-400 pt-2 border-t border-gray-800/60">
-            <div>
-              <span className="text-gray-600">Points measured:</span>{' '}
-              {measuredDbPoints.length}
-            </div>
-            <div><span className="text-gray-600">Duration:</span> {formatDuration(row.durationSeconds)}</div>
-            {result.reliabilityIndices && (
-              <>
-                <div>
-                  <span className="text-gray-600">FP (ISI):</span>{' '}
-                  {result.reliabilityIndices.falsePositiveIsiPresses}
-                </div>
-                <div>
-                  <span className="text-gray-600">Catch-trial FPs:</span>{' '}
-                  {result.reliabilityIndices.catchTrialsFalsePositive}/
-                  {result.reliabilityIndices.catchTrialsPresented}
-                </div>
-              </>
-            )}
-          </div>
-        )}
-      </div>
     </div>
   )
 }
@@ -749,16 +459,6 @@ function BuildInfo() {
         <span className="text-xs uppercase tracking-wider text-gray-500">Built</span>
         <span className="text-gray-300">{builtAt}</span>
       </div>
-    </div>
-  )
-}
-
-function StatCard({ label, value, sub }: { label: string; value: number; sub?: string }) {
-  return (
-    <div className="bg-gray-900/70 rounded-xl p-4 border border-gray-800/60">
-      <p className="text-gray-500 text-xs uppercase tracking-wider mb-1">{label}</p>
-      <p className="text-2xl font-semibold text-white">{value}</p>
-      {sub && <p className="text-gray-600 text-xs mt-0.5">{sub}</p>}
     </div>
   )
 }

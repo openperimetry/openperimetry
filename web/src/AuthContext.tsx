@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react'
-import type { AuthUser } from './api'
+import type { AuthUser, VFResultRecord } from './api'
 import * as api from './api'
-import { syncToServer, mergeFromServer, setPersistenceEnabled, clearLocalResults, getTombstones, removeTombstone } from './storage'
+import { syncToServer, mergeFromServer, applyServerDeletions, setPersistenceEnabled, clearLocalResults, getTombstones } from './storage'
 
 interface AuthContextValue {
   user: AuthUser | null
@@ -47,32 +47,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // gate behind the Vite DEV flag so prod consoles stay clean.
     const debug = import.meta.env.DEV
 
-    // Flush pending tombstones (deletes the user made locally that
-    // haven't been confirmed by the server yet). Done BEFORE the push/
-    // pull so that when mergeFromServer runs below, any tombstoned id
-    // still on the server is filtered out anyway — and on success the
-    // tombstone gets cleared so we don't try to re-delete it forever.
-    // 404 from the server counts as success (it's already gone, which
-    // is what we wanted). Other errors keep the tombstone for next
-    // sync to retry.
-    for (const id of getTombstones()) {
-      try {
-        await api.deleteVFResult(id)
-        removeTombstone(id)
-        if (debug) console.log(`[Sync] Tombstone cleared: ${id}`)
-      } catch (err) {
-        if (err instanceof api.ApiError && err.status === 404) {
-          removeTombstone(id)
-          if (debug) console.log(`[Sync] Tombstone cleared (already gone server-side): ${id}`)
-        } else if (debug) {
-          console.warn(`[Sync] Tombstone ${id} delete failed, will retry next sync:`, err)
-        }
-      }
-    }
-
     try {
       const localResults = syncToServer()
       if (debug) console.log(`[Sync] Starting sync: ${localResults.length} local results`)
+
+      // Push local results, then settle on the server's authoritative
+      // list. syncToServer() already omits tombstoned ids, so we never
+      // re-upload something the user just deleted.
+      let serverResults: VFResultRecord[]
+      let serverDeletedIds: string[] = []
       if (localResults.length > 0) {
         if (debug) {
           for (const r of localResults) {
@@ -81,8 +64,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
         try {
           // Try batch sync first
-          const { results: serverResults } = await api.syncVFResults(localResults)
-          mergeFromServer(serverResults)
+          const res = await api.syncVFResults(localResults)
+          serverResults = res.results
+          serverDeletedIds = res.deletedIds
           if (debug) console.log(`[Sync] Batch sync success, server has ${serverResults.length} results`)
         } catch (batchErr) {
           // Batch failed (e.g. one result has invalid data) — try individual sync
@@ -96,15 +80,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               console.error(`[Sync] Failed to sync result ${result.id}:`, singleErr)
             }
           }
-          // Fetch final state from server
-          const { results: serverResults } = await api.listVFResults()
-          mergeFromServer(serverResults)
+          const final = await api.listVFResults()
+          serverResults = final.results
+          serverDeletedIds = final.deletedIds
         }
       } else {
-        const { results: serverResults } = await api.listVFResults()
-        mergeFromServer(serverResults)
+        const final = await api.listVFResults()
+        serverResults = final.results
+        serverDeletedIds = final.deletedIds
         if (debug) console.log(`[Sync] No local results to push, fetched ${serverResults.length} from server`)
       }
+
+      // Propagate cross-device deletes. A result deleted on another device
+      // lives only as a server-side tombstone (deletedIds); this device may
+      // still hold it locally with no local tombstone. Mirror those
+      // tombstones and prune the local copies so we neither display nor
+      // re-push them.
+      applyServerDeletions(serverDeletedIds)
+
+      // Reconcile this device's own deletes. Tombstones are permanent (see
+      // storage.ts), so mergeFromServer below already filters every deleted
+      // id out — the row can never be resurrected locally. Here we also
+      // push the DELETE through for any tombstoned id the server still
+      // holds, retrying on each sync until the server copy is gone. We
+      // never clear tombstones, which is what closes the merge/refresh race
+      // that previously let deleted results come back.
+      const tombstoned = new Set(getTombstones())
+      for (const record of serverResults) {
+        if (tombstoned.has(record.id)) {
+          api.deleteVFResult(record.id).catch(() => { /* retried next sync */ })
+        }
+      }
+
+      mergeFromServer(serverResults)
     } catch (err) {
       console.error('[Sync] Sync failed:', err)
     }

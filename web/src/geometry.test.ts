@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { degToPx, polarDegToXY, pixelsPerCm } from './geometry'
+import { degToPx, pxToDeg, polarDegToXY, pixelsPerCm, reprojectPolar } from './geometry'
 import type { CalibrationData } from './types'
 
 // Base calibration used by small-angle tests. `sphericityCorrection: false`
@@ -67,6 +67,61 @@ describe('degToPx with sphericity correction (default)', () => {
   it('exports pixelsPerCm helper matching fovea gradient', () => {
     const ppcm = pixelsPerCm(linearCalib)
     expect(ppcm).toBeCloseTo((20 * 180) / (Math.PI * 40), 6)
+  })
+
+  it('pxToDeg is the exact inverse of degToPx (corrected + linear)', () => {
+    const corrCalib2: CalibrationData = { ...linearCalib, sphericityCorrection: true }
+    for (const deg of [0, 5, 20, 45, 60]) {
+      expect(pxToDeg(degToPx(deg, corrCalib2), corrCalib2)).toBeCloseTo(deg, 6)
+      expect(pxToDeg(degToPx(deg, linearCalib), linearCalib)).toBeCloseTo(deg, 6)
+    }
+  })
+
+  it('pxToDeg under-reports the linear px/ppd shortcut at large VR-like angles', () => {
+    // Phone-VR-ish: tiny focal-length px/deg, short optical distance. A large
+    // edge distance should map to far fewer degrees than the linear px/ppd
+    // shortcut would claim — the bug this replaces.
+    const vrCalib: CalibrationData = {
+      pixelsPerDegree: 4.68,
+      maxEccentricityDeg: 47,
+      viewingDistanceCm: 4.2,
+      brightnessFloor: 0.075,
+      reactionTimeMs: 250,
+      fixationOffsetPx: 0,
+      sphericityCorrection: true,
+    }
+    const edgePx = 218 // ~lens-half temporal edge
+    const linearDeg = edgePx / vrCalib.pixelsPerDegree
+    const trueDeg = pxToDeg(edgePx, vrCalib)
+    expect(trueDeg).toBeLessThan(linearDeg)
+    // And it round-trips with degToPx at that distance.
+    expect(degToPx(trueDeg, vrCalib)).toBeCloseTo(edgePx, 4)
+  })
+
+  it('reprojectPolar is the identity when the two fixations coincide', () => {
+    const c: CalibrationData = { ...linearCalib, sphericityCorrection: true }
+    const f = { x: 30, y: -10 }
+    for (const [m, e] of [[0, 10], [90, 20], [200, 35], [330, 5]]) {
+      const r = reprojectPolar(m, e, f, f, c)
+      expect(r.eccentricityDeg).toBeCloseTo(e, 4)
+      expect(r.meridianDeg).toBeCloseTo(m, 4)
+    }
+  })
+
+  it('reprojectPolar moves a shifted-fixation point to its true centered eccentricity', () => {
+    const c: CalibrationData = { ...linearCalib, sphericityCorrection: true }
+    const center = { x: 0, y: 0 }
+    // Fixation parked one degree-equivalent below center (y grows down).
+    const below = { x: 0, y: degToPx(8, c) }
+    // A point recorded AT the shifted fixation (ecc 0) is really 8° below center
+    // → meridian 270 (down), ecc 8.
+    const atFix = reprojectPolar(0, 0, below, center, c)
+    expect(atFix.eccentricityDeg).toBeCloseTo(8, 3)
+    expect(atFix.meridianDeg).toBeCloseTo(270, 3)
+    // A point 8° straight UP from the shifted (below-center) fixation lands back
+    // at center → ecc ~0.
+    const up = reprojectPolar(90, 8, below, center, c)
+    expect(up.eccentricityDeg).toBeCloseTo(0, 3)
   })
 
   it('applies sphericity correction when field is unset (new default)', () => {

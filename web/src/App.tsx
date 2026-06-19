@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
-import type { CalibrationData, Eye, TestPoint } from './types'
+import type { CalibrationData, Eye, PresentationMode, TestPoint } from './types'
+import { isPhoneLikeDevice } from './deviceMode'
 import { CalibrationScreen } from './components/CalibrationScreen'
 import { GoldmannTest, type SpeedMode } from './components/GoldmannTest'
 import { StaticTest } from './components/StaticTest'
 import { TestDemo } from './components/TestDemo'
 import { BinocularResults } from './components/BinocularResults'
+import { BinocularSwitch } from './components/BinocularSwitch'
 import { InfoButton } from './components/InfoButton'
 import { HistoryView } from './components/HistoryView'
 import { ScienceReferences } from './components/ScienceReferences'
@@ -16,6 +18,7 @@ import { AuthModal } from './components/AuthModal'
 import { ClinicalDisclaimer } from './components/ClinicalDisclaimer'
 import { ClinicianPortal } from './components/ClinicianPortal'
 import { CliniciansPage } from './components/CliniciansPage'
+import { ThemeToggle } from './components/ThemeToggle'
 import { useAuth } from './AuthContext'
 import { ADVANCED_SETTINGS_CTX, type AdvancedSettings } from './advancedSettings'
 import type { ReactNode } from 'react'
@@ -26,6 +29,37 @@ import { DEFAULT_STUDY_MODE_STATE, isStudyReady, useSetStudyMode, useStudyMode }
 
 type Page = 'home' | 'calibration' | 'test' | 'static-test' | 'binocular-switch' | 'binocular-test-left' | 'binocular-results' | 'history' | 'demo' | 'science' | 'methods' | 'contact' | 'privacy' | 'admin' | 'clinician' | 'clinicians'
 type TestMode = 'goldmann' | 'static'
+
+const HASH_ROUTES: Partial<Record<Page, string>> = {
+  home: '',
+  demo: 'demos',
+  science: 'references',
+  methods: 'methods',
+  contact: 'contact',
+  privacy: 'privacy',
+  clinicians: 'clinicians',
+}
+
+const PAGE_BY_HASH: Record<string, Page> = Object.entries(HASH_ROUTES).reduce<Record<string, Page>>(
+  (acc, [page, hash]) => {
+    acc[hash] = page as Page
+    return acc
+  },
+  {},
+)
+
+function pageFromHash(): Page {
+  if (typeof window === 'undefined') return 'home'
+  const key = window.location.hash.replace(/^#\/?/, '').trim().toLowerCase()
+  return PAGE_BY_HASH[key] ?? 'home'
+}
+
+function urlForPage(page: Page): string | null {
+  if (typeof window === 'undefined') return null
+  if (!(page in HASH_ROUTES)) return null
+  const hash = HASH_ROUTES[page]
+  return `${window.location.pathname}${window.location.search}${hash ? `#${hash}` : ''}`
+}
 
 const UMAMI_WEBSITE_ID = (import.meta.env.VITE_UMAMI_WEBSITE_ID as string | undefined) ?? ''
 const UMAMI_SCRIPT_URL = (import.meta.env.VITE_UMAMI_SCRIPT_URL as string | undefined) ?? 'https://cloud.umami.is/script.js'
@@ -92,70 +126,39 @@ function RunAdvancedBoundary({ override, children }: { override: AdvancedSetting
 }
 
 /**
- * Compact perimetry preview chart shown inside the Build-Your-Test
- * card. Renders the same animated stimuli the test will actually
- * present (kinetic inward sweeps for Goldmann, briefly-flashed
- * scatter for Static), so the test-mode tabs above it get a visual
- * preview the words "Goldmann" / "Static" don't carry. Used to be
- * the full-screen wallpaper behind the UI card; pulled into a
- * card-sized box so the preview is paired with the selector that
- * drives it. Labels and the radial-dim vignette from the wallpaper
- * version are dropped here — illegible at this size and not
- * needed without overlapping UI.
+ * Compact, friendly preview of what the chosen test will ask you to
+ * do. Renders the same motion the test actually uses — a dot drifting
+ * inward from the edge for Goldmann, dots quietly blinking on for
+ * Static — so the plain-language explanation has a calm visual to go
+ * with it.
+ *
+ * Deliberately NOT an instrument scope: an earlier version was a dark
+ * radar-style display with a tick-marked bezel and meridian grid,
+ * which made the home page read as a piece of lab equipment rather
+ * than a reassuring at-home check. This version drops the black
+ * background, the ticks and the meridian lines, keeps a couple of
+ * soft guide rings on a light tint, and pairs the animation with a
+ * one-line caption in everyday words.
  */
 function PerimetryPreview({ testMode, speedMode }: { testMode: TestMode; speedMode: SpeedMode }) {
+  const caption = testMode === 'goldmann'
+    ? 'A dot drifts in from the edge — you press the moment you notice it.'
+    : 'Small dots blink on here and there — you press each time you spot one.'
   return (
-    <div
-      className="relative rounded-2xl border border-white/[0.06] bg-black/30 overflow-hidden"
-      aria-hidden="true"
-    >
-      <svg viewBox="0 0 500 500" className="block mx-auto w-auto max-h-[120px]">
-        {/* Concentric rings */}
-        {[40, 80, 120, 160, 200].map((r, i) => (
+    <div className="rounded-2xl border border-line bg-gradient-to-b from-accent-tint to-surface overflow-hidden">
+      <svg viewBox="0 0 500 500" className="block mx-auto w-auto max-h-[116px]" aria-hidden="true">
+        {/* A couple of soft guide rings — enough to read as "your field
+            of view", without the tick-marked scope bezel that made the
+            old version feel like lab equipment. */}
+        {[70, 130, 190].map((r, i) => (
           <circle
             key={r}
             cx={250} cy={250} r={r}
             fill="none"
-            stroke={`rgba(200,144,42,${0.32 - i * 0.04})`}
-            strokeWidth={1}
+            stroke={`rgba(10,108,201,${0.16 - i * 0.04})`}
+            strokeWidth={1.5}
           />
         ))}
-        {/* Bold scope ring at 60° eccentricity */}
-        <circle cx={250} cy={250} r={180} fill="none" stroke="rgba(200,144,42,0.42)" strokeWidth={1.4} />
-
-        {/* Meridian lines — every 30°, brighter at cardinals */}
-        {[0, 30, 45, 60, 90, 120, 135, 150].map(deg => {
-          const rad = (deg * Math.PI) / 180
-          const r = 228
-          const isCardinal = deg % 90 === 0
-          const isIntercardinal = deg % 45 === 0 && !isCardinal
-          return (
-            <line
-              key={deg}
-              x1={250 + r * Math.cos(rad)} y1={250 - r * Math.sin(rad)}
-              x2={250 - r * Math.cos(rad)} y2={250 + r * Math.sin(rad)}
-              stroke={`rgba(200,144,42,${isCardinal ? 0.18 : isIntercardinal ? 0.12 : 0.07})`}
-              strokeWidth={isCardinal ? 1 : 0.6}
-            />
-          )
-        })}
-
-        {/* Tick marks every 15° on the scope ring */}
-        {Array.from({ length: 24 }, (_, i) => i * 15).map(deg => {
-          const rad = (deg * Math.PI) / 180
-          const isMajor = deg % 45 === 0
-          const r1 = 180
-          const r2 = 180 - (isMajor ? 12 : 6)
-          return (
-            <line
-              key={`tick-${deg}`}
-              x1={250 + r1 * Math.cos(rad)} y1={250 - r1 * Math.sin(rad)}
-              x2={250 + r2 * Math.cos(rad)} y2={250 - r2 * Math.sin(rad)}
-              stroke={`rgba(200,144,42,${isMajor ? 0.48 : 0.24})`}
-              strokeWidth={isMajor ? 1.2 : 0.8}
-            />
-          )
-        })}
 
         {/* Animated stimulus — varies by test type */}
         {testMode === 'goldmann' && (() => {
@@ -170,21 +173,21 @@ function PerimetryPreview({ testMode, speedMode }: { testMode: TestMode; speedMo
             const rad = (angle * Math.PI) / 180
             const cos = Math.cos(rad)
             const sin = Math.sin(rad)
-            const sx = Math.round(250 + 195 * cos)
-            const sy = Math.round(250 - 195 * sin)
-            const ex = Math.round(250 + 35 * cos)
-            const ey = Math.round(250 - 35 * sin)
+            const sx = Math.round(250 + 205 * cos)
+            const sy = Math.round(250 - 205 * sin)
+            const ex = Math.round(250 + 38 * cos)
+            const ey = Math.round(250 - 38 * sin)
             return (
               // Base cx/cy/opacity must be set: SMIL falls back to
               // attribute defaults before `begin`, parking delayed
               // dots at the top-left corner otherwise.
-              <circle key={`g-${angle}-${cycleDur}`} cx={sx} cy={sy} r={5} fill="#c8902a" opacity={0}>
+              <circle key={`g-${angle}-${cycleDur}`} cx={sx} cy={sy} r={8} fill="#0a6cc9" opacity={0}>
                 <animate attributeName="cx" dur={`${cycleDur}s`} repeatCount="indefinite" begin={`${delay}s`}
                   values={`${sx};${sx};${ex};${ex};${ex}`} keyTimes="0;0.02;0.3;0.33;1" />
                 <animate attributeName="cy" dur={`${cycleDur}s`} repeatCount="indefinite" begin={`${delay}s`}
                   values={`${sy};${sy};${ey};${ey};${ey}`} keyTimes="0;0.02;0.3;0.33;1" />
                 <animate attributeName="opacity" dur={`${cycleDur}s`} repeatCount="indefinite" begin={`${delay}s`}
-                  values="0;0.85;0.85;0;0" keyTimes="0;0.02;0.28;0.33;1" />
+                  values="0;0.9;0.9;0;0" keyTimes="0;0.02;0.28;0.33;1" />
               </circle>
             )
           })
@@ -192,32 +195,38 @@ function PerimetryPreview({ testMode, speedMode }: { testMode: TestMode; speedMo
 
         {testMode === 'static' && [
           // Static perimetry: dots flash briefly at scattered positions
-          { angle: 35, ecc: 70, delay: 0 },
-          { angle: 110, ecc: 130, delay: 0.6 },
-          { angle: 200, ecc: 90, delay: 1.2 },
-          { angle: 305, ecc: 160, delay: 1.8 },
-          { angle: 70, ecc: 180, delay: 2.4 },
-          { angle: 240, ecc: 50, delay: 3.0 },
-          { angle: 150, ecc: 195, delay: 3.6 },
-          { angle: 350, ecc: 110, delay: 4.2 },
+          { angle: 35, ecc: 75, delay: 0 },
+          { angle: 110, ecc: 135, delay: 0.6 },
+          { angle: 200, ecc: 95, delay: 1.2 },
+          { angle: 305, ecc: 165, delay: 1.8 },
+          { angle: 70, ecc: 185, delay: 2.4 },
+          { angle: 240, ecc: 55, delay: 3.0 },
+          { angle: 150, ecc: 190, delay: 3.6 },
+          { angle: 350, ecc: 115, delay: 4.2 },
         ].map(({ angle, ecc, delay }) => {
           const rad = (angle * Math.PI) / 180
           const cx = Math.round(250 + ecc * Math.cos(rad))
           const cy = Math.round(250 - ecc * Math.sin(rad))
           return (
-            <circle key={`s-${angle}-${ecc}`} cx={cx} cy={cy} r={5} fill="#c8902a" opacity={0}>
+            <circle key={`s-${angle}-${ecc}`} cx={cx} cy={cy} r={8} fill="#0a6cc9" opacity={0}>
               <animate attributeName="opacity" dur="5s" repeatCount="indefinite" begin={`${delay}s`}
                 values="0;0;0.9;0.9;0;0" keyTimes="0;0.05;0.08;0.16;0.2;1" />
             </circle>
           )
         })}
 
-        {/* Fixation point with pulse */}
-        <circle cx={250} cy={250} r={6} fill="#c8902a" opacity={0.4}>
-          <animate attributeName="r" values="5;9;5" dur="4s" repeatCount="indefinite" />
-          <animate attributeName="opacity" values="0.3;0.55;0.3" dur="4s" repeatCount="indefinite" />
+        {/* Fixation point — the spot you keep your eye on. Gentle pulse
+            so it reads as "look here", not a blip on a radar. */}
+        <circle cx={250} cy={250} r={7} fill="#0a6cc9" opacity={0.5}>
+          <animate attributeName="r" values="6;10;6" dur="4s" repeatCount="indefinite" />
+          <animate attributeName="opacity" values="0.4;0.65;0.4" dur="4s" repeatCount="indefinite" />
         </circle>
       </svg>
+      {/* Plain-language caption so the preview explains itself rather
+          than leaving the motion to be decoded. */}
+      <p className="px-4 pb-3 -mt-1 text-center text-[12px] leading-snug text-muted">
+        {caption}
+      </p>
     </div>
   )
 }
@@ -238,7 +247,7 @@ function durationFor(testMode: TestMode, speedMode: SpeedMode, binocular: boolea
 }
 
 function App() {
-  const [page, setPage] = useState<Page>('home')
+  const [page, setPage] = useState<Page>(() => pageFromHash())
   const [eye, setEye] = useState<Eye>('right')
   const [calibration, setCalibration] = useState<CalibrationData | null>(null)
   const [extendedField, setExtendedField] = useState(false)
@@ -247,6 +256,13 @@ function App() {
   // clinician portal; study runs build their own runConfig instead.
   const [testMode, setTestMode] = useState<TestMode>(() => loadHomeTestMode())
   const [speedMode, setSpeedMode] = useState<SpeedMode>(() => loadHomeSpeedMode())
+  // Presentation mode always starts on `standard`, even on a phone — Phone VR
+  // is an explicit per-session opt-in via the home control, never a remembered
+  // default, so the headset path is never entered without the user choosing it.
+  const [presentationMode, setPresentationMode] = useState<PresentationMode>('standard')
+  // Phone detection is stable for a session; computed once so the home
+  // control and the launch path agree on whether Phone VR is allowed.
+  const phoneLike = isPhoneLikeDevice()
   useEffect(() => { saveHomeTestMode(testMode) }, [testMode])
   useEffect(() => { saveHomeSpeedMode(speedMode) }, [speedMode])
   const studyMode = useStudyMode()
@@ -259,8 +275,9 @@ function App() {
   const [runConfig, setRunConfig] = useState<{
     testMode: TestMode
     speedMode: SpeedMode
+    presentationMode: PresentationMode
     advancedOverride: AdvancedSettings | null
-  }>({ testMode: 'goldmann', speedMode: 'normal', advancedOverride: null })
+  }>({ testMode: 'goldmann', speedMode: 'normal', presentationMode: 'standard', advancedOverride: null })
 
   const [showAuth, setShowAuth] = useState(() => {
     const params = new URLSearchParams(window.location.search)
@@ -318,12 +335,37 @@ function App() {
     setStudyMode(DEFAULT_STUDY_MODE_STATE)
   }, [authLoading, canUseStudyMode, studyMode.enabled, studyMode.profile, setStudyMode])
 
+  useEffect(() => {
+    const handleLocationChange = () => setPage(pageFromHash())
+    window.addEventListener('hashchange', handleLocationChange)
+    window.addEventListener('popstate', handleLocationChange)
+    return () => {
+      window.removeEventListener('hashchange', handleLocationChange)
+      window.removeEventListener('popstate', handleLocationChange)
+    }
+  }, [])
+
+  useEffect(() => {
+    const nextUrl = urlForPage(page)
+    if (nextUrl) {
+      const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`
+      if (currentUrl !== nextUrl) {
+        window.history.pushState(null, '', nextUrl)
+      }
+      return
+    }
+
+    if (window.location.hash) {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
+    }
+  }, [page])
+
   // Update document title on page change and send a virtual pageview to
-  // Umami. This is a client-rendered SPA so the URL never changes on
-  // navigation — without this the auto-tracker only records a single '/'
-  // pageview per session.
+  // Umami. This is still a client-rendered SPA; hash URLs make public
+  // pages shareable, while this call keeps analytics labels explicit.
   useEffect(() => {
     document.title = PAGE_TITLES[page]
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
     const umami = (window as unknown as { umami?: { track: (fn: (props: Record<string, unknown>) => Record<string, unknown>) => void } }).umami
     umami?.track(props => ({ ...props, url: `/${page}`, title: PAGE_TITLES[page] }))
   }, [page])
@@ -383,7 +425,7 @@ function App() {
       }
       setEye(devEye)
       setTestMode(devMode as TestMode)
-      setRunConfig({ testMode: devMode as TestMode, speedMode: 'normal', advancedOverride: null })
+      setRunConfig({ testMode: devMode as TestMode, speedMode: 'normal', presentationMode: 'standard', advancedOverride: null })
       setCalibration(fakeCal)
       setExtendedField(false)
       setPage(devMode === 'static' ? 'static-test' : 'test')
@@ -402,7 +444,15 @@ function App() {
   // Home state is never mutated past this point — `runConfig` carries
   // the active values into the test pages.
   const startTest = (selectedEye: Eye) => {
-    setRunConfig({ testMode, speedMode, advancedOverride: null })
+    // Never launch a phone-vr run on a non-phone device, even if a stale
+    // preference says phone-vr — the option is gated on the home control,
+    // and this is the second guard at the actual launch point.
+    setRunConfig({
+      testMode,
+      speedMode,
+      presentationMode: phoneLike ? presentationMode : 'standard',
+      advancedOverride: null,
+    })
     setEye(selectedEye)
     setPage('calibration')
   }
@@ -420,6 +470,9 @@ function App() {
     setRunConfig({
       testMode: profile.testType,
       speedMode: profile.speedMode,
+      // Clinician/study runs stay standard for now — no study profile
+      // declares headset support yet.
+      presentationMode: 'standard',
       advancedOverride: profile.advancedSettings,
     })
     setStudyMode({ ...studyMode, enabled: true })
@@ -467,6 +520,15 @@ function App() {
     setPage('binocular-results')
   }
 
+  // The auth modal normally lives only in the home return below, but the
+  // in-test results screens dispatch `vfc:show-auth` too (SavePrompt's "Sign
+  // in" / "Create account" buttons) — and App returns those screens early,
+  // before ever reaching the home render. Without overlaying the modal on
+  // those returns, clicking the buttons set `showAuth` but nothing appears.
+  const authModal = showAuth ? (
+    <AuthModal onClose={() => setShowAuth(false)} initialMode={authMode} />
+  ) : null
+
   // Calibration — for 'both', calibrate for right eye first
   if (page === 'calibration') {
     const calEye = eye === 'both' ? 'right' : eye
@@ -485,6 +547,7 @@ function App() {
           skipReactionTime={runConfig.testMode === 'static'}
           testMode={runConfig.testMode}
           speedMode={runConfig.speedMode}
+          presentationMode={runConfig.presentationMode}
         />
       </RunAdvancedBoundary>
     )
@@ -503,6 +566,7 @@ function App() {
           onComplete={eye === 'both' ? handleRightEyeComplete : undefined}
           speedMode={runConfig.speedMode}
         />
+        {authModal}
       </RunAdvancedBoundary>
     )
   }
@@ -518,6 +582,7 @@ function App() {
           onDone={handleDone}
           speedMode={runConfig.speedMode}
         />
+        {authModal}
       </RunAdvancedBoundary>
     )
   }
@@ -539,58 +604,19 @@ function App() {
     )
   }
 
-  // Binocular: switch eyes interstitial
+  // Binocular: switch eyes interstitial. In phone-VR this is hands-free
+  // (remote + countdown) so the phone never leaves the headset; standard
+  // mode keeps the cover-and-reposition instructions with tap buttons.
   if (page === 'binocular-switch') {
     return (
-      <div className="min-h-[100dvh] bg-base text-white flex items-center justify-center p-6 safe-pad">
-        <main className="max-w-sm w-full space-y-8 text-center animate-page-in">
-          <div className="w-20 h-20 mx-auto rounded-full bg-teal/10 flex items-center justify-center border border-teal/20">
-            <svg viewBox="0 0 24 24" className="w-10 h-10 text-teal" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
-              <path d="M5 12h14M12 5l7 7-7 7" />
-            </svg>
-          </div>
-
-          <div className="space-y-2">
-            <h1 className="text-2xl font-heading font-bold">Right eye done!</h1>
-            <p className="text-zinc-400">
-              Now switch to your <span className="text-white font-semibold">left eye (<abbr title="Oculus Sinister">OS</abbr>)</span>.
-            </p>
-          </div>
-
-          <div className="bg-surface rounded-2xl p-5 space-y-3 text-sm text-left border border-white/[0.06]">
-            <div className="flex gap-3 items-start">
-              <span className="text-accent font-heading font-bold mt-0.5">1.</span>
-              <p className="text-zinc-300">Cover your <strong className="text-white">right</strong> eye</p>
-            </div>
-            <div className="flex gap-3 items-start">
-              <span className="text-accent font-heading font-bold mt-0.5">2.</span>
-              <p className="text-zinc-300">Position yourself so your nose aligns with the <strong className="text-white">right edge</strong> of the screen</p>
-            </div>
-            <div className="flex gap-3 items-start">
-              <span className="text-accent font-heading font-bold mt-0.5">3.</span>
-              <p className="text-zinc-300">Take a moment to rest if needed</p>
-            </div>
-          </div>
-
-          <button
-            onClick={() => setPage('binocular-test-left')}
-            className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
-          >
-            Start left eye test
-          </button>
-
-          <button
-            onClick={() => {
-              // Skip left eye — go to results with just right eye
-              setLeftPoints([])
-              setPage('binocular-results')
-            }}
-            className="text-zinc-500 hover:text-zinc-300 text-sm transition-colors min-h-[44px] px-3"
-          >
-            Skip — show right eye results only
-          </button>
-        </main>
-      </div>
+      <BinocularSwitch
+        presentationMode={runConfig.presentationMode}
+        onContinue={() => setPage('binocular-test-left')}
+        onSkip={() => {
+          setLeftPoints([])
+          setPage('binocular-results')
+        }}
+      />
     )
   }
 
@@ -645,6 +671,7 @@ function App() {
           extendedField={extendedField}
           onDone={handleDone}
         />
+        {authModal}
       </RunAdvancedBoundary>
     )
   }
@@ -694,11 +721,11 @@ function App() {
       />
     )
     return (
-      <div className="min-h-[100dvh] bg-base text-white safe-pad p-6 animate-page-in">
+      <div className="min-h-[100dvh] bg-base text-body safe-pad p-6 animate-page-in">
         <main className="mx-auto max-w-md space-y-4 text-center">
           <h1 className="text-2xl font-heading font-bold">Clinician access required</h1>
-          <p className="text-sm text-zinc-400">Sign in with a clinician account to manage participants and protocols.</p>
-          <button onClick={() => setPage('home')} className="rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-white">
+          <p className="text-sm text-muted">Sign in with a clinician account to manage participants and protocols.</p>
+          <button onClick={() => setPage('home')} className="rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-white hover:bg-accent-dark transition-colors">
             Back to home
           </button>
         </main>
@@ -725,24 +752,25 @@ function App() {
   const durationSelected = eye === 'both' ? durationBoth : durationSingle
 
   return (
-    <div className="min-h-[100dvh] bg-base text-white flex flex-col items-center justify-center relative overflow-hidden grain safe-pad">
-      {/* ── Top-right GitHub link — absolute positioned so it scrolls
-            away with the page content rather than hovering on every screen. */}
-      {HAS_GITHUB_LINK && (
-        <header aria-label="Project links" className="absolute top-4 right-4 z-20">
+    <div className="min-h-[100dvh] bg-base text-body flex flex-col items-center justify-center relative overflow-hidden safe-pad">
+      {/* ── Top-right controls — theme toggle + GitHub link. Absolute so they
+            scroll away with the page rather than hovering on every screen. */}
+      <header aria-label="Site controls" className="absolute top-4 right-4 z-20 flex items-center gap-1">
+        <ThemeToggle />
+        {HAS_GITHUB_LINK && (
           <a
             href={GITHUB_URL}
             target="_blank"
             rel="noopener"
             aria-label="View source on GitHub"
-            className="text-zinc-600 hover:text-zinc-300 transition-colors"
+            className="inline-flex items-center justify-center w-9 h-9 rounded-lg text-muted hover:text-ink transition-colors"
           >
-            <svg viewBox="0 0 24 24" width={24} height={24} fill="currentColor" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width={22} height={22} fill="currentColor" aria-hidden="true">
               <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
             </svg>
           </a>
-        </header>
-      )}
+        )}
+      </header>
 
       {/* ── Content ── */}
       <main className="relative z-10 max-w-md w-full px-6 py-10 space-y-7 text-center">
@@ -773,7 +801,7 @@ function App() {
                     : 'min-h-[5.5rem] sm:min-h-[6.5rem] flex flex-col items-center justify-center'
                 }
               >
-                <span className="text-5xl sm:text-6xl font-heading font-extrabold tracking-tight text-white leading-[0.95]">
+                <span className="text-5xl sm:text-6xl font-heading font-extrabold tracking-tight text-ink leading-[0.95]">
                   {APP_NAME}
                 </span>
                 {!brandHasVisualField && (
@@ -790,8 +818,8 @@ function App() {
               without inferring purpose from the brand alone. Kept high-
               contrast (zinc-200) and at a legible size for the low-vision
               audience this tool serves. */}
-          <p className="mt-2 mx-auto max-w-md text-center text-[15px] leading-relaxed text-zinc-200">
-            Check your vision at home in about 5 minutes, for free.
+          <p className="mt-2 mx-auto max-w-md text-center text-[15px] leading-relaxed text-body">
+            Check your vision at home in about 5–15 minutes, for free.
           </p>
         </div>
 
@@ -828,51 +856,12 @@ function App() {
               Card border upgraded to accent/20 so the corner brackets
               feel like extensions of the card's own rim. */}
           <div className="relative">
-            {/* Tick-mark overlay — 24 radial pins every 15° around the
-                card perimeter, echoing the scope-ring tick marks on
-                the inner preview chart. SVG uses preserveAspectRatio
-                = none so its 500×500 viewBox stretches to fit the
-                card; ticks land at the card's relative angular
-                positions. vector-effect="non-scaling-stroke" keeps
-                the tick stroke width constant regardless of stretch,
-                so we don't get thicker ticks on the taller axis.
-                Cardinals/intercardinals are slightly longer + more
-                opaque than the intermediate ticks, matching how a
-                real instrument bezel reads. */}
-            <svg
-              className="absolute pointer-events-none"
-              aria-hidden="true"
-              viewBox="0 0 500 500"
-              preserveAspectRatio="none"
-              style={{ top: -22, left: -22, width: 'calc(100% + 44px)', height: 'calc(100% + 44px)', zIndex: 1 }}
-            >
-              {Array.from({ length: 24 }, (_, i) => i * 15).map(deg => {
-                const rad = (deg * Math.PI) / 180
-                const isMajor = deg % 45 === 0
-                const r1 = 250
-                const r2 = 250 - (isMajor ? 16 : 8)
-                return (
-                  <line
-                    key={`outer-tick-${deg}`}
-                    x1={250 + r1 * Math.cos(rad)} y1={250 - r1 * Math.sin(rad)}
-                    x2={250 + r2 * Math.cos(rad)} y2={250 - r2 * Math.sin(rad)}
-                    stroke={`rgba(200,144,42,${isMajor ? 0.5 : 0.28})`}
-                    strokeWidth={isMajor ? 1.4 : 0.9}
-                    vectorEffect="non-scaling-stroke"
-                  />
-                )
-              })}
-            </svg>
-            {/* `scope-bezel` adds 3 concentric gold ring outlines
-                around the card (with the body bg showing through the
-                gaps), giving the card the same instrument-panel
-                aesthetic as the perimetry preview chart inside it.
-                Heavy `rounded-[3rem]` so the rings curve smoothly
-                rather than reading as a boxy frame. The original
-                drop shadow is folded into `.scope-bezel` so we don't
-                stack two shadow declarations. `relative z-[2]` so
-                the card sits above the tick-mark SVG. */}
-            <div className="relative z-[2] bg-[#0b0b12]/80 border border-white/10 rounded-[3rem] p-5 space-y-4 scope-bezel">
+            {/* Clean white "build your test" panel. The earlier draft wrapped
+                this in gold scope-bezel rings and a 24-tick instrument bezel,
+                which read as an intimidating instrument rather than a calm
+                clinical tool. The single instrument reference we keep is the
+                live PerimetryPreview chart inside the card. */}
+            <div className="relative z-[2] card rounded-3xl p-5 space-y-4">
 
             {/* Card header — accessibility: earlier draft used zinc-500
                 mono + 0.1em tracking for the duration, which sat
@@ -883,10 +872,10 @@ function App() {
                 duration, and gave the duration a subtle dark chip
                 backing so it stays legible over the amber ticks. */}
             <div className="flex items-center justify-between gap-3 px-1">
-              <p className="text-zinc-100 text-[11px] font-medium uppercase tracking-[0.12em]">
-                Build your test
+              <p className="text-ink text-[15px] font-heading font-semibold">
+                Set up your test
               </p>
-              <p className="shrink-0 rounded-md border border-white/10 bg-black/30 px-2 py-1 text-[12px] font-medium text-zinc-100">
+              <p className="tnum shrink-0 rounded-md border border-line bg-subtle px-2 py-1 text-[12px] font-medium text-body">
                 {durationSelected}
               </p>
             </div>
@@ -900,17 +889,17 @@ function App() {
                 aria-label="Left eye (OS)"
                 className={`group relative py-4 min-h-[84px] rounded-xl font-medium transition-colors duration-200 border focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base ${
                   eye === 'left'
-                    ? 'bg-accent/18 border-accent/60'
-                    : 'bg-white/[0.03] border-white/[0.08] hover:border-accent/25 hover:bg-white/[0.05]'
+                    ? 'bg-accent-tint border-accent'
+                    : 'bg-surface border-line hover:border-accent/50 hover:bg-subtle'
                 }`}
               >
-                <svg viewBox="0 0 32 32" className={`w-7 h-7 mx-auto mb-1.5 transition-colors duration-200 ${eye === 'left' ? 'text-accent' : 'text-zinc-500 group-hover:text-accent/80'}`} fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+                <svg viewBox="0 0 32 32" className={`w-7 h-7 mx-auto mb-1.5 transition-colors duration-200 ${eye === 'left' ? 'text-accent' : 'text-muted group-hover:text-accent'}`} fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
                   <ellipse cx="16" cy="16" rx="13" ry="8" />
                   <circle cx="14" cy="16" r="5" />
                   <circle cx="13" cy="15.5" r="2" fill="currentColor" />
                 </svg>
-                <span className="block text-base font-heading font-semibold text-white">Left</span>
-                <span className="text-zinc-400 text-[12px]"><abbr title="Oculus Sinister">OS</abbr></span>
+                <span className="block text-base font-heading font-semibold text-ink">Left</span>
+                <span className="text-muted text-[12px]"><abbr title="Oculus Sinister">OS</abbr></span>
               </button>
 
               <button
@@ -920,11 +909,11 @@ function App() {
                 aria-label="Both eyes (OU)"
                 className={`group relative py-4 min-h-[84px] rounded-xl font-medium transition-colors duration-200 border focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base ${
                   eye === 'both'
-                    ? 'bg-accent/18 border-accent/60'
-                    : 'bg-white/[0.03] border-white/[0.08] hover:border-accent/25 hover:bg-white/[0.05]'
+                    ? 'bg-accent-tint border-accent'
+                    : 'bg-surface border-line hover:border-accent/50 hover:bg-subtle'
                 }`}
               >
-                <svg viewBox="0 0 40 32" className={`w-9 h-7 mx-auto mb-1.5 transition-colors duration-200 ${eye === 'both' ? 'text-accent' : 'text-zinc-500 group-hover:text-accent/80'}`} fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+                <svg viewBox="0 0 40 32" className={`w-9 h-7 mx-auto mb-1.5 transition-colors duration-200 ${eye === 'both' ? 'text-accent' : 'text-muted group-hover:text-accent'}`} fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
                   <ellipse cx="13" cy="16" rx="10" ry="7" />
                   <circle cx="11.5" cy="16" r="3.5" />
                   <circle cx="11" cy="15.5" r="1.5" fill="currentColor" />
@@ -932,8 +921,8 @@ function App() {
                   <circle cx="28.5" cy="16" r="3.5" />
                   <circle cx="29" cy="15.5" r="1.5" fill="currentColor" />
                 </svg>
-                <span className="block text-base font-heading font-semibold text-white">Both</span>
-                <span className="text-zinc-400 text-[12px]"><abbr title="Oculus Uterque">OU</abbr></span>
+                <span className="block text-base font-heading font-semibold text-ink">Both</span>
+                <span className="text-muted text-[12px]"><abbr title="Oculus Uterque">OU</abbr></span>
               </button>
 
               <button
@@ -943,21 +932,21 @@ function App() {
                 aria-label="Right eye (OD)"
                 className={`group relative py-4 min-h-[84px] rounded-xl font-medium transition-colors duration-200 border focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base ${
                   eye === 'right'
-                    ? 'bg-accent/18 border-accent/60'
-                    : 'bg-white/[0.03] border-white/[0.08] hover:border-accent/25 hover:bg-white/[0.05]'
+                    ? 'bg-accent-tint border-accent'
+                    : 'bg-surface border-line hover:border-accent/50 hover:bg-subtle'
                 }`}
               >
-                <svg viewBox="0 0 32 32" className={`w-7 h-7 mx-auto mb-1.5 transition-colors duration-200 ${eye === 'right' ? 'text-accent' : 'text-zinc-500 group-hover:text-accent/80'}`} fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+                <svg viewBox="0 0 32 32" className={`w-7 h-7 mx-auto mb-1.5 transition-colors duration-200 ${eye === 'right' ? 'text-accent' : 'text-muted group-hover:text-accent'}`} fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
                   <ellipse cx="16" cy="16" rx="13" ry="8" />
                   <circle cx="18" cy="16" r="5" />
                   <circle cx="19" cy="15.5" r="2" fill="currentColor" />
                 </svg>
-                <span className="block text-base font-heading font-semibold text-white">Right</span>
-                <span className="text-zinc-400 text-[12px]"><abbr title="Oculus Dexter">OD</abbr></span>
+                <span className="block text-base font-heading font-semibold text-ink">Right</span>
+                <span className="text-muted text-[12px]"><abbr title="Oculus Dexter">OD</abbr></span>
               </button>
             </div>
 
-            <div className="border-t border-white/[0.08]" />
+            <div className="border-t border-line" />
 
             {/* Test mode tabs + explicit speed behavior copy.
                 The control still toggles timing presets, but the text
@@ -1005,7 +994,7 @@ function App() {
                         // closely enough that the small offset reads as
                         // intentional spacing.
                         className={`relative min-h-[40px] pl-4 pr-1 pb-1.5 pt-2 text-sm font-medium transition-colors duration-200 ${
-                          testMode === mode ? 'text-white' : studyLocked ? 'text-zinc-500' : 'text-zinc-400 hover:text-zinc-200'
+                          testMode === mode ? 'text-ink' : studyLocked ? 'text-muted' : 'text-muted hover:text-ink'
                         }`}
                       >
                         {mode === 'goldmann' ? 'Goldmann' : 'Static'}
@@ -1073,7 +1062,7 @@ function App() {
                     // (containing only the three radios) so a11y stays
                     // strict — the info button is a sibling, not part
                     // of the radio group.
-                    <div className="inline-flex items-center gap-1 rounded-full border border-white/[0.08] bg-white/[0.02] p-1">
+                    <div className="inline-flex items-center gap-1 rounded-full border border-line bg-subtle p-1">
                       <div
                         role="radiogroup"
                         aria-label="Test pace"
@@ -1097,10 +1086,10 @@ function App() {
                               // visual system as the rest of the card.
                               className={`rounded-full px-3 py-1 text-[12px] font-medium transition-colors ${
                                 selected
-                                  ? 'bg-accent/15 text-accent'
+                                  ? 'bg-accent-tint text-accent'
                                   : studyLocked
-                                    ? 'text-zinc-500'
-                                    : 'text-zinc-300 hover:text-white hover:bg-white/[0.05]'
+                                    ? 'text-muted'
+                                    : 'text-muted hover:text-ink hover:bg-subtle-2'
                               }`}
                             >
                               {labelFor(mode)}
@@ -1130,6 +1119,53 @@ function App() {
                   tabs on desktop again. */}
               <PerimetryPreview testMode={testMode} speedMode={speedMode} />
 
+              {/* Presentation mode — Standard vs Phone-in-headset (VR).
+                  Phone VR cradles a phone in a passive headset, so the whole
+                  control is shown only on a phone-like device; on desktop/
+                  laptop/non-phone tablets it's hidden entirely. Also hidden
+                  under a locked study profile, which always runs standard. */}
+              {!studyLocked && phoneLike && (
+                <div className="flex flex-col gap-2 items-center">
+                  <div className="flex items-center gap-2">
+                    <span className="text-muted text-[11px] font-semibold uppercase tracking-[0.12em]">Presentation</span>
+                    <InfoButton label="Presentation mode">
+                      <strong className="text-accent block mb-1">Phone VR mode</strong>
+                      Mount your phone in landscape inside a passive VR headset. The screen splits into two lens halves and the tested eye uses one half.
+                    </InfoButton>
+                  </div>
+                  <div
+                    role="radiogroup"
+                    aria-label="Presentation mode"
+                    className="inline-flex gap-1 rounded-full border border-line bg-subtle p-1"
+                  >
+                    <button
+                      role="radio"
+                      aria-checked={presentationMode === 'standard'}
+                      onClick={() => setPresentationMode('standard')}
+                      className={`rounded-full px-3 py-1 text-[12px] font-medium transition-colors ${
+                        presentationMode === 'standard'
+                          ? 'bg-accent-tint text-accent'
+                          : 'text-muted hover:text-ink hover:bg-subtle-2'
+                      }`}
+                    >
+                      Standard
+                    </button>
+                    <button
+                      role="radio"
+                      aria-checked={presentationMode === 'phone-vr'}
+                      onClick={() => setPresentationMode('phone-vr')}
+                      className={`rounded-full px-3 py-1 text-[12px] font-medium transition-colors ${
+                        presentationMode === 'phone-vr'
+                          ? 'bg-accent-tint text-accent'
+                          : 'text-muted hover:text-ink hover:bg-subtle-2'
+                      }`}
+                    >
+                      Phone VR
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {studyLocked && (
                 <p className="text-left text-xs leading-relaxed text-teal">
                   Test type, pace, extended-field behavior, and advanced settings are locked by the active study profile.
@@ -1157,10 +1193,10 @@ function App() {
             disabled={!studyReady}
             className={`group w-full min-h-[60px] rounded-xl border py-4 transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base ${
               studyReady
-                ? 'border-accent/40 bg-accent text-[#1f1605] shadow-[0_4px_24px_rgba(200,144,42,0.22)] hover:scale-[1.01] hover:bg-accent-light hover:shadow-[0_6px_32px_rgba(200,144,42,0.32)]'
-                : 'border-white/10 bg-zinc-700 text-zinc-300 shadow-none'
+                ? 'border-transparent bg-accent text-white shadow-[0_4px_24px_rgba(10,108,201,0.25)] hover:scale-[1.01] hover:bg-accent-dark hover:shadow-[0_6px_32px_rgba(10,108,201,0.32)]'
+                : 'border-line bg-subtle-2 text-muted shadow-none'
             }`}
-            aria-label={`Start test: ${testMode} on ${eye === 'both' ? 'both eyes' : eye + ' eye'}`}
+            aria-label={`Start test: ${testMode} on ${eye === 'both' ? 'both eyes, two separate tests' : eye + ' eye'}`}
           >
             <span className="flex items-center justify-center gap-2 text-base font-heading font-bold leading-none">
               Begin test
@@ -1176,11 +1212,17 @@ function App() {
                 preserves word-shape, which matters under reduced
                 acuity). Dividers are 75% so they recede without
                 bleaching. */}
-            <span className="mt-1 block text-[12px] font-medium tracking-[0.02em] text-[#1f1605]">
-              {eye === 'both' ? 'OU' : eye === 'left' ? 'OS' : 'OD'}
-              <span className="mx-2 text-[#1f1605]/60">·</span>
+            <span className="tnum mt-1 block text-[12px] font-medium tracking-[0.02em] text-white">
+              {eye === 'both' ? 'Both eyes — 2 tests' : eye === 'left' ? 'Left eye' : 'Right eye'}
+              <span className="mx-2 text-white/70">·</span>
               {testMode === 'goldmann' ? 'Goldmann' : 'Static'}
-              <span className="mx-2 text-[#1f1605]/60">·</span>
+              {phoneLike && presentationMode === 'phone-vr' && (
+                <>
+                  <span className="mx-2 text-white/70">·</span>
+                  Phone VR
+                </>
+              )}
+              <span className="mx-2 text-white/70">·</span>
               {durationSelected.replace('~', '')}
             </span>
           </button>
@@ -1191,14 +1233,15 @@ function App() {
               know at the button: is it safe to try (screening, not a
               diagnosis), is it low-commitment (no account), and what will it
               ask of me (so setup needs aren't a surprise only after Begin). */}
-          <p className="mt-2.5 text-center text-[13px] leading-relaxed text-zinc-300">
-            Screening only — not a diagnosis. No account needed to start.
+          <p className="mt-2.5 text-center text-[13px] leading-relaxed text-body">
+            No account needed to start.
           </p>
-          <p className="mt-1 text-center text-[12px] leading-relaxed text-zinc-400">
-            You'll need a screen at arm's length and to cover one eye when prompted.
+          <p className="mt-1 text-center text-[12px] leading-relaxed text-muted">
+            You'll need a bank-card-sized card to calibrate, a dimly lit room, a screen at
+            arm's length, and to cover one eye when prompted.
           </p>
           {!studyReady && (
-            <p className="mt-2 text-sm text-amber-200/85">
+            <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">
               Study mode requires both a participant ID and session ID before the test can start.
             </p>
           )}
@@ -1216,15 +1259,15 @@ function App() {
           <div className="fade-up fade-up-6 flex gap-3">
             <button
               onClick={() => setPage('history')}
-              className="flex-1 py-3 min-h-[48px] bg-white/[0.03] hover:bg-white/[0.06] rounded-xl font-medium transition-all border border-white/[0.06] hover:border-white/[0.12] focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base"
+              className="flex-1 py-3 min-h-[48px] bg-surface hover:bg-subtle rounded-xl font-medium text-body transition-all border border-line hover:border-line-strong focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base"
             >
-              <svg className="inline w-4 h-4 mr-1.5 -mt-0.5 text-zinc-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+              <svg className="inline w-4 h-4 mr-1.5 -mt-0.5 text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
                 <path d="M12 8v4l3 3" />
                 <circle cx="12" cy="12" r="10" />
               </svg>
               Results
               {resultCount > 0 && (
-                <span className="ml-1.5 text-zinc-500 text-sm">({resultCount})</span>
+                <span className="tnum ml-1.5 text-muted text-sm">({resultCount})</span>
               )}
             </button>
           </div>
@@ -1232,15 +1275,15 @@ function App() {
           <div className="fade-up fade-up-6 space-y-2">
             <button
               onClick={() => { setAuthMode('register'); setShowAuth(true) }}
-              className="w-full py-3 min-h-[48px] bg-white/[0.03] hover:bg-white/[0.06] rounded-xl text-sm font-medium text-zinc-100 hover:text-white transition-all border border-white/[0.08] hover:border-white/[0.14] focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base"
+              className="w-full py-3 min-h-[48px] bg-surface hover:bg-subtle rounded-xl text-sm font-medium text-body hover:text-ink transition-all border border-line hover:border-line-strong focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base"
             >
-              <svg className="inline w-4 h-4 mr-1.5 -mt-0.5 text-zinc-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+              <svg className="inline w-4 h-4 mr-1.5 -mt-0.5 text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
                 <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
                 <circle cx="12" cy="7" r="4" />
               </svg>
               Create account
             </button>
-            <p className="text-center text-sm text-zinc-300">
+            <p className="text-center text-sm text-body">
               Already have an account?{' '}
               <button
                 onClick={() => { setAuthMode('login'); setShowAuth(true) }}
@@ -1255,7 +1298,7 @@ function App() {
         {/* Account (when logged in) */}
         {user && (
           <div className="fade-up fade-up-6 flex items-center justify-center gap-3 text-sm">
-            <span className="text-zinc-400">
+            <span className="text-muted">
               <svg className="inline w-4 h-4 mr-1 -mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
                 <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
                 <circle cx="12" cy="7" r="4" />
@@ -1280,13 +1323,13 @@ function App() {
             )}
             <button
               onClick={logout}
-              className="text-zinc-500 hover:text-zinc-300 transition-colors min-h-[44px] px-2"
+              className="text-muted hover:text-ink transition-colors min-h-[44px] px-2"
             >
               Sign out
             </button>
             <button
               onClick={() => { setShowDeleteAccount(true); setDeleteAccountTyped(''); setDeleteAccountError(null) }}
-              className="text-red-500/70 hover:text-red-400 transition-colors min-h-[44px] px-2"
+              className="text-red-600 dark:text-red-400 hover:text-red-700 transition-colors min-h-[44px] px-2"
             >
               Delete account
             </button>
@@ -1299,14 +1342,14 @@ function App() {
         </div>
 
         {/* Footer navigation */}
-        <nav aria-label="Site navigation" className="fade-up fade-up-8 pt-2 border-t border-white/[0.05]">
+        <nav aria-label="Site navigation" className="fade-up fade-up-8 pt-2 border-t border-line">
           <div className="flex flex-wrap justify-center gap-x-4 gap-y-1">
-            <button onClick={() => setPage('demo')} className="text-zinc-500 hover:text-zinc-300 text-xs transition-colors min-h-[44px] px-1">Demos</button>
-            <button onClick={() => setPage('methods')} className="text-zinc-500 hover:text-zinc-300 text-xs transition-colors min-h-[44px] px-1">Methods</button>
-            <button onClick={() => setPage('science')} className="text-zinc-500 hover:text-zinc-300 text-xs transition-colors min-h-[44px] px-1">References</button>
-            <button onClick={() => setPage('clinicians')} className="text-zinc-500 hover:text-zinc-300 text-xs transition-colors min-h-[44px] px-1">Clinicians</button>
-            <button onClick={() => setPage('contact')} className="text-zinc-500 hover:text-zinc-300 text-xs transition-colors min-h-[44px] px-1">Contact</button>
-            <button onClick={() => setPage('privacy')} className="text-zinc-500 hover:text-zinc-300 text-xs transition-colors min-h-[44px] px-1">Privacy</button>
+            <button onClick={() => setPage('demo')} className="text-muted hover:text-ink text-xs transition-colors min-h-[44px] px-1">Demos</button>
+            <button onClick={() => setPage('methods')} className="text-muted hover:text-ink text-xs transition-colors min-h-[44px] px-1">Methods</button>
+            <button onClick={() => setPage('science')} className="text-muted hover:text-ink text-xs transition-colors min-h-[44px] px-1">References</button>
+            <button onClick={() => setPage('clinicians')} className="text-muted hover:text-ink text-xs transition-colors min-h-[44px] px-1">Clinicians</button>
+            <button onClick={() => setPage('contact')} className="text-muted hover:text-ink text-xs transition-colors min-h-[44px] px-1">Contact</button>
+            <button onClick={() => setPage('privacy')} className="text-muted hover:text-ink text-xs transition-colors min-h-[44px] px-1">Privacy</button>
           </div>
           <div className="flex justify-center gap-3 pt-2">
             <a
@@ -1316,7 +1359,7 @@ function App() {
               }}
               target="_blank"
               rel="noopener"
-              className="inline-flex items-center gap-1.5 text-zinc-500 hover:text-green-400 text-xs transition-colors min-h-[44px] px-1"
+              className="inline-flex items-center gap-1.5 text-muted hover:text-green-600 text-xs transition-colors min-h-[44px] px-1"
             >
               <svg viewBox="0 0 24 24" width={14} height={14} fill="currentColor" aria-hidden="true">
                 <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z" />
@@ -1328,7 +1371,7 @@ function App() {
                 href={GITHUB_URL}
                 target="_blank"
                 rel="noopener"
-                className="inline-flex items-center gap-1.5 text-zinc-500 hover:text-zinc-300 text-xs transition-colors min-h-[44px] px-1"
+                className="inline-flex items-center gap-1.5 text-muted hover:text-ink text-xs transition-colors min-h-[44px] px-1"
               >
                 <svg viewBox="0 0 24 24" width={14} height={14} fill="currentColor" aria-hidden="true">
                   <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
@@ -1341,51 +1384,51 @@ function App() {
 
       </main>
 
-      {showAuth && <AuthModal onClose={() => setShowAuth(false)} initialMode={authMode} />}
+      {authModal}
 
       {showDeleteAccount && user && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
           role="dialog"
           aria-modal="true"
           aria-labelledby="delete-account-title"
           onClick={closeDeleteAccountModal}
         >
           <div
-            className="w-full max-w-md rounded-2xl border border-red-900/50 bg-gray-950 p-6 shadow-xl"
+            className="w-full max-w-md rounded-2xl border border-red-200 dark:border-red-800 bg-surface p-6 shadow-xl"
             onClick={e => e.stopPropagation()}
           >
-            <h2 id="delete-account-title" className="text-lg font-semibold text-white">Delete your account</h2>
-            <p className="mt-3 text-sm text-zinc-300">
+            <h2 id="delete-account-title" className="text-lg font-semibold text-ink">Delete your account</h2>
+            <p className="mt-3 text-sm text-body">
               This will permanently delete your account ({user.email}) and all your test results, surveys, saved screens, and active sessions. This cannot be undone.
             </p>
-            <p className="mt-4 text-xs text-zinc-400">
-              Type your name (<span className="font-mono text-zinc-200">{user.displayName}</span>) to confirm:
+            <p className="mt-4 text-xs text-muted">
+              Type your name (<span className="font-mono text-ink">{user.displayName}</span>) to confirm:
             </p>
             <input
               type="text"
               autoFocus
               value={deleteAccountTyped}
               onChange={e => setDeleteAccountTyped(e.target.value)}
-              className="mt-2 w-full rounded-lg border border-zinc-800/60 bg-zinc-900/80 px-3 py-2 text-sm text-white focus:border-red-500/60 focus:outline-none"
+              className="mt-2 w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink focus:border-red-500 focus:outline-none focus:ring-2 focus:ring-red-500/20"
               placeholder={user.displayName}
               disabled={deleteAccountBusy}
             />
             {deleteAccountError && (
-              <p className="mt-3 rounded-lg border border-red-800/40 bg-red-900/20 px-3 py-2 text-sm text-red-300">
+              <p className="mt-3 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-sm text-red-700 dark:text-red-200">
                 {deleteAccountError}
               </p>
             )}
             <div className="mt-5 flex justify-end gap-2">
               <button
-                className="rounded-lg border border-zinc-700 bg-zinc-900/60 px-4 py-2 text-sm text-zinc-300 hover:border-zinc-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded-lg border border-line bg-surface px-4 py-2 text-sm text-body hover:border-line-strong hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={deleteAccountBusy}
                 onClick={closeDeleteAccountModal}
               >
                 Cancel
               </button>
               <button
-                className="rounded-lg border border-red-700 bg-red-700/40 px-4 py-2 text-sm font-medium text-red-100 hover:bg-red-700/60 disabled:cursor-not-allowed disabled:opacity-40"
+                className="rounded-lg border border-red-600 bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
                 disabled={deleteAccountTyped.trim() !== user.displayName || deleteAccountBusy}
                 onClick={() => void confirmDeleteOwnAccount()}
               >

@@ -21,7 +21,17 @@ function effectiveTestDims(isMobile: boolean): { width: number; height: number }
     height: typeof screen !== 'undefined' ? screen.height : window.innerHeight,
   }
 }
-import type { CalibrationData, Eye, RunSpeedMode } from '../types'
+import type { CalibrationData, Eye, PresentationMode, RunSpeedMode, VrHeadsetPreset } from '../types'
+import {
+  VR_HEADSET_SPECS,
+  clampLensSeparationPx,
+  vrDefaultLensSeparationFraction,
+  vrMaxFieldHalfDeg,
+  vrPixelsPerDegree,
+} from '../vrCalibration'
+import { computeVrViewport, vrMaxEccentricityDeg } from '../vrGeometry'
+import { VrTestSurface } from './VrTestSurface'
+import { useRemoteInput, useCountdownAdvance } from '../remoteInput'
 import { BackButton } from './AccessibleNav'
 import { CALIBRATION } from '../constants'
 import { formatEyeLabelLong } from '../eyeLabels'
@@ -31,6 +41,8 @@ import { STATIC_GRID_INFO, countCustomGridPoints } from '../grids'
 import type { StaticGridPattern } from '../grids'
 import { useStudyMode } from '../studyMode'
 import { isPhoneLikeDevice } from '../deviceMode'
+import { trackEvent } from '../api'
+import { getDeviceId } from '../storage'
 import {
   addScreen,
   clearActiveScreen,
@@ -41,6 +53,12 @@ import {
 const CREDIT_CARD_WIDTH_MM = 85.6
 const CREDIT_CARD_HEIGHT_MM = 53.98
 const RT_TRIALS = 5
+
+// In-headset timer-fallback durations (seconds). Once the phone is in the
+// headset the patient can't reach the screen, so each confirm step also
+// auto-advances if no remote press arrives. Ready intentionally starts fast:
+// once the phone is settled, we do not rely on flaky media/volume controls.
+const VR_LENS_GUIDE_AUTO_SECONDS = 12
 
 interface Props {
   eye: Eye
@@ -57,15 +75,19 @@ interface Props {
    *  battery). Defaults to `normal`. Static ignores this; its
    *  Ready-screen copy is the same regardless of pace. */
   speedMode?: RunSpeedMode
+  /** Presentation mode from the home screen. `phone-vr` inserts a lens
+   *  setup step and emits VR lens geometry in the calibration output.
+   *  Defaults to `standard`. */
+  presentationMode?: PresentationMode
 }
 
-type Step = 'screen' | 'distance' | 'brightness' | 'reaction' | 'ready'
+type Step = 'screen' | 'distance' | 'brightness' | 'reaction' | 'vr' | 'ready'
 
 function StepProgress({ current, total }: { current: number; total: number }) {
   const pct = Math.round((current / total) * 100)
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between text-xs text-zinc-500">
+      <div className="flex items-center justify-between text-xs text-muted">
         <span>Step {current} of {total}</span>
         <span>{pct}%</span>
       </div>
@@ -79,7 +101,8 @@ function StepProgress({ current, total }: { current: number; total: number }) {
   )
 }
 
-export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime, testMode, speedMode = 'normal' }: Props) {
+export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime, testMode, speedMode = 'normal', presentationMode = 'standard' }: Props) {
+  const isVr = presentationMode === 'phone-vr'
   // Pull the live static-grid pattern and custom-grid params so the
   // "Ready to test" summary can show the exact grid (and point count)
   // the user will run, rather than claiming a generic "54 points".
@@ -112,7 +135,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   // Skip whichever calibration steps already have a clinic-saved value.
   // Order is screen → distance → brightness → (reaction) → ready, so we
   // jump to the first un-saved step.
-  const initialStep: Step = !savedScreenCal
+  const initialStepBase: Step = !savedScreenCal
     ? 'screen'
     : savedScreenCal.viewingDistanceCm == null
       ? 'distance'
@@ -121,19 +144,52 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
         : !wantsReactionTime
           ? 'ready'
           : 'reaction'
+  // VR skips only the arm's-length distance step. Brightness is calibrated
+  // before headset insertion with the normal on-screen slider; once the phone
+  // goes into the headset there are no volume/button adjustment steps.
+  const initialStep: Step = isVr
+    ? !savedScreenCal
+      ? 'screen'
+      : savedScreenCal.brightnessFloor == null
+        ? 'brightness'
+        : wantsReactionTime
+          ? 'reaction'
+          : 'vr'
+    : initialStepBase
   const [step, setStep] = useState<Step>(initialStep)
   // screen (card) + distance + brightness + (reaction?) + ready.
   // Blindspot position verification happens in the test component itself
   // (as the `position-check` phase) right before the countdown fires, so
   // the patient doesn't have to re-settle between "confirm distance" and
   // "sit for the test". See components/PositionCheckOverlay.tsx.
-  const totalSteps = wantsReactionTime ? 5 : 4
-  const stepNumber =
-    step === 'screen' ? 1 :
-    step === 'distance' ? 2 :
-    step === 'brightness' ? 3 :
-    step === 'reaction' ? 4 :
-    totalSteps
+  // Step order. Phone-VR calibrates screen brightness while the phone is still
+  // in hand, then uses known headset optics for the lens geometry. There is no
+  // in-headset volume-up / volume-down calibration. Reaction time stays before
+  // the headset since it is tap/Space based.
+  const stepOrder: Step[] = isVr
+    ? ['screen', 'brightness', ...(wantsReactionTime ? (['reaction'] as Step[]) : []), 'vr']
+    : ['screen', 'distance', 'brightness', ...(wantsReactionTime ? (['reaction'] as Step[]) : []), 'ready']
+  const totalSteps = stepOrder.length
+  const stepNumber = Math.max(1, stepOrder.indexOf(step) + 1)
+
+  // Calibration-funnel instrumentation. `test_started` only fires once the
+  // user reaches the countdown→testing transition, so everyone who abandons
+  // during this wizard is invisible to the abort metric — likely the largest
+  // real drop-off and, until now, completely dark. We emit a lightweight
+  // page_view per step (already an allow-listed event, so no backend change)
+  // so the setup funnel can finally be measured: count step entries vs.
+  // test_started to see where first-timers fall out.
+  useEffect(() => {
+    trackEvent('page_view', getDeviceId(), {
+      view: 'calibration',
+      calibrationStep: step,
+      calibrationStepNumber: String(stepNumber),
+      calibrationTotalSteps: String(totalSteps),
+      ...(testMode ? { testType: testMode } : {}),
+      eye,
+    }).catch(() => {})
+    // Fire once per distinct step entry.
+  }, [step, stepNumber, totalSteps, testMode, eye])
 
   // Screen calibration — pre-fill from the active clinic-saved workstation
   // if one exists for this display, so a workstation that's already been
@@ -179,6 +235,13 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   // off there. Study profile (handled below) overrides this if locked.
   const [extendedField, setExtendedField] = useState(isMobile)
 
+  // ── Phone VR lens setup ──
+  // Lens separation is computed from the headset preset IPD (mm) and the
+  // screen's px/mm from the bank-card calibration. That gives a deterministic
+  // optical-center offset without asking the user to nudge sliders in-headset.
+  const vrPreset: VrHeadsetPreset = 'standard'
+  const [vrLensGuideActive, setVrLensGuideActive] = useState(false)
+
   // Re-render the field-coverage diagram when the viewport rotates or
   // resizes. The diagram reads window/screen dimensions directly in
   // render to project the testable polygon, so without this listener a
@@ -202,10 +265,26 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   const [rtCurrent, setRtCurrent] = useState(0)
   const rtStartRef = useRef(0)
   const rtTimeoutRef = useRef(0)
+  // Latest `remote.arm`, wired below once the remote hook exists. Held in a ref
+  // so the step handlers (defined above the hook) can arm the controller from
+  // the tap that enters the headset flow — a real user gesture, while the phone
+  // is still in hand — which the gamepad/media transports require.
+  const armRef = useRef<() => void>(() => {})
 
   const cardHeightPx = cardWidthPx * (CREDIT_CARD_HEIGHT_MM / CREDIT_CARD_WIDTH_MM)
   const pxPerMm = cardWidthPx / CREDIT_CARD_WIDTH_MM
-  const pxPerDeg = pxPerMm * (distanceCm * 10) * Math.tan(Math.PI / 180)
+  // In phone-VR the screen sits at the lens focal plane, so the angular
+  // scale comes from the optics (the headset's known focal length), not a
+  // physical viewing distance — the distance step is skipped in VR and
+  // `distanceCm` would be meaningless here. Standard mode keeps the
+  // arm's-length model.
+  const pxPerDeg = isVr
+    ? vrPixelsPerDegree(pxPerMm, VR_HEADSET_SPECS[vrPreset].focalLengthMm)
+    : pxPerMm * (distanceCm * 10) * Math.tan(Math.PI / 180)
+  const vrLensSeparationPx = useCallback((viewportWidthPx: number) => {
+    const fraction = vrDefaultLensSeparationFraction(vrPreset, pxPerMm, viewportWidthPx)
+    return clampLensSeparationPx(fraction * viewportWidthPx, viewportWidthPx)
+  }, [pxPerMm, vrPreset])
 
   // Shift fixation toward the nose side so the temporal field (larger in RP) gets more screen.
   const fixationOffsetPx = eye === 'right'
@@ -226,6 +305,13 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
     ? [...rtTimes].sort((a, b) => a - b)[Math.floor(rtTimes.length / 2)]
     : CALIBRATION.DEFAULT_REACTION_TIME_MS
 
+  const startReactionStep = () => {
+    setStep('reaction')
+    setRtStarted(false)
+    setRtTimes([])
+    setRtCurrent(0)
+    setRtPhase('waiting')
+  }
   const handleScreenDone = () => {
     // Persist the freshly-confirmed card size so subsequent tests on
     // this workstation can skip the screen step entirely. If no
@@ -237,6 +323,15 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
     } else {
       setSavedScreenCal(addScreen({ label: 'This workstation', cardWidthPx }))
     }
+    // VR skips the arm's-length distance step, but brightness still happens
+    // now while the phone is in hand. Claim the controller/media session from
+    // this tap so the remote's button is live on every in-headset page that
+    // follows, no matter which step the flow actually started on.
+    if (isVr) {
+      armRef.current()
+      setStep('brightness')
+      return
+    }
     setStep('distance')
   }
   const handleRecalibrateScreen = () => {
@@ -246,20 +341,28 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
     setSavedScreenCal(null)
     setStep('screen')
   }
-  const handleDistanceDone = () => setStep('brightness')
+  // Distance is a standard-mode-only step (VR fixes the optical distance
+  // at the lens focal length), so it always leads into brightness.
+  const handleDistanceDone = () => {
+    setStep('brightness')
+  }
 
   const handleBrightnessDone = () => {
     setBrightnessFloor(brightness)
+    if (isVr) {
+      // The lens step onward runs in-headset; (re-)arm the controller now,
+      // from this tap, so its button works once the phone is inserted —
+      // idempotent if it was already armed leaving the screen step.
+      armRef.current()
+      if (wantsReactionTime) startReactionStep()
+      else setStep('vr')
+      return
+    }
     if (!wantsReactionTime) {
-      // Skip reaction time — go straight to ready with a default value
       setStep('ready')
       return
     }
-    setStep('reaction')
-    setRtStarted(false)
-    setRtTimes([])
-    setRtCurrent(0)
-    setRtPhase('waiting')
+    startReactionStep()
   }
 
   // ---------- RT trial logic ----------
@@ -319,18 +422,114 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   }, [step, handleRtResponse])
 
   const handleStart = () => {
-    onCalibrated({
+    const dims = effectiveTestDims(isMobile)
+    const base = {
       pixelsPerDegree: pxPerDeg,
-      maxEccentricityDeg: Math.floor(maxEcc),
       viewingDistanceCm: distanceCm,
       brightnessFloor,
       reactionTimeMs: medianRt,
-      fixationOffsetPx,
-      screenWidthPx: effectiveTestDims(isMobile).width,
-      screenHeightPx: effectiveTestDims(isMobile).height,
+      screenWidthPx: dims.width,
+      screenHeightPx: dims.height,
       sphericityCorrection: true,
+    }
+    if (isVr) {
+      // Geometry is computed against the live landscape viewport — the
+      // same dims the test renderer reads — so fixation lands at the
+      // active lens center and max eccentricity reflects the lens half,
+      // not the whole phone screen.
+      const innerW = typeof window !== 'undefined' ? window.innerWidth : dims.width
+      const innerH = typeof window !== 'undefined' ? window.innerHeight : dims.height
+      const vrCal = {
+        enabled: true as const,
+        headsetPreset: vrPreset,
+        lensSeparationPx: vrLensSeparationPx(innerW),
+        lensCenterYOffsetPx: 0,
+      }
+      // 'both' calibrates the right eye first; the left pass mirrors at
+      // run time. The test derives fixation from `vr` + its own eye, so
+      // this fixationOffsetPx is just a consistent default.
+      const activeEye = eye === 'both' ? 'right' : eye
+      const vp = computeVrViewport(innerW, innerH, activeEye, vrCal)
+      // The screen-edge scan can reach beyond what the lenses actually
+      // image, so cap the geometric maximum at the headset's half-FOV.
+      const maxEccDeg = Math.min(
+        Math.floor(vrMaxEccentricityDeg(vp, innerW, innerH, pxPerDeg)),
+        Math.floor(vrMaxFieldHalfDeg(vrPreset)),
+      )
+      onCalibrated({
+        ...base,
+        // The optical screen distance is the lens focal length, not the
+        // arm's-length value collected for standard runs. (pixelsPerDegree
+        // in `base` is already the focal-length value via `pxPerDeg`.)
+        viewingDistanceCm: VR_HEADSET_SPECS[vrPreset].focalLengthMm / 10,
+        maxEccentricityDeg: maxEccDeg,
+        fixationOffsetPx: Math.round(vp.fixationXFromScreenCenter),
+        vr: vrCal,
+      }, extendedField)
+      return
+    }
+    onCalibrated({
+      ...base,
+      maxEccentricityDeg: Math.floor(maxEcc),
+      fixationOffsetPx,
     }, extendedField)
   }
+
+  // ── In-headset controller wiring (phone-VR lens → ready steps) ──
+  // From the lens step onward the phone is in the headset, so the patient
+  // can't reach on-screen buttons. Every in-headset step is advanced by a
+  // controller button press (gamepad / media-key / keyboard Enter) or the
+  // visible countdown. `arm` runs from the tap that enters the flow.
+  const beepRef = useRef<() => void>(() => {})
+  // Single confirm action for every in-headset step, shared by the controller
+  // button and the keyboard Enter/Space fallback.
+  const confirmInHeadset = () => {
+    if (!isVr) return
+    if (step === 'vr' && !vrLensGuideActive) {
+      // Advance the lens-setup page into the live focus guide. The phone must
+      // be landscape (seated in the headset) first, mirroring the button's
+      // disabled-while-portrait state.
+      const portrait = typeof window !== 'undefined' && window.innerHeight > window.innerWidth
+      if (portrait) return
+      beepRef.current()
+      armRef.current()
+      setVrLensGuideActive(true)
+    } else if (step === 'vr' && vrLensGuideActive) {
+      // The lens-focus guide is the single in-headset confirm: once the rings
+      // are sharp, the press starts the test directly. (It used to advance to a
+      // separate 'ready' crosshair screen — a redundant second crosshair the
+      // patient saw right after this one.)
+      beepRef.current()
+      handleStart()
+    }
+  }
+  const remote = useRemoteInput(confirmInHeadset, { axisAsPress: false })
+  useEffect(() => { beepRef.current = remote.beep }, [remote.beep])
+  useEffect(() => { armRef.current = remote.arm }, [remote.arm])
+  // Keyboard-remote confirm for the in-headset steps: an HID-keyboard remote's
+  // OK button typically sends Enter. Held in a ref so the listener re-subscribes
+  // only on step change, not on every render.
+  const confirmRef = useRef(confirmInHeadset)
+  useEffect(() => { confirmRef.current = confirmInHeadset })
+  useEffect(() => {
+    if (!isVr) return
+    if (step !== 'vr') return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Enter' || e.key === ' ' || e.code === 'Space' || e.code === 'NumpadEnter') {
+        e.preventDefault()
+        confirmRef.current()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [isVr, step])
+  // Timer fallback for the in-headset lens-focus guide, so a patient whose
+  // remote drops out is never stranded reaching for an unreachable button —
+  // the test starts on its own. (The old separate 'ready' screen and its
+  // countdown were removed; the lens guide now starts the test directly.)
+  const lensGuideCountdown = useCountdownAdvance(
+    isVr && step === 'vr' && vrLensGuideActive, VR_LENS_GUIDE_AUTO_SECONDS, 'vr-guide', confirmInHeadset,
+  )
 
   // Screen size quality assessment — `isMobile` is computed at the top
   // of the function so the distance picker can use it for the floor.
@@ -349,28 +548,17 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   // ==================== STEP 1: Screen ====================
   if (step === 'screen') {
     return (
-      <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
+      <div className="min-h-[100dvh] bg-base text-body safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
         <main className="max-w-lg w-full space-y-8">
           <BackButton onClick={onBack} />
           <StepProgress current={stepNumber} total={totalSteps} />
 
           <h1 className="text-2xl font-heading font-bold">Screen calibration</h1>
 
-          {isMobile && (
-            <div className="bg-red-900/20 border border-red-700/40 rounded-xl px-4 py-3 text-sm space-y-1">
-              <p className="text-red-400 font-medium">Mobile device detected</p>
-              <p className="text-red-400/70 text-xs">
-                This test requires a large screen to cover enough visual field.
-                On a phone you can only test the central ~{Math.floor(Math.min(fieldUp, fieldLeft, fieldRight))}°.
-                Use a laptop, desktop monitor, or tablet for meaningful results.
-              </p>
-            </div>
-          )}
-
           {isSmallWindow && (
-            <div className="bg-yellow-900/20 border border-yellow-700/40 rounded-xl px-4 py-3 text-sm space-y-1">
-              <p className="text-yellow-400 font-medium">Maximize your browser window</p>
-              <p className="text-yellow-400/70 text-xs">
+            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm space-y-1">
+              <p className="text-amber-800 font-medium">Maximize your browser window</p>
+              <p className="text-amber-700 text-xs">
                 Your browser window is small — maximize it or go fullscreen (F11) to cover more visual field.
                 Current coverage is only ~{Math.floor(Math.min(fieldUp, fieldLeft, fieldRight))}° from center. For RP monitoring, 30°+ is ideal.
               </p>
@@ -378,7 +566,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
           )}
 
           <div className="space-y-3">
-            <p className="text-sm text-zinc-300">
+            <p className="text-sm text-body">
               Hold a bank card to your screen. Drag the slider until the rectangle matches exactly.
             </p>
             <div className="flex justify-center">
@@ -425,7 +613,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   // ==================== STEP 2: Viewing distance ====================
   if (step === 'distance') {
     return (
-      <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
+      <div className="min-h-[100dvh] bg-base text-body safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
         <main className="max-w-lg w-full space-y-8">
           <BackButton onClick={() => setStep('screen')} />
           <StepProgress current={stepNumber} total={totalSteps} />
@@ -452,8 +640,8 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
                 <line x1="37" y1="11" x2="37" y2="18" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
               </svg>
               <div className="text-sm">
-                <p className="text-zinc-100 font-medium">Turn your phone sideways</p>
-                <p className="text-zinc-400 text-xs mt-0.5">Landscape gives you a wider field to test.</p>
+                <p className="text-ink font-medium">Turn your phone sideways</p>
+                <p className="text-muted text-xs mt-0.5">Landscape gives you a wider field to test.</p>
               </div>
             </div>
           )}
@@ -472,7 +660,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
           )}
 
           <div className="space-y-2">
-            <p className="text-sm text-zinc-300">
+            <p className="text-sm text-body">
               How far is your eye from the screen?
             </p>
             <div className="flex items-center gap-3">
@@ -522,10 +710,10 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
               // 40°. Report the truth instead of the wish.
               const achievedAngleDeg = Math.round((Math.atan(limitCm / suggested) * 180) / Math.PI)
               return (
-                <div className="text-[11px] text-zinc-500 flex items-center gap-2">
+                <div className="text-[11px] text-muted flex items-center gap-2">
                   <span>
-                    Suggested: <span className="text-zinc-300 font-mono">{suggested} cm</span>{' '}
-                    <span className="text-zinc-600">
+                    Suggested: <span className="text-body font-mono">{suggested} cm</span>{' '}
+                    <span className="text-muted">
                       (field reaches ~{achievedAngleDeg}° on all sides except the nose)
                     </span>
                   </span>
@@ -547,20 +735,21 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
           {(() => {
             const { width: fullW, height: fullH } = effectiveTestDims(isMobile)
             const fullFixX = fullW / 2 + fixationOffsetPx
-            const fTemporal = eye === 'right'
-              ? Math.floor((fullW - fullFixX) / pxPerDeg)
-              : Math.floor(fullFixX / pxPerDeg)
-            const fNasal = eye === 'right'
-              ? Math.floor(fullFixX / pxPerDeg)
-              : Math.floor((fullW - fullFixX) / pxPerDeg)
-            // Extended-field mode (Goldmann only) runs two extra passes
-            // with fixation shifted ±30% of fullHeight, so achievable
-            // vertical reach becomes halfH + 0.3·fullH. Horizontal reach
-            // is unchanged because we only shift the fixation dot
-            // vertically between passes. Reflect the achievable number
+            // Extended-field mode (Goldmann only) runs four extra passes
+            // with fixation shifted ±30% of fullHeight (up/down) and
+            // ±30% of fullWidth (left/right), so achievable reach grows
+            // by that shift on every side. Reflect the achievable number
             // here so the T·N·S·I readout matches what the test will
             // actually probe.
-            const verticalReachPx = testMode === 'goldmann' && extendedField
+            const extended = testMode === 'goldmann' && extendedField
+            const horizBoostPx = extended ? fullW * 0.3 : 0
+            const fTemporal = eye === 'right'
+              ? Math.floor(((fullW - fullFixX) + horizBoostPx) / pxPerDeg)
+              : Math.floor((fullFixX + horizBoostPx) / pxPerDeg)
+            const fNasal = eye === 'right'
+              ? Math.floor((fullFixX + horizBoostPx) / pxPerDeg)
+              : Math.floor(((fullW - fullFixX) + horizBoostPx) / pxPerDeg)
+            const verticalReachPx = extended
               ? fullH / 2 + fullH * 0.3
               : fullH / 2
             const fUp = Math.floor(verticalReachPx / pxPerDeg)
@@ -584,15 +773,18 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
               return `${150 + r * cos},${150 - r * sin}`
             }).join(' ')
 
-            // Screen testable polygon (+ extended variants)
-            const screenPoly = (fyOffset: number) => Array.from({ length: 36 }, (_, i) => {
+            // Screen testable polygon (+ extended variants). fxOffset /
+            // fyOffset move the fixation dot relative to screen centre,
+            // which is how each extended pass relaxes the reach on the
+            // far side.
+            const screenPoly = (fxOffset: number, fyOffset: number) => Array.from({ length: 36 }, (_, i) => {
               const angleDeg = i * 10
               const rad = (angleDeg * Math.PI) / 180
               const dx = Math.cos(rad)
               const dy = -Math.sin(rad)
               const halfW = fullW / 2
               const halfH = fullH / 2
-              const fx = fixationOffsetPx
+              const fx = fixationOffsetPx + fxOffset
               let t = 9999
               if (dx > 0.001) t = Math.min(t, (halfW - fx) / dx)
               if (dx < -0.001) t = Math.min(t, (-halfW - fx) / dx)
@@ -602,24 +794,28 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
               const r = Math.min(eccDeg * dScale, 135)
               return { deg: eccDeg, pt: `${150 + r * Math.cos(rad)},${150 - r * Math.sin(rad)}` }
             })
-            const normalPoly = screenPoly(0)
+            const normalPoly = screenPoly(0, 0)
             const normalPts = normalPoly.map(p => p.pt).join(' ')
 
-            // Extended union
-            const upShift = -fullH * 0.3
-            const downShift = fullH * 0.3
-            const upPoly = screenPoly(upShift)
-            const downPoly = screenPoly(downShift)
+            // Extended union — four passes shifting fixation up/down/left/right
+            const vShift = fullH * 0.3
+            const hShift = fullW * 0.3
+            const extPolys = [
+              screenPoly(0, -vShift),
+              screenPoly(0, vShift),
+              screenPoly(-hShift, 0),
+              screenPoly(hShift, 0),
+            ]
             const extPts = Array.from({ length: 36 }, (_, i) => {
-              const maxDeg = Math.max(normalPoly[i].deg, upPoly[i].deg, downPoly[i].deg)
+              const maxDeg = Math.max(normalPoly[i].deg, ...extPolys.map(p => p[i].deg))
               const r = Math.min(maxDeg * dScale, 135)
               const rad = (i * 10 * Math.PI) / 180
               return `${150 + r * Math.cos(rad)},${150 - r * Math.sin(rad)}`
             }).join(' ')
 
             return (
-              <div className="bg-surface/60 rounded-2xl border border-white/[0.06] p-4 text-center space-y-3">
-                <p className="text-xs text-zinc-500 font-medium">Field coverage</p>
+              <div className="bg-surface/60 rounded-2xl border border-line p-4 text-center space-y-3">
+                <p className="text-xs text-muted font-medium">Field coverage</p>
                 <svg viewBox="0 0 300 300" className="mx-auto w-full" style={{ maxWidth: 280 }}>
                   {/* Reference rings */}
                   {[10, 20, 30, 40, 50, 60, 70, 80, 90].map(deg => {
@@ -651,7 +847,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
                   <text x={150} y={16} fill="#94a3b8" fontSize={11} textAnchor="middle">S</text>
                   <text x={150} y={296} fill="#94a3b8" fontSize={11} textAnchor="middle">I</text>
                 </svg>
-                <div className="flex gap-3 justify-center flex-wrap text-xs text-zinc-500">
+                <div className="flex gap-3 justify-center flex-wrap text-xs text-muted">
                   <span className="flex items-center gap-1">
                     <span className="inline-block w-3 h-0 border-t border-dashed" style={{ borderColor: '#475569' }} /> normal field
                   </span>
@@ -667,7 +863,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
                     </span>
                   )}
                 </div>
-                <p className="text-xs text-zinc-500">
+                <p className="text-xs text-muted">
                   T {fTemporal}° · N {fNasal}° · S {fUp}° · I {fDown}°
                 </p>
 
@@ -683,18 +879,18 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
                     className={`w-full text-left px-4 py-3 rounded-xl border transition-colors ${
                       extendedField
                         ? 'bg-green-600/10 border-green-500/50'
-                        : 'bg-surface border-white/[0.06] hover:border-white/[0.12]'
+                        : 'bg-surface border-line hover:border-line-strong'
                     }`}
                   >
                     <div className="flex items-center justify-between">
                       <div>
-                        <p className="font-medium text-xs text-zinc-300">Extended field mode</p>
-                        <p className="text-xs text-zinc-500 mt-0.5">
-                          2 extra passes with shifted fixation for more vertical coverage (~2 min extra)
+                        <p className="font-medium text-xs text-body">Extended field mode</p>
+                        <p className="text-xs text-muted mt-0.5">
+                          4 extra passes with shifted fixation for more coverage on every side (~4 min extra)
                         </p>
                       </div>
                       <div className={`w-9 h-5 rounded-full flex items-center px-0.5 transition-colors flex-shrink-0 ml-2 ${
-                        extendedField ? 'bg-green-600 justify-end' : 'bg-zinc-700 justify-start'
+                        extendedField ? "bg-accent justify-end" : "bg-slate-300 justify-start"
                       }`}>
                         <div className="w-4 h-4 rounded-full bg-white" />
                       </div>
@@ -756,8 +952,8 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
             // Vertical-only shortfall → extended mode would fix it.
             const vertLimited = !extendedField && fTemporal >= 40
             return (
-              <p className="text-xs text-zinc-500 leading-relaxed">
-                <span className="text-zinc-400">Heads-up:</span> your screen
+              <p className="text-xs text-muted leading-relaxed">
+                <span className="text-muted">Heads-up:</span> your screen
                 only reaches {narrowest}° from the yellow dot (not counting
                 the nose side, which is naturally blocked by your nose), so
                 parts of the outer field can't be fully tested — results
@@ -791,47 +987,84 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   // ==================== STEP 3: Brightness ====================
   if (step === 'brightness') {
     return (
-      <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
+      <div className="min-h-[100dvh] bg-base text-body safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
         <main className="max-w-lg w-full space-y-8">
-          <BackButton onClick={() => setStep('distance')} />
+          <BackButton onClick={() => setStep(isVr ? 'screen' : 'distance')} />
 
           <StepProgress current={stepNumber} total={totalSteps} />
           <h1 className="text-2xl font-heading font-bold">Find your dimmest visible dot</h1>
 
-          <div className="space-y-2 text-sm text-zinc-300">
+          <div className="space-y-2 text-sm text-body">
             <p>We need to know the dimmest dot your screen can show.</p>
-            <ol className="list-decimal list-inside space-y-1 text-zinc-400">
+            <ol className="list-decimal list-inside space-y-1 text-muted">
               <li>Start high — drag the slider right until you clearly see the white dot.</li>
               <li>Slowly drag left. Stop the moment the dot disappears.</li>
               <li>Nudge back right by one step so the dot is just barely visible again.</li>
             </ol>
+            {/* Set the room now, before this reading bakes in: the dimmest-dot
+                value depends on your current lighting, so the test must run in
+                the same conditions you calibrate in. */}
+            <p className="text-muted">
+              One-time setup (~15 seconds). Do this in the same dim room you'll take the test in —
+              the dimmest dot depends on your lighting.
+            </p>
           </div>
 
-          <div className="relative w-full h-48 bg-base rounded-xl border border-white/[0.06] flex items-center justify-center">
+          {/* The dot is semi-transparent WHITE, so this preview box must
+              stay dark for it to be visible at all — and to mean anything
+              clinically (it mirrors the dim test surface the real stimuli
+              are drawn on). It was accidentally swept to the light page
+              token during the clinical redesign, which made the dot all
+              but invisible even at max brightness. Kept a dark instrument
+              panel inside the light page, like the field-map plots. */}
+          <div className="relative w-full h-48 bg-black rounded-xl border border-slate-800 flex items-center justify-center">
             <div
               className="w-3 h-3 rounded-full"
               style={{ backgroundColor: `rgba(255, 255, 255, ${brightness})` }}
             />
-            <span className="absolute top-2 right-3 text-xs text-zinc-500 font-mono">
+            <span className="absolute top-2 right-3 text-xs text-slate-400 font-mono">
               {(brightness * 100).toFixed(1)}%
             </span>
           </div>
 
-          <input
-            type="range"
-            min={0.5}
-            max={50}
-            step={0.5}
-            value={brightness * 100}
-            onChange={e => setBrightness(Number(e.target.value) / 100)}
-            aria-label={`Brightness level: ${(brightness * 100).toFixed(1)}%`}
-            className="w-full accent-amber-500"
-          />
+          {/* Big −/+ steppers are the primary fine control. The dimmest
+              setting drives the slider thumb to the far end of the track,
+              where it's awkward to grab one-handed while holding the phone;
+              tapping a single step avoids that entirely. The slider stays for
+              coarse moves but is inset (px-2) and given a taller touch area so
+              its thumb never sits flush against the screen edge. */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setBrightness(b => Math.max(0.005, +(b - 0.005).toFixed(3)))}
+              className="flex-1 h-14 rounded-xl bg-elevated hover:bg-overlay text-3xl font-medium leading-none"
+              aria-label="Dimmer — decrease brightness one step"
+            >−</button>
+            <span className="text-2xl font-mono w-24 text-center tabular-nums" aria-live="polite">
+              {(brightness * 100).toFixed(1)}%
+            </span>
+            <button
+              onClick={() => setBrightness(b => Math.min(0.5, +(b + 0.005).toFixed(3)))}
+              className="flex-1 h-14 rounded-xl bg-elevated hover:bg-overlay text-3xl font-medium leading-none"
+              aria-label="Brighter — increase brightness one step"
+            >+</button>
+          </div>
 
-          <div className="flex gap-2 text-xs text-zinc-500">
-            <span>← dimmer (invisible)</span>
-            <span className="flex-1" />
-            <span>brighter (clearly visible) →</span>
+          <div className="px-2">
+            <input
+              type="range"
+              min={0.5}
+              max={50}
+              step={0.5}
+              value={brightness * 100}
+              onChange={e => setBrightness(Number(e.target.value) / 100)}
+              aria-label={`Brightness level: ${(brightness * 100).toFixed(1)}%`}
+              className="w-full accent-amber-500 py-3"
+            />
+            <div className="flex gap-2 text-xs text-muted">
+              <span>← dimmer (invisible)</span>
+              <span className="flex-1" />
+              <span>brighter (clearly visible) →</span>
+            </div>
           </div>
 
           <div className="action-footer">
@@ -849,36 +1082,36 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
   if (step === 'reaction') {
     if (rtPhase === 'done' || rtTimes.length >= RT_TRIALS) {
       return (
-        <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
+        <div className="min-h-[100dvh] bg-base text-body safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
           <main className="max-w-lg w-full space-y-8">
             <BackButton onClick={() => { setRtTimes([]); setRtPhase('waiting'); setRtStarted(false); setStep('brightness') }} />
             <StepProgress current={stepNumber} total={totalSteps} />
             <h1 className="text-2xl font-heading font-bold">Reaction time measured</h1>
 
-            <div className="bg-surface rounded-2xl border border-white/[0.06] p-5 space-y-3">
+            <div className="bg-surface rounded-2xl border border-line p-5 space-y-3">
               <div className="flex justify-between text-sm">
-                <span className="text-zinc-400">Your median RT</span>
-                <span className="font-mono text-white">{medianRt.toFixed(0)} ms</span>
+                <span className="text-muted">Your median RT</span>
+                <span className="font-mono text-ink">{medianRt.toFixed(0)} ms</span>
               </div>
               <div className="flex justify-between text-sm">
-                <span className="text-zinc-400">Position compensation</span>
-                <span className="font-mono text-white">
+                <span className="text-muted">Position compensation</span>
+                <span className="font-mono text-ink">
                   +{((3 * medianRt) / 1000).toFixed(1)}° per reading
                 </span>
               </div>
-              <p className="text-xs text-zinc-500">
+              <p className="text-xs text-muted">
                 At 3°/s stimulus speed, your reaction time shifts each recorded position by{' '}
                 {((3 * medianRt) / 1000).toFixed(1)}°. This is automatically corrected.
               </p>
             </div>
 
-            <div className="text-xs text-zinc-500">
+            <div className="text-xs text-muted">
               Individual times: {rtTimes.map(t => `${t.toFixed(0)}ms`).join(', ')}
             </div>
 
             <div className="action-footer">
               <button
-                onClick={() => setStep('ready')}
+                onClick={() => { if (isVr) remote.arm(); setStep(isVr ? 'vr' : 'ready') }}
                 className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
               >Next</button>
             </div>
@@ -890,23 +1123,23 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
     // RT instruction screen
     if (!rtStarted) {
       return (
-        <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
+        <div className="min-h-[100dvh] bg-base text-body safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
           <main className="max-w-lg w-full space-y-8">
             <BackButton onClick={() => setStep('brightness')} />
 
             <StepProgress current={stepNumber} total={totalSteps} />
             <h1 className="text-2xl font-heading font-bold">Reaction time test</h1>
 
-            <div className="space-y-3 text-sm text-zinc-300">
+            <div className="space-y-3 text-sm text-body">
               <p>
                 We'll measure your reaction time with {RT_TRIALS} quick trials.
               </p>
-              <div className="bg-surface rounded-2xl border border-white/[0.06] p-4 space-y-2">
+              <div className="bg-surface rounded-2xl border border-line p-4 space-y-2">
                 <p>1. Stare at the center of the screen</p>
                 <p>2. A white dot will appear after a random delay</p>
-                <p>3. <strong className="text-white">{isMobile ? 'Tap the screen' : 'Tap the screen or press Space'}</strong> as fast as you can when you see it</p>
+                <p>3. <strong className="text-ink">{isMobile ? 'Tap the screen' : 'Tap the screen or press Space'}</strong> as fast as you can when you see it</p>
               </div>
-              <p className="text-zinc-500 text-xs">
+              <p className="text-muted text-xs">
                 Your reaction time is used to compensate for response delay during the visual field test, improving accuracy.
               </p>
             </div>
@@ -931,8 +1164,8 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
         aria-label="Reaction time trial — press Space or tap when you see the dot"
       >
         <main className="text-center space-y-6">
-          <p className="text-xs text-zinc-500">Step 3 of 3 — Reaction time</p>
-          <p className="text-zinc-400 text-sm max-w-xs mx-auto" aria-live="assertive">
+          <p className="text-xs text-slate-400">Step 3 of 3 — Reaction time</p>
+          <p className="text-slate-300 text-sm max-w-xs mx-auto" aria-live="assertive">
             {rtPhase === 'waiting'
               ? 'Wait for the dot to appear…'
               : isMobile ? 'Tap NOW!' : 'Press Space or tap NOW!'}
@@ -945,7 +1178,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
             )}
           </div>
 
-          <p className="text-zinc-500 text-xs">
+          <p className="text-slate-400 text-xs">
             Trial {rtCurrent + 1} of {RT_TRIALS}
           </p>
         </main>
@@ -953,34 +1186,191 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
     )
   }
 
-  // ==================== STEP 5: Ready ====================
+  // ==================== STEP: Phone VR lens setup ====================
+  if (step === 'vr') {
+    const portrait = typeof window !== 'undefined' && window.innerHeight > window.innerWidth
+    const innerW = typeof window !== 'undefined' ? window.innerWidth : 812
+    const innerH = typeof window !== 'undefined' ? window.innerHeight : 375
+    const lensSepPx = vrLensSeparationPx(innerW)
+    // Mini live preview of the split-screen guides, scaled to a fixed
+    // width while preserving the landscape aspect ratio.
+    const previewW = 280
+    const previewH = Math.max(80, Math.round((previewW * innerH) / innerW))
+    const scale = previewW / innerW
+    const centerX = previewW / 2
+    const centerY = previewH / 2
+    const lensDx = (lensSepPx / 2) * scale
+    const lensR = Math.min(previewH, previewW / 2) * 0.32
+    if (vrLensGuideActive) {
+      const activeEye = eye === 'both' ? 'right' : eye
+      const vrCal = {
+        enabled: true as const,
+        headsetPreset: vrPreset,
+        lensSeparationPx: lensSepPx,
+        lensCenterYOffsetPx: 0,
+      }
+      const vp = computeVrViewport(innerW, innerH, activeEye, vrCal)
+      const lensCenterX = innerW / 2 + vp.fixationXFromScreenCenter
+      const lensCenterY = innerH / 2 + vp.fixationYFromScreenCenter
+      const activeCenterX = vp.originX + vp.width / 2
+      const guideSize = Math.max(64, Math.min(vp.width - 48, innerH - 64, 170))
+      return (
+        <div
+          className="fixed inset-0 bg-black text-white select-none cursor-pointer"
+          role="application"
+          aria-label="Headset guide — align the lens to the guide and press the controller button to continue"
+          onPointerDown={confirmInHeadset}
+        >
+          <svg
+            className="absolute overflow-visible"
+            width={guideSize}
+            height={guideSize}
+            viewBox="-50 -50 100 100"
+            style={{
+              left: lensCenterX,
+              top: lensCenterY,
+              transform: 'translate(-50%, -50%)',
+              zIndex: 22,
+            }}
+            aria-hidden
+          >
+            {[44, 30, 16].map(r => (
+              <circle key={r} cx="0" cy="0" r={r} fill="none" stroke="#2dd4bf" strokeWidth="1" strokeOpacity="0.72" />
+            ))}
+            <line x1="-44" y1="0" x2="44" y2="0" stroke="#2dd4bf" strokeWidth="0.8" strokeOpacity="0.55" />
+            <line x1="0" y1="-44" x2="0" y2="44" stroke="#2dd4bf" strokeWidth="0.8" strokeOpacity="0.55" />
+            <circle cx="0" cy="0" r="2.4" fill="#2dd4bf" />
+          </svg>
+          <div
+            className="absolute text-center px-3 text-[11px] leading-snug text-slate-400"
+            style={{
+              left: activeCenterX,
+              bottom: 22,
+              transform: 'translateX(-50%)',
+              width: vp.width - 36,
+              zIndex: 22,
+            }}
+          >
+            Focus until the rings are sharp, then press the button
+            {lensGuideCountdown != null && (
+              <span className="block mt-1 text-slate-500">continuing in {lensGuideCountdown}s</span>
+            )}
+          </div>
+          <VrTestSurface viewport={vp} innerWidth={innerW} showDivider={false} />
+        </div>
+      )
+    }
+    return (
+      <div className="min-h-[100dvh] bg-base text-body safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
+        <main className="max-w-lg w-full space-y-8">
+          <BackButton onClick={() => { setVrLensGuideActive(false); setStep(wantsReactionTime ? 'reaction' : 'brightness') }} />
+          <StepProgress current={stepNumber} total={totalSteps} />
+
+          <h1 className="text-2xl font-heading font-bold">Headset lens setup</h1>
+
+          {portrait ? (
+            <div className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-4 flex items-center gap-3">
+              <svg width="52" height="32" viewBox="0 0 52 32" fill="none" className="text-accent flex-shrink-0" aria-hidden="true">
+                <rect x="3" y="3" width="11" height="22" rx="1.5" stroke="currentColor" strokeWidth="1.5" strokeOpacity="0.55" fill="none" />
+                <path d="M 19 14 L 30 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                <path d="M 27 11 L 30 14 L 27 17" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                <rect x="34" y="8" width="15" height="13" rx="1.5" stroke="currentColor" strokeWidth="1.5" fill="none" />
+              </svg>
+              <div className="text-sm">
+                <p className="text-ink font-medium">Turn your phone sideways</p>
+                <p className="text-muted text-xs mt-0.5">Phone VR runs in landscape. Rotate the phone to continue.</p>
+              </div>
+            </div>
+          ) : (
+            <>
+              <p className="text-sm text-body">
+                Your headset lens spacing is
+                computed from the headset IPD ({VR_HEADSET_SPECS[vrPreset].ipdMm} mm)
+                and your card-based screen scale. Keep the phone in your hand
+                for this page; the next screen is the one you read through the
+                headset.
+              </p>
+              <p className="text-xs text-accent/90">
+                After the guide appears, slide the phone into the headset and
+                use the remote button or the on-screen countdown. You won't
+                touch the screen again until your results.
+              </p>
+
+              {/* Live split-screen focus target. The fine concentric rings
+                  and crosshair give the eye detail to judge sharpness
+                  against while turning the headset's mechanical focus
+                  wheel; the spacing is preset to the headset's known
+                  optics. */}
+              <div className="bg-black rounded-2xl border border-line p-3">
+                <svg viewBox={`0 0 ${previewW} ${previewH}`} className="mx-auto w-full" style={{ maxWidth: previewW }} aria-hidden="true">
+                  <rect x={0} y={0} width={previewW} height={previewH} fill="#000" />
+                  <line x1={centerX} y1={0} x2={centerX} y2={previewH} stroke="#27272a" strokeWidth={1} strokeDasharray="4,4" />
+                  {[centerX - lensDx, centerX + lensDx].map((cx, i) => (
+                    <g key={i}>
+                      {[lensR, lensR * 0.66, lensR * 0.33].map((r, j) => (
+                        <circle key={j} cx={cx} cy={centerY} r={r} fill="none" stroke="#2dd4bf" strokeWidth={1} strokeOpacity={0.7} />
+                      ))}
+                      <line x1={cx - lensR} y1={centerY} x2={cx + lensR} y2={centerY} stroke="#2dd4bf" strokeWidth={0.75} strokeOpacity={0.5} />
+                      <line x1={cx} y1={centerY - lensR} x2={cx} y2={centerY + lensR} stroke="#2dd4bf" strokeWidth={0.75} strokeOpacity={0.5} />
+                      <circle cx={cx} cy={centerY} r={2} fill="#2dd4bf" />
+                    </g>
+                  ))}
+                </svg>
+              </div>
+              <p className="text-xs text-muted text-center">
+                Lens separation: <span className="font-mono">{lensSepPx}px</span>
+              </p>
+            </>
+          )}
+
+          <div className="action-footer">
+            <button
+              onClick={confirmInHeadset}
+              disabled={portrait}
+              className={`w-full py-3 rounded-xl text-lg font-medium ${portrait ? "bg-elevated text-muted cursor-not-allowed" : "btn-primary text-white"}`}
+            >
+              {portrait ? 'Rotate to continue' : 'Continue'}
+            </button>
+          </div>
+        </main>
+      </div>
+    )
+  }
+
+  // ==================== STEP 5: Ready (standard mode only) ====================
+  // Phone-VR no longer has its own Ready screen: the lens-focus guide is the
+  // final in-headset confirm and starts the test directly (see
+  // confirmInHeadset), which removes the redundant second crosshair the patient
+  // used to see right after the focus guide. Standard mode keeps the summary
+  // card + Start button below.
+
   return (
-    <div className="min-h-[100dvh] bg-base text-white safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
+    <div className="min-h-[100dvh] bg-base text-body safe-pad flex flex-col items-center px-6 pt-10 pb-10 animate-page-in">
       <main className="max-w-lg w-full space-y-8">
         <BackButton onClick={() => setStep(wantsReactionTime ? 'reaction' : 'brightness')} />
 
         <h1 className="text-2xl font-heading font-bold">Ready to test</h1>
 
-        <div className="bg-surface rounded-2xl border border-white/[0.06] p-5 space-y-3 text-sm">
+        <div className="bg-surface rounded-2xl border border-line p-5 space-y-3 text-sm">
           <div className="flex justify-between">
-            <span className="text-zinc-400">Test type</span>
+            <span className="text-muted">Test type</span>
             <span>{testMode === 'static' ? 'Static test' : 'Goldmann (kinetic)'}</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-zinc-400">Eye</span>
+            <span className="text-muted">Eye</span>
             <span>{eye === 'right' ? 'OD (Right)' : 'OS (Left)'}</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-zinc-400">Field coverage</span>
+            <span className="text-muted">Field coverage</span>
             <span>T {fieldTemporal}° · N {fieldNasal}° · S {fieldUp}° · I {fieldDown}°</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-zinc-400">Brightness floor</span>
+            <span className="text-muted">Brightness floor</span>
             <span className="font-mono">{(brightnessFloor * 100).toFixed(1)}%</span>
           </div>
           {wantsReactionTime && (
             <div className="flex justify-between">
-              <span className="text-zinc-400">Reaction time</span>
+              <span className="text-muted">Reaction time</span>
               <span className="font-mono">{medianRt.toFixed(0)} ms (+{((3 * medianRt) / 1000).toFixed(1)}°)</span>
             </div>
           )}
@@ -998,24 +1388,24 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
               <>
                 {speedMode === 'quick' && (
                   <div className="flex justify-between">
-                    <span className="text-zinc-400">Mode</span>
+                    <span className="text-muted">Mode</span>
                     <span>Quick scan (central 10°)</span>
                   </div>
                 )}
                 <div className="flex justify-between">
-                  <span className="text-zinc-400">Grid</span>
+                  <span className="text-muted">Grid</span>
                   <span>{info.label} — {points} points</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-zinc-400">Stimuli</span>
+                  <span className="text-muted">Stimuli</span>
                   <span>Goldmann III, 0–35 dB</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-zinc-400">Staircase</span>
+                  <span className="text-muted">Staircase</span>
                   <span>4-2 dB adaptive</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-zinc-400">Pacing</span>
+                  <span className="text-muted">Pacing</span>
                   <span>Timed flashes — tap when seen</span>
                 </div>
               </>
@@ -1023,26 +1413,26 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
           })() : speedMode === 'quick' ? (
             <>
               <div className="flex justify-between">
-                <span className="text-zinc-400">Mode</span>
+                <span className="text-muted">Mode</span>
                 <span>Quick scan (single isopter)</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-zinc-400">Stimulus</span>
+                <span className="text-muted">Stimulus</span>
                 <span>III4e only — 12 meridians</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-zinc-400">Adaptive</span>
+                <span className="text-muted">Adaptive</span>
                 <span>Outlier retest only</span>
               </div>
             </>
           ) : (
             <>
               <div className="flex justify-between">
-                <span className="text-zinc-400">Stimuli</span>
+                <span className="text-muted">Stimuli</span>
                 <span>V4e, III4e, III2e, I4e, I2e</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-zinc-400">Adaptive</span>
+                <span className="text-muted">Adaptive</span>
                 <span>Yes — problem areas retested</span>
               </div>
             </>
@@ -1050,24 +1440,24 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
         </div>
 
         {/* Test instructions */}
-        <div className="bg-surface/60 border border-white/[0.06] rounded-2xl px-4 py-3 space-y-2 text-xs text-zinc-400">
-          <p className="text-sm text-zinc-300 font-medium mb-2">
-            Testing <span className="text-white">{formatEyeLabelLong(eye)}</span>
+        <div className="bg-surface/60 border border-line rounded-2xl px-4 py-3 space-y-2 text-xs text-muted">
+          <p className="text-sm text-body font-medium mb-2">
+            Testing <span className="text-ink">{formatEyeLabelLong(eye)}</span>
           </p>
           <div className="flex gap-2 items-start">
             <span className="text-yellow-500 mt-0.5">&#9790;</span>
-            <p><span className="text-zinc-300 font-medium">Dark room.</span> Perform the test in a dark or dimly lit room for best contrast, just like clinical perimetry.</p>
+            <p><span className="text-body font-medium">Dark room.</span> Perform the test in a dark or dimly lit room for best contrast, just like clinical perimetry.</p>
           </div>
           <div className="flex gap-2 items-start">
             <span className="text-green-400 mt-0.5">&#9673;</span>
-            <p><span className="text-zinc-300 font-medium">Fixation.</span> Keep your eye fixed on the yellow dot during the test. Only press when you see a stimulus in your peripheral vision.</p>
+            <p><span className="text-body font-medium">Fixation.</span> Keep your eye fixed on the yellow dot during the test. Only press when you see a stimulus in your peripheral vision.</p>
           </div>
           {!isMobile && (
             <div className="flex gap-2 items-start">
-              <span className="text-zinc-500 mt-0.5">&#9099;</span>
+              <span className="text-muted mt-0.5">&#9099;</span>
               <p>
-                <span className="text-zinc-300 font-medium">Pause or leave.</span> Press{' '}
-                <kbd className="px-1.5 py-0.5 bg-zinc-800 border border-white/[0.06] rounded text-[10px] font-mono text-zinc-300">Esc</kbd>{' '}
+                <span className="text-body font-medium">Pause or leave.</span> Press{' '}
+                <kbd className="px-1.5 py-0.5 bg-slate-100 border border-line rounded text-[10px] font-mono text-body">Esc</kbd>{' '}
                 any time to pause the test or exit.
               </p>
             </div>
@@ -1077,7 +1467,7 @@ export function CalibrationScreen({ eye, onCalibrated, onBack, skipReactionTime,
         {/* Duration estimates are advertised on the home screen next to
             the speed toggle — no need to repeat them here and risk the
             two surfaces drifting out of sync. */}
-        <p className="text-xs text-zinc-500">
+        <p className="text-xs text-muted">
           {testMode === 'static'
             ? speedMode === 'quick'
               ? <>Central 10° only (HFA 10-2 grid). Best for tracking <strong className="text-amber-300/80 font-medium">macular involvement</strong> — not the right scan for monitoring RP, where the peripheral field shrinks first; use Normal or the Goldmann test for that.</>

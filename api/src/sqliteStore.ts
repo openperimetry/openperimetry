@@ -5,7 +5,7 @@ import path from 'node:path'
 import Database from 'better-sqlite3'
 
 import { SESSION_TTL_MS, SQLITE_DB_PATH } from './config.js'
-import type { AuthUser, ClinicalParticipantRecord, ClinicScreenRecord, VFResultRecord, VFSurveyRecord, AdminSurveyRecord, AdminStats, AdminSessionRecord, AdminVFResultRecord, AdminUserRecord, EventType, AdminEventRecord } from './ddbStore.js'
+import type { AuthUser, ClinicalParticipantRecord, ClinicScreenRecord, VFResultRecord, VFSurveyRecord, AdminSurveyRecord, AdminStats, AdminSessionRecord, AdminVFResultRecord, AdminUserRecord, EventType, AdminEventRecord, EventPage } from './ddbStore.js'
 
 type SqlUserRow = {
   id: string
@@ -124,6 +124,18 @@ function getDb(): Database.Database {
     );
 
     CREATE INDEX IF NOT EXISTS idx_vf_results_user_date ON vf_results(user_id, date DESC);
+
+    -- Durable, per-user record of deleted result IDs. A delete is not just
+    -- a row removal: other devices still hold the result locally and will
+    -- re-push it on their next sync, which would resurrect it. The sync
+    -- endpoint consults this table to refuse re-adding a deleted ID, and
+    -- returns the set so those devices can prune their local copy.
+    CREATE TABLE IF NOT EXISTS vf_deleted_results (
+      user_id TEXT NOT NULL,
+      id TEXT NOT NULL,
+      PRIMARY KEY (user_id, id),
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
 
     CREATE TABLE IF NOT EXISTS vf_surveys (
       id TEXT PRIMARY KEY,
@@ -395,6 +407,7 @@ export async function deleteUserAccount(userId: string): Promise<void> {
   const tx = database.transaction((id: string) => {
     database.prepare('DELETE FROM sessions WHERE user_id = ?').run(id)
     database.prepare('DELETE FROM vf_results WHERE user_id = ?').run(id)
+    database.prepare('DELETE FROM vf_deleted_results WHERE user_id = ?').run(id)
     database.prepare('DELETE FROM vf_surveys WHERE user_id = ?').run(id)
     database.prepare('DELETE FROM clinical_participants WHERE user_id = ?').run(id)
     database.prepare('DELETE FROM clinic_screens WHERE user_id = ?').run(id)
@@ -568,7 +581,21 @@ export async function listVFResults(userId: string, limit = 100): Promise<VFResu
 }
 
 export async function deleteVFResult(userId: string, resultId: string): Promise<void> {
-  getDb().prepare('DELETE FROM vf_results WHERE id = ? AND user_id = ?').run(resultId, userId)
+  const database = getDb()
+  const tx = database.transaction(() => {
+    database.prepare('DELETE FROM vf_results WHERE id = ? AND user_id = ?').run(resultId, userId)
+    // Durable server-side tombstone so another device can't resurrect this
+    // result by re-pushing its stale local copy on the next sync.
+    database.prepare('INSERT OR IGNORE INTO vf_deleted_results (user_id, id) VALUES (?, ?)').run(userId, resultId)
+  })
+  tx()
+}
+
+export async function listDeletedVFResultIds(userId: string): Promise<string[]> {
+  const rows = getDb()
+    .prepare('SELECT id FROM vf_deleted_results WHERE user_id = ?')
+    .all(userId) as Array<{ id: string }>
+  return rows.map(r => r.id)
 }
 
 /** Admin: fetch a single result (including the full `data` JSON) by the
@@ -592,6 +619,10 @@ export async function addVFSurvey(userId: string, survey: { id: string; resultId
     'INSERT OR IGNORE INTO vf_surveys (id, user_id, result_id, date, data) VALUES (?, ?, ?, ?, ?)'
   ).run(survey.id, userId, survey.resultId, survey.date, survey.data)
   return survey
+}
+
+export async function deleteVFSurvey(surveyId: string): Promise<void> {
+  getDb().prepare('DELETE FROM vf_surveys WHERE id = ?').run(surveyId)
 }
 
 export async function listVFSurveys(userId: string, limit = 200): Promise<VFSurveyRecord[]> {
@@ -800,4 +831,27 @@ export async function listAllEvents(limit = 500): Promise<AdminEventRecord[]> {
     timestamp: r.timestamp,
     meta: r.meta ? JSON.parse(r.meta) : {},
   }))
+}
+
+/** One newest-first page of events. Keyset-paginated on the autoincrement id
+ *  (insertion order ≈ timestamp order); the cursor is the last id seen, so the
+ *  next page is `id < cursor`. */
+export async function listEventsPage(limit = 50, cursor?: string): Promise<EventPage> {
+  const beforeId = cursor != null && cursor !== '' ? Number(cursor) : null
+  const hasCursor = beforeId != null && Number.isFinite(beforeId)
+  const sql = hasCursor
+    ? 'SELECT id, device_id, event, timestamp, meta FROM events WHERE id < ? ORDER BY id DESC LIMIT ?'
+    : 'SELECT id, device_id, event, timestamp, meta FROM events ORDER BY id DESC LIMIT ?'
+  const rows = (hasCursor
+    ? getDb().prepare(sql).all(beforeId, limit)
+    : getDb().prepare(sql).all(limit)) as Array<{ id: number; device_id: string; event: string; timestamp: string; meta: string | null }>
+
+  const events: AdminEventRecord[] = rows.map(r => ({
+    deviceId: r.device_id,
+    event: r.event,
+    timestamp: r.timestamp,
+    meta: r.meta ? JSON.parse(r.meta) : {},
+  }))
+  const nextCursor = rows.length === limit ? String(rows[rows.length - 1].id) : null
+  return { events, nextCursor }
 }

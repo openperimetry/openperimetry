@@ -24,7 +24,9 @@ import {
   addVFResult,
   listVFResults,
   deleteVFResult,
+  listDeletedVFResultIds,
   addVFSurvey,
+  deleteVFSurvey,
   getAdminStats,
   listAllUsers,
   setUserClinicianRole,
@@ -33,7 +35,7 @@ import {
   getAdminVFResultDetail,
   listAllSurveys,
   trackEvent,
-  listAllEvents,
+  listEventsPage,
 } from './authStore.js'
 import {
   PORT,
@@ -53,8 +55,16 @@ import {
 } from './config.js'
 import { sendContactMessage, sendEmailChangedNotice, sendPasswordChangedNotice, sendPasswordResetInvite, sendWelcomeEmail } from './email.js'
 import { allowRequestPersistent } from './rateLimitStore.js'
+import { installAsyncErrorHandling, installProcessSafetyNet, errorHandler } from './asyncRouting.js'
 
 const app = express()
+// Make async route failures non-fatal: patch the route-registration methods
+// (before any route/middleware is declared) so a rejected async handler goes
+// to the error middleware instead of crashing the whole process. See
+// asyncRouting.ts — this closes the class of bug where one failing route 503s
+// every endpoint.
+installAsyncErrorHandling(app)
+installProcessSafetyNet()
 const allowedFrontendOrigins = FRONTEND_ORIGIN.split(',')
   .map((origin) => origin.trim())
   .filter(Boolean)
@@ -614,8 +624,11 @@ app.post('/api/clinician/screens/active', requireAuth, requireClinician, async (
 
 app.get('/api/users/me/vf-results', requireAuth, async (req, res) => {
   const authReq = req as AuthenticatedRequest
-  const results = await listVFResults(authReq.authUser.id)
-  res.json({ results })
+  const [results, deletedIds] = await Promise.all([
+    listVFResults(authReq.authUser.id),
+    listDeletedVFResultIds(authReq.authUser.id),
+  ])
+  res.json({ results, deletedIds })
 })
 
 const vfResultSchema = z.object({
@@ -644,17 +657,25 @@ app.post('/api/users/me/vf-results/sync', requireAuth, async (req, res) => {
     return
   }
   const authReq = req as AuthenticatedRequest
-  const existing = await listVFResults(authReq.authUser.id)
+  const [existing, deletedIds] = await Promise.all([
+    listVFResults(authReq.authUser.id),
+    listDeletedVFResultIds(authReq.authUser.id),
+  ])
   const existingIds = new Set(existing.map(r => r.id))
+  // Never resurrect a result the user has deleted: another device may
+  // still hold it locally and push it here, but the server-side tombstone
+  // is authoritative. The deletedIds are returned below so that device can
+  // prune its stale local copy.
+  const deletedSet = new Set(deletedIds)
   let added = 0
   for (const result of parsed.data) {
-    if (!existingIds.has(result.id)) {
+    if (!existingIds.has(result.id) && !deletedSet.has(result.id)) {
       await addVFResult(authReq.authUser.id, result)
       added++
     }
   }
   const allResults = await listVFResults(authReq.authUser.id)
-  res.json({ results: allResults, added })
+  res.json({ results: allResults, added, deletedIds })
 })
 
 app.delete('/api/users/me/vf-results/:id', requireAuth, async (req, res) => {
@@ -795,6 +816,11 @@ app.get('/api/admin/surveys', requireAuth, requireAdmin, async (_req, res) => {
   res.json({ surveys })
 })
 
+app.delete('/api/admin/surveys/:id', requireAuth, requireAdmin, async (req, res) => {
+  await deleteVFSurvey(req.params.id)
+  res.status(204).send()
+})
+
 // ── Anonymous usage events ──
 
 const eventSchema = z.object({
@@ -824,9 +850,19 @@ app.post('/api/events', async (req, res) => {
   res.status(201).json({ ok: true })
 })
 
-app.get('/api/admin/events', requireAuth, requireAdmin, async (_req, res) => {
-  const events = await listAllEvents()
-  res.json({ events })
+app.get('/api/admin/events', requireAuth, requireAdmin, async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200)
+  const cursor = typeof req.query.cursor === 'string' && req.query.cursor !== '' ? req.query.cursor : undefined
+  // Catch store/DynamoDB failures here: Express does not catch rejected async
+  // handlers, so an unhandled rejection (e.g. a missing GSI permission) would
+  // crash the whole process and 503 every endpoint, not just this one.
+  try {
+    const page = await listEventsPage(limit, cursor)
+    res.json(page)
+  } catch (err) {
+    console.error('GET /api/admin/events failed', err)
+    res.status(500).json({ error: 'Failed to load events.' })
+  }
 })
 
 // ── Contact form ──
@@ -858,6 +894,11 @@ app.post('/api/contact', async (req, res) => {
     res.status(500).json({ error: 'Failed to send message. Please try again.' })
   }
 })
+
+// Terminal error handler — must come after every route so failures funnelled
+// here by installAsyncErrorHandling (or an explicit next(err)) become a clean
+// 500 instead of a process crash.
+app.use(errorHandler)
 
 // Bind explicitly to 0.0.0.0 (IPv4) — App Runner's envoy proxy uses IPv4 and
 // Node's default IPv6-first binding can cause "Failed to route traffic" errors.

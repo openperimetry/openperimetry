@@ -122,24 +122,39 @@ export function clampBoundary(
   }))
 }
 
-/** Calculate isopter area in square degrees (shoelace) for a set of points */
+/** Isopter area in square degrees as a true spherical solid angle.
+ *
+ * The visual field is on a sphere, so a flat polar polygon (shoelace of
+ * ecc·cosθ, ecc·sinθ) over-states area at large eccentricities (~+2% at 26°,
+ * ~+6% at 47°) and is inconsistent with the tangent/sphericity-corrected
+ * projection used for stimulus positions. For a star-shaped region around
+ * fixation with boundary eccentricity ρ(φ), the solid angle is
+ *   Ω = ∫ (1 − cos ρ(φ)) dφ   [steradians],
+ * integrated trapezoidally around the (sorted) boundary; deg² = Ω·(180/π)².
+ * Reduces to the flat π·ρ² for small ρ, so small isopters are unchanged. */
 function calcArea(points: TestPoint[]): number {
   const allDetected = points.filter(p => p.detected)
   const boundary = binBoundaryPoints(allDetected)
   if (boundary.length < 3) return 0
 
-  const cartesian = boundary.map(p => {
-    const theta = (p.meridianDeg * Math.PI) / 180
-    return { x: p.eccentricityDeg * Math.cos(theta), y: p.eccentricityDeg * Math.sin(theta) }
-  })
+  const ring = boundary
+    .map(p => ({
+      phi: ((((p.meridianDeg % 360) + 360) % 360) * Math.PI) / 180,
+      rho: (p.eccentricityDeg * Math.PI) / 180,
+    }))
+    .sort((a, b) => a.phi - b.phi)
 
-  let area = 0
-  for (let i = 0; i < cartesian.length; i++) {
-    const j = (i + 1) % cartesian.length
-    area += cartesian[i].x * cartesian[j].y
-    area -= cartesian[j].x * cartesian[i].y
+  const TWO_PI = 2 * Math.PI
+  let omega = 0
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i]
+    const b = ring[(i + 1) % ring.length]
+    // Azimuthal width of this segment, wrapped across the 0/2π seam.
+    const dPhi = (((b.phi - a.phi) % TWO_PI) + TWO_PI) % TWO_PI
+    omega += ((1 - Math.cos(a.rho)) + (1 - Math.cos(b.rho))) / 2 * dPhi
   }
-  return Math.abs(area) / 2
+  const degPerRad = 180 / Math.PI
+  return omega * degPerRad * degPerRad
 }
 
 /**
@@ -256,6 +271,33 @@ export function computeSmoothedBoundary(allDetected: TestPoint[]): BoundaryPoint
       radii[i] = measuredRadii[i] ?? tmp[i]
     }
   }
+
+  // Final cosmetic pass: soften the measured vertices partway toward the local
+  // smoothed curve so the rendered contour isn't spiky. RENDER-ONLY — isopter
+  // AREAS are computed from the raw binned boundary (binBoundaryPoints), not
+  // this smoothed one, so this changes only how the outline looks, never a
+  // reported metric. MEAS_KEEP keeps most of each measured radius so the field
+  // is visibly de-spiked without being shrunk; interpolated bins stay fully
+  // smoothed. One extra Gaussian into `tmp` (no per-pass restoration) gives the
+  // local average at the measured positions to blend toward.
+  const MEAS_KEEP = 0.6
+  for (let i = 0; i < n; i++) {
+    let sum = 0
+    let wsum = 0
+    for (let k = -kernelHalf; k <= kernelHalf; k++) {
+      const j = ((i + k) % n + n) % n
+      const w = Math.exp(-(k * k) / (2 * sigma * sigma))
+      sum += radii[j] * w
+      wsum += w
+    }
+    tmp[i] = sum / wsum
+  }
+  for (let i = 0; i < n; i++) {
+    radii[i] = measuredRadii[i] != null
+      ? measuredRadii[i]! * MEAS_KEEP + tmp[i] * (1 - MEAS_KEEP)
+      : tmp[i]
+  }
+
   // Silence unused-var warning for the circular-distance helper — it's used
   // by sampleBoundaryAt indirectly via future callers, not here.
   void meridianDelta

@@ -48,7 +48,7 @@ export function SensitivityFieldPreview({
 
   return (
     <div className="inline-block">
-      {caption && <div className="text-[11px] text-zinc-400 mb-1">{caption}</div>}
+      {caption && <div className="text-[11px] text-muted mb-1">{caption}</div>}
       <svg
         width={size}
         height={size}

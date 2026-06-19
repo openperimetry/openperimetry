@@ -43,7 +43,7 @@ export function SavePrompt() {
         </button>
         <button
           onClick={() => openAuth('login')}
-          className="w-full py-2 rounded-md border border-white/[0.08] bg-white/[0.04] text-sm font-medium text-zinc-100 hover:bg-white/[0.08] hover:text-white transition-colors"
+          className="w-full py-2 rounded-md border border-line bg-subtle text-sm font-medium text-ink hover:bg-subtle-2 hover:text-ink transition-colors"
         >
           Sign in
         </button>

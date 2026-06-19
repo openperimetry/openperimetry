@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import type { TestResult } from '../types'
 import { STIMULI, ISOPTER_ORDER, isGoldmannResult } from '../types'
-import { getResults, deleteResult, removeTombstone, saveResult, saveSurvey, hasSurveyForResult } from '../storage'
+import { getResults, deleteResult, applyServerDeletions, saveResult, saveSurvey, hasSurveyForResult } from '../storage'
 import { VisualFieldMap } from './VisualFieldMap'
 import { HFAResultsView } from './HFAResultsView'
 import type { StaticGridPattern } from '../grids'
@@ -10,6 +10,9 @@ import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { downloadOvfx, parseOvfxFile, OvfxImportError } from '../ovfx'
 import { useAuth } from '../AuthContext'
 import { formatEyeLabel } from '../eyeLabels'
+import { vrPlotExtentDeg } from '../isopterRender'
+import { scoreField } from '../clinicalClassifications'
+import { ScoreTrend, type TrendPoint } from './ScoreTrend'
 import * as api from '../api'
 import { BackButton } from './AccessibleNav'
 import { ClinicalDisclaimer } from './ClinicalDisclaimer'
@@ -95,6 +98,7 @@ export function HistoryView({ onBack }: Props) {
   const [surveyDoneIds, setSurveyDoneIds] = useState<Set<string>>(new Set())
   const importInputRef = useRef<HTMLInputElement>(null)
   const { user } = useAuth()
+  const canViewReliability = user?.isAdmin === true || user?.isClinician === true
 
   const handleImport = async (files: FileList | null) => {
     if (!files || files.length === 0) return
@@ -125,28 +129,36 @@ export function HistoryView({ onBack }: Props) {
     setTimeout(() => setImportMessage(null), 6000)
   }
 
-  // Fetch synced result IDs from server
+  // Fetch synced result IDs from server, and propagate any cross-device
+  // deletions (results the user removed on another device live only as a
+  // server-side tombstone here). applyServerDeletions prunes the local
+  // copy; refresh the visible list when it does so the deleted result
+  // disappears immediately rather than lingering until the next reload.
   useEffect(() => {
     if (!user) return
     api.listVFResults()
-      .then(res => setSyncedIds(new Set(res.results.map(r => r.id))))
+      .then(res => {
+        setSyncedIds(new Set(res.results.map(r => r.id)))
+        if (applyServerDeletions(res.deletedIds)) {
+          setResults(getResults().sort((a, b) => b.date.localeCompare(a.date)))
+        }
+      })
       .catch(() => {})
   }, [user])
 
   const handleDelete = (ids: string[]) => {
     for (const id of ids) {
-      // Local removal + tombstone (deleteResult writes both — see
-      // storage.ts). The tombstone protects the delete against the
-      // next mergeFromServer pulling the record back in.
+      // Local removal + permanent tombstone (deleteResult writes both —
+      // see storage.ts). The tombstone protects the delete against any
+      // future mergeFromServer pulling the record back in.
       deleteResult(id)
-      // Best-effort server delete. On success, clear the tombstone
-      // immediately so it doesn't get retried next sync. On failure
-      // (network, 5xx, expired session), the tombstone stays and the
-      // sync loop in AuthContext will retry until the server agrees.
+      // Best-effort immediate server delete. We deliberately do NOT clear
+      // the tombstone on success: the tombstone is permanent so a stale,
+      // in-flight mergeFromServer can never resurrect the row. If this
+      // call fails the sync loop in AuthContext retries until the server
+      // agrees.
       if (user) {
-        api.deleteVFResult(id)
-          .then(() => removeTombstone(id))
-          .catch(() => { /* tombstone retains; sync loop retries */ })
+        api.deleteVFResult(id).catch(() => { /* sync loop retries */ })
       }
     }
     const idSet = new Set(ids)
@@ -223,8 +235,18 @@ export function HistoryView({ onBack }: Props) {
         standardAreas[key] = selected.isopterAreas[key]
       }
     }
+    // Field-score trend across this eye's Goldmann sessions, oldest → newest.
+    const selectedKey = selected.id ?? String(selected.date)
+    const eyeScoreHistory: TrendPoint[] = results
+      .filter(r => r.eye === selected.eye && isGoldmannResult(r))
+      .map(r => {
+        const fs = scoreField(r.isopterAreas, r.calibration.maxEccentricityDeg, r.calibration)
+        return fs ? { id: r.id ?? String(r.date), date: String(r.date), score: fs.score } : null
+      })
+      .filter((x): x is TrendPoint => x != null)
+      .sort((a, b) => +new Date(a.date) - +new Date(b.date))
     return (
-      <div className="min-h-[100dvh] bg-base text-white safe-pad p-6 animate-page-in">
+      <div className="min-h-[100dvh] bg-base text-body safe-pad p-6 animate-page-in">
         <main className="max-w-lg mx-auto space-y-6">
           <BackButton onClick={() => setSelected(null)} label="Back to results" />
           <h1 className="text-xl font-heading font-bold">
@@ -234,10 +256,10 @@ export function HistoryView({ onBack }: Props) {
               <span className="ml-2 text-xs font-normal text-teal/80">· part of a binocular session</span>
             )}
           </h1>
-          <p className="text-zinc-400 text-sm">
+          <p className="text-muted text-sm">
             {new Date(selected.date).toLocaleTimeString()}
             {selected.testType && (
-              <span className="ml-2 text-zinc-500">· {selected.testType === 'static' ? 'Static test' : 'Goldmann'}</span>
+              <span className="ml-2 text-muted">· {selected.testType === 'static' ? 'Static test' : 'Goldmann'}</span>
             )}
           </p>
           {isGoldmannResult(selected) && (
@@ -245,6 +267,7 @@ export function HistoryView({ onBack }: Props) {
               points={standardPoints}
               eye={selected.eye}
               maxEccentricity={maxEcc}
+              plotExtentDeg={vrPlotExtentDeg(standardPoints, selected.calibration, maxEcc)}
               calibration={selected.calibration}
               enableVerify
             />
@@ -270,6 +293,7 @@ export function HistoryView({ onBack }: Props) {
               maxEccentricityDeg={maxEcc}
               fpIsiPresses={selected.qualityMetrics?.falsePositiveIsiPresses}
               truePositiveResponses={selected.qualityMetrics?.truePositiveResponses}
+              showReliability={canViewReliability}
             />
           ) : (
             <>
@@ -279,9 +303,9 @@ export function HistoryView({ onBack }: Props) {
                     const area = selected.isopterAreas[key]
                     if (area == null) return null
                     return (
-                      <div key={key} className="bg-surface rounded-xl px-3 py-2 flex items-center gap-2 border border-white/[0.06]">
+                      <div key={key} className="bg-surface rounded-xl px-3 py-2 flex items-center gap-2 border border-line">
                         <span className="w-4 text-center" style={{ color: STIMULI[key].color }} aria-hidden="true">{ISOPTER_SHAPES[key] || '●'}</span>
-                        <span className="text-zinc-400">{STIMULI[key].label}</span>
+                        <span className="text-muted">{STIMULI[key].label}</span>
                         <span className="ml-auto font-mono" title={isopterStrategyHint(selected.testType)}>
                           {area.toFixed(0)} deg²
                         </span>
@@ -289,17 +313,30 @@ export function HistoryView({ onBack }: Props) {
                     )
                   })}
                 </div>
-                <p className="text-[11px] text-zinc-500 leading-snug">
-                  Areas measured via <span className="text-zinc-400">Goldmann kinetic</span>.
-                  {' '}{isopterStrategyHint(selected.testType)}
+                <p className="text-[11px] text-muted leading-snug">
+                  Areas are in <span className="font-medium">square degrees (deg²)</span> — how much of
+                  the visual field each isopter encloses, like area on a map (larger = more field seen).
+                  Measured via Goldmann kinetic. {isopterStrategyHint(selected.testType)}
                 </p>
               </div>
+              {eyeScoreHistory.length >= 2 && (
+                <div className="bg-surface rounded-xl p-4 border border-line">
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-sm font-medium">
+                      Field score trend ({selected.eye === 'right' ? 'OD' : 'OS'})
+                    </h3>
+                    <span className="text-xs text-muted">{eyeScoreHistory.length} tests</span>
+                  </div>
+                  <ScoreTrend history={eyeScoreHistory} currentId={selectedKey} />
+                </div>
+              )}
               <Interpretation
                 points={standardPoints}
                 areas={selected.isopterAreas}
                 maxEccentricityDeg={selected.calibration.maxEccentricityDeg}
                 calibration={selected.calibration}
                 reliabilityIndices={selected.reliabilityIndices}
+                showReliability={canViewReliability}
               />
             </>
           )}
@@ -313,13 +350,13 @@ export function HistoryView({ onBack }: Props) {
               Static reads are still summarised by the
               Interpretation block above. */}
           {selected.testType !== 'static' && (
-            <ScenarioOverlay userPoints={standardPoints} userAreas={selected.isopterAreas} maxEccentricity={maxEcc} />
+            <ScenarioOverlay userPoints={standardPoints} userAreas={selected.isopterAreas} maxEccentricity={maxEcc} calibration={selected.calibration} />
           )}
           {/* Vision simulation disabled for now — see comment in
               StaticTest.tsx. Component file preserved so the feature
               can be re-enabled in place once it handles static
               threshold data more sensibly. */}
-          <div className="text-sm text-zinc-500 space-y-1">
+          <div className="text-sm text-muted space-y-1">
             <p>Viewing distance: {selected.calibration.viewingDistanceCm} cm</p>
             <p>Max eccentricity: {selected.calibration.maxEccentricityDeg}°</p>
             <p>Total points: {selected.points.length} ({selected.points.filter(p => p.detected).length} detected)</p>
@@ -335,10 +372,10 @@ export function HistoryView({ onBack }: Props) {
               for self-monitoring users and only meaningful for
               study-tracked runs. */}
           {selected.study && (
-            <div className="space-y-3 rounded-xl border border-white/[0.06] bg-surface p-4">
-              <h2 className="text-sm font-medium text-white">Clinician / study metadata</h2>
-              <div className="space-y-1 text-sm text-zinc-300">
-                <p className="text-xs uppercase tracking-[0.08em] text-zinc-500">Study</p>
+            <div className="space-y-3 rounded-xl border border-line bg-surface p-4">
+              <h2 className="text-sm font-medium text-ink">Clinician / study metadata</h2>
+              <div className="space-y-1 text-sm text-body">
+                <p className="text-xs uppercase tracking-[0.08em] text-muted">Study</p>
                 <p>
                   Study {selected.study.studyId} · Participant {selected.study.participantId} · Session {selected.study.sessionId}
                   {selected.study.visitId ? ` · Visit ${selected.study.visitId}` : ''}
@@ -348,13 +385,13 @@ export function HistoryView({ onBack }: Props) {
                 </p>
               </div>
               {selected.protocol && (
-                <div className="space-y-1 text-sm text-zinc-300">
-                  <p className="text-xs uppercase tracking-[0.08em] text-zinc-500">Protocol</p>
+                <div className="space-y-1 text-sm text-body">
+                  <p className="text-xs uppercase tracking-[0.08em] text-muted">Protocol</p>
                   <p>{describeProtocol(selected).join(' · ')}</p>
                   {selected.protocol.advancedSettingsSnapshot && (
-                    <details className="pt-1 text-xs text-zinc-400">
-                      <summary className="cursor-pointer select-none text-zinc-300">Advanced settings snapshot</summary>
-                      <pre className="mt-2 overflow-x-auto rounded-lg border border-white/[0.06] bg-black/20 p-3 text-[11px] leading-relaxed text-zinc-400">
+                    <details className="pt-1 text-xs text-muted">
+                      <summary className="cursor-pointer select-none text-body">Advanced settings snapshot</summary>
+                      <pre className="mt-2 overflow-x-auto rounded-lg border border-line bg-subtle-2 p-3 text-[11px] leading-relaxed text-body">
                         {JSON.stringify(selected.protocol.advancedSettingsSnapshot, null, 2)}
                       </pre>
                     </details>
@@ -362,26 +399,26 @@ export function HistoryView({ onBack }: Props) {
                 </div>
               )}
               {selected.device && (
-                <div className="space-y-1 text-sm text-zinc-300">
-                  <p className="text-xs uppercase tracking-[0.08em] text-zinc-500">Acquisition</p>
+                <div className="space-y-1 text-sm text-body">
+                  <p className="text-xs uppercase tracking-[0.08em] text-muted">Acquisition</p>
                   <p>{describeDevice(selected).join(' · ')}</p>
                   {selected.device.platform && (
-                    <p className="text-xs text-zinc-500">
+                    <p className="text-xs text-muted">
                       {selected.device.platform}
                       {selected.device.language ? ` · ${selected.device.language}` : ''}
                     </p>
                   )}
                 </div>
               )}
-              {selected.qualityMetrics && (
-                <div className="space-y-1 text-sm text-zinc-300">
-                  <p className="text-xs uppercase tracking-[0.08em] text-zinc-500">Quality signals</p>
+              {canViewReliability && selected.qualityMetrics && (
+                <div className="space-y-1 text-sm text-body">
+                  <p className="text-xs uppercase tracking-[0.08em] text-muted">Quality signals</p>
                   <p>{describeQuality(selected).join(' · ')}</p>
                 </div>
               )}
               {selected.provenance && (
-                <div className="space-y-1 text-sm text-zinc-300">
-                  <p className="text-xs uppercase tracking-[0.08em] text-zinc-500">Provenance</p>
+                <div className="space-y-1 text-sm text-body">
+                  <p className="text-xs uppercase tracking-[0.08em] text-muted">Provenance</p>
                   <p>
                     {selected.provenance.source === 'ovfx-import' ? 'Imported from OVFX' : 'Captured natively'}
                     {selected.provenance.sourceDocumentId ? ` · Source doc ${selected.provenance.sourceDocumentId}` : ''}
@@ -405,7 +442,7 @@ export function HistoryView({ onBack }: Props) {
           ) : (
             <button
               onClick={() => setSurveyOpenForId(selected.id)}
-              className="w-full py-2.5 bg-surface hover:bg-elevated rounded-xl text-sm font-medium text-zinc-200 transition-colors border border-white/[0.06]"
+              className="w-full py-2.5 bg-surface hover:bg-elevated rounded-xl text-sm font-medium text-body transition-colors border border-line"
             >
               Add feedback for this result
             </button>
@@ -413,7 +450,7 @@ export function HistoryView({ onBack }: Props) {
 
           <div className="flex gap-3">
             <button
-              onClick={() => exportTrackedResultPDF(selected, undefined, 'history_detail')}
+              onClick={() => exportTrackedResultPDF(selected, { includeReliabilityDetails: canViewReliability }, 'history_detail')}
               className="flex-1 py-2.5 btn-primary rounded-xl text-sm font-medium text-white"
             >
               Export PDF
@@ -421,13 +458,13 @@ export function HistoryView({ onBack }: Props) {
             <button
               onClick={() => downloadOvfx(selected)}
               title="Open Visual Field eXchange — portable JSON for other tools"
-              className="flex-1 py-2.5 bg-surface hover:bg-elevated rounded-xl text-sm font-medium text-zinc-200 transition-colors border border-white/[0.06]"
+              className="flex-1 py-2.5 bg-surface hover:bg-elevated rounded-xl text-sm font-medium text-body transition-colors border border-line"
             >
               Export OVFX
             </button>
             <button
               onClick={() => setConfirmDeleteIds([selected.id])}
-              className="py-2.5 px-4 bg-surface hover:bg-elevated rounded-xl text-sm text-red-400 hover:text-red-300 transition-colors border border-white/[0.06]"
+              className="py-2.5 px-4 bg-surface hover:bg-elevated rounded-xl text-sm text-red-400 hover:text-red-300 transition-colors border border-line"
             >
               Delete
             </button>
@@ -442,15 +479,15 @@ export function HistoryView({ onBack }: Props) {
   }
 
   return (
-    <div className="min-h-[100dvh] bg-base text-white safe-pad p-6 animate-page-in">
+    <div className="min-h-[100dvh] bg-base text-body safe-pad p-6 animate-page-in">
       <main className="max-w-2xl mx-auto space-y-8">
-        <div className="flex items-center justify-between pb-5 border-b border-white/[0.06]">
+        <div className="flex items-center justify-between pb-5 border-b border-line">
           <h1 className="text-3xl font-heading font-bold">Results</h1>
           <div className="flex items-center gap-2">
             <button
               onClick={() => importInputRef.current?.click()}
               title="Import one or more OVFX (.ovfx.json) files"
-              className="text-xs font-medium text-zinc-300 hover:text-white bg-surface hover:bg-elevated border border-white/[0.06] rounded-lg min-h-[44px] px-3"
+              className="text-xs font-medium text-body hover:text-ink bg-surface hover:bg-elevated border border-line rounded-lg min-h-[44px] px-3"
             >
               Import OVFX
             </button>
@@ -459,7 +496,7 @@ export function HistoryView({ onBack }: Props) {
               aria-expanded={showOvfxHelp}
               aria-label="What is OVFX?"
               title="What is OVFX?"
-              className="text-zinc-400 hover:text-white bg-surface hover:bg-elevated border border-white/[0.06] rounded-lg min-h-[44px] w-10 flex items-center justify-center"
+              className="text-muted hover:text-ink bg-surface hover:bg-elevated border border-line rounded-lg min-h-[44px] w-10 flex items-center justify-center"
             >
               ?
             </button>
@@ -477,39 +514,39 @@ export function HistoryView({ onBack }: Props) {
         />
 
         {showOvfxHelp && (
-          <div className="bg-surface border border-white/[0.08] rounded-2xl p-5 space-y-3 text-sm">
+          <div className="bg-surface border border-line rounded-2xl p-5 space-y-3 text-sm">
             <div className="flex items-start justify-between gap-3">
-              <h3 className="font-heading font-bold text-white">About OVFX files</h3>
+              <h3 className="font-heading font-bold text-ink">About OVFX files</h3>
               <button
                 onClick={() => setShowOvfxHelp(false)}
                 aria-label="Close help"
-                className="text-zinc-500 hover:text-white text-lg leading-none -mt-1"
+                className="text-muted hover:text-ink text-lg leading-none -mt-1"
               >×</button>
             </div>
-            <p className="text-zinc-300 leading-relaxed">
-              <strong className="text-white">OVFX</strong> (Open Visual Field eXchange) is a small, open
+            <p className="text-body leading-relaxed">
+              <strong className="text-ink">OVFX</strong> (Open Visual Field eXchange) is a small, open
               JSON format for visual-field perimetry results. Think of it as a portable way to move a test
               result between apps — like <em>CSV for spreadsheets</em>, but for a perimetry session.
             </p>
-            <div className="space-y-1.5 text-zinc-300">
+            <div className="space-y-1.5 text-body">
               <p>
-                <span className="text-white font-medium">Export</span> — on any result detail page, click{' '}
+                <span className="text-ink font-medium">Export</span> — on any result detail page, click{' '}
                 <span className="inline-block px-1.5 py-0.5 bg-elevated rounded text-[11px] font-mono">Export OVFX</span>.
                 A single <code>.ovfx.json</code> file downloads with every recorded point, the test-time
                 calibration, and the metadata needed to reproduce the result elsewhere.
               </p>
               <p>
-                <span className="text-white font-medium">Import</span> — click{' '}
+                <span className="text-ink font-medium">Import</span> — click{' '}
                 <span className="inline-block px-1.5 py-0.5 bg-elevated rounded text-[11px] font-mono">Import OVFX</span>{' '}
                 and pick one or more <code>.ovfx.json</code> files. Binocular sessions exported as two
                 files (one per eye) are automatically re-linked by their shared session ID.
               </p>
               <p>
-                <span className="text-white font-medium">No personal data</span> — exported files contain
+                <span className="text-ink font-medium">No personal data</span> — exported files contain
                 only the test result itself. No name, no date of birth, no identifiers unless you opt in.
               </p>
             </div>
-            <p className="text-xs text-zinc-500">
+            <p className="text-xs text-muted">
               The full specification lives at{' '}
               <a
                 href="https://github.com/openperimetry/ovfx-spec"
@@ -552,7 +589,7 @@ export function HistoryView({ onBack }: Props) {
         )}
 
         {results.length === 0 && (
-          <div className="rounded-2xl border border-white/[0.06] bg-surface/40 px-6 py-12 text-center space-y-4">
+          <div className="rounded-2xl border border-line bg-surface px-6 py-12 text-center space-y-4">
             <div className="w-16 h-16 mx-auto rounded-full bg-accent/8 flex items-center justify-center border border-accent/15" aria-hidden="true">
               <svg viewBox="0 0 48 48" className="w-8 h-8 text-accent/80" fill="none" stroke="currentColor" strokeWidth={1.5}>
                 <circle cx="24" cy="24" r="20" strokeOpacity="0.4" />
@@ -562,8 +599,8 @@ export function HistoryView({ onBack }: Props) {
               </svg>
             </div>
             <div className="space-y-1">
-              <p className="text-white font-heading font-semibold">No results yet</p>
-              <p className="text-zinc-500 text-sm max-w-sm mx-auto">
+              <p className="text-ink font-heading font-semibold">No results yet</p>
+              <p className="text-muted text-sm max-w-sm mx-auto">
                 Run your first test from the home screen, or import existing OVFX files from another device.
               </p>
             </div>
@@ -579,7 +616,7 @@ export function HistoryView({ onBack }: Props) {
               </button>
               <button
                 onClick={() => importInputRef.current?.click()}
-                className="inline-flex items-center gap-2 text-sm text-zinc-300 hover:text-white bg-surface hover:bg-elevated border border-white/[0.06] rounded-lg min-h-[44px] px-4 transition-colors"
+                className="inline-flex items-center gap-2 text-sm text-body hover:text-ink bg-surface hover:bg-elevated border border-line rounded-lg min-h-[44px] px-4 transition-colors"
               >
                 <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
                   <path d="M12 3v12" />
@@ -591,8 +628,6 @@ export function HistoryView({ onBack }: Props) {
             </div>
           </div>
         )}
-
-        {results.length >= 2 && <AreaChart results={results} />}
 
         {/* Binocular combined view used to live here as a VisionSimulator
             preview. Removed — it was a heavy compute-on-every-render
@@ -612,7 +647,7 @@ export function HistoryView({ onBack }: Props) {
             onDelete={ids => setConfirmDeleteIds(ids)}
             onExportPDF={entry => {
               if (entry.kind === 'single') {
-                exportTrackedResultPDF(entry.result, undefined, 'history_list')
+                exportTrackedResultPDF(entry.result, { includeReliabilityDetails: canViewReliability }, 'history_list')
                 return
               }
               // Binocular pair — render as combined OU report.
@@ -623,12 +658,18 @@ export function HistoryView({ onBack }: Props) {
               const combined = [...rightPoints, ...leftPoints]
               exportTrackedResultPDF(
                 { ...anchor, points: combined },
-                { binocular: true, rightEyePoints: rightPoints, leftEyePoints: leftPoints },
+                {
+                  binocular: true,
+                  rightEyePoints: rightPoints,
+                  leftEyePoints: leftPoints,
+                  includeReliabilityDetails: canViewReliability,
+                },
                 'history_list',
               )
             }}
             syncedIds={syncedIds}
             showSync={!!user}
+            showReliability={canViewReliability}
           />
         )}
       </main>
@@ -638,18 +679,18 @@ export function HistoryView({ onBack }: Props) {
           because binocular pair cards delete both eyes of a session as
           a unit; the copy below pluralises when there's more than one. */}
       {confirmDeleteIds && confirmDeleteIds.length > 0 && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="presentation">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4" role="presentation">
           <div
             role="alertdialog"
             aria-modal="true"
             aria-labelledby="delete-confirm-title"
             aria-describedby="delete-confirm-desc"
-            className="bg-surface border border-white/[0.08] rounded-2xl p-6 w-full max-w-xs space-y-4 shadow-2xl animate-page-in"
+            className="bg-surface border border-line rounded-2xl p-6 w-full max-w-xs space-y-4 shadow-2xl animate-page-in"
           >
-            <h2 id="delete-confirm-title" className="text-lg font-heading font-bold text-white">
+            <h2 id="delete-confirm-title" className="text-lg font-heading font-bold text-ink">
               Delete {confirmDeleteIds.length > 1 ? 'both results' : 'result'}?
             </h2>
-            <p id="delete-confirm-desc" className="text-zinc-400 text-sm">
+            <p id="delete-confirm-desc" className="text-muted text-sm">
               {confirmDeleteIds.length > 1
                 ? 'This will permanently remove both eyes of this binocular session. This action cannot be undone.'
                 : 'This will permanently remove this test result. This action cannot be undone.'}
@@ -657,14 +698,14 @@ export function HistoryView({ onBack }: Props) {
             <div className="flex gap-3">
               <button
                 onClick={() => setConfirmDeleteIds(null)}
-                className="flex-1 py-2.5 bg-elevated hover:bg-overlay rounded-xl text-sm font-medium transition-colors"
+                className="flex-1 py-2.5 bg-surface border border-line hover:bg-subtle rounded-xl text-sm font-medium text-body transition-colors"
                 autoFocus
               >
                 Cancel
               </button>
               <button
                 onClick={() => handleDelete(confirmDeleteIds)}
-                className="flex-1 py-2.5 bg-red-600 hover:bg-red-500 rounded-xl text-sm font-medium transition-colors"
+                className="flex-1 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-xl text-sm font-medium transition-colors"
               >
                 Delete
               </button>
@@ -680,12 +721,6 @@ type ListEntry =
   | { kind: 'single'; result: TestResult; date: string }
   | { kind: 'pair'; groupId: string; right?: TestResult; left?: TestResult; date: string }
 
-/** Short qualifier shown after the III4e area number in list rows. */
-function isopterStrategyShort(t?: string): string {
-  if (t === 'static') return '(static)'
-  if (t === 'goldmann') return '(kinetic)'
-  return ''
-}
 /** Tooltip text explaining why the same-eye area differs between strategies. */
 function isopterStrategyHint(t?: string): string {
   if (t === 'static') return 'Static scatter: polygon fits only locations where III4e was actually detected. Tends to be 30–60% smaller than kinetic on the same eye.'
@@ -721,6 +756,7 @@ function ResultsList({
   onExportPDF,
   syncedIds,
   showSync,
+  showReliability,
 }: {
   binocularGroups: { groupId: string; right?: TestResult; left?: TestResult; date: string }[]
   singleResults: TestResult[]
@@ -734,6 +770,7 @@ function ResultsList({
   onExportPDF: (entry: ListEntry) => void
   syncedIds: Set<string>
   showSync: boolean
+  showReliability: boolean
 }) {
   // Merge into a single chronological list. Binocular pairs are one entry with
   // two sub-buttons; single-eye results are one entry with one button.
@@ -744,9 +781,9 @@ function ResultsList({
 
   return (
     <section className="space-y-3" aria-label="Results list">
-      <h2 className="text-lg font-heading font-semibold text-zinc-200">
+      <h2 className="text-lg font-heading font-semibold text-body">
         All results
-        <span className="ml-2 text-sm font-normal text-zinc-500">({entries.length})</span>
+        <span className="ml-2 text-sm font-normal text-muted">({entries.length})</span>
       </h2>
       <div className="space-y-2">
         {entries.map((entry, i) => {
@@ -779,24 +816,24 @@ function ResultsList({
           return (
             <div
               key={keyId}
-              className="px-4 py-3 bg-surface rounded-2xl border border-white/[0.06] space-y-2"
+              className="px-4 py-3 bg-surface rounded-2xl border border-line space-y-2"
             >
               <div className="flex items-center text-sm">
-                <span className="text-white">{dateLabel}</span>
-                <span className="text-zinc-500 ml-3">{timeLabel}</span>
+                <span className="text-ink">{dateLabel}</span>
+                <span className="text-muted ml-3">{timeLabel}</span>
                 <span className={`text-xs ml-2 px-1.5 py-0.5 rounded ${eyeBadgeCls}`}>
                   {eyeBadgeLabel === 'OU' ? <abbr title="Oculus Uterque">OU</abbr> : eyeBadgeLabel}
                 </span>
                 {testTypeBadge(testType)}
                 {entry.kind === 'single' && anyR && (
-                  <span className="text-zinc-500 text-xs ml-2">{anyR.points.length} pts</span>
+                  <span className="text-muted text-xs ml-2">{anyR.points.length} pts</span>
                 )}
                 <div className="ml-auto flex items-center gap-1">
                   <button
                     onClick={e => { e.stopPropagation(); onExportPDF(entry) }}
                     aria-label="Export as PDF"
                     title="Export as PDF"
-                    className="w-7 h-7 flex items-center justify-center rounded text-zinc-500 hover:text-white hover:bg-white/[0.06] transition-colors"
+                    className="w-7 h-7 flex items-center justify-center rounded text-muted hover:text-ink hover:bg-subtle-2 transition-colors"
                   >
                     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={1.6} aria-hidden="true">
                       <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5z" />
@@ -823,7 +860,7 @@ function ResultsList({
                     }}
                     aria-label="Delete result"
                     title="Delete result"
-                    className="w-7 h-7 flex items-center justify-center rounded text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                    className="w-7 h-7 flex items-center justify-center rounded text-muted hover:text-red-400 hover:bg-red-500/10 transition-colors"
                   >
                     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={1.6} aria-hidden="true">
                       <path d="M3 6h18" />
@@ -844,66 +881,39 @@ function ResultsList({
                   // because we have no eye to assign it to.
                   <button
                     onClick={() => onSelect(entry.result)}
-                    className="flex-1 px-3 py-2 bg-elevated hover:bg-overlay rounded-xl text-xs text-left transition-colors border border-white/[0.04] flex items-center gap-2"
+                    className="flex-1 px-3 py-2 bg-elevated hover:bg-overlay rounded-xl text-xs text-left transition-colors border border-line flex items-center gap-2"
                   >
                     {showSync && <SyncIndicator synced={syncedIds.has(entry.result.id)} />}
-                    <span className="text-zinc-300 font-medium">Legacy result — tap to view</span>
-                    {entry.result.isopterAreas['III4e'] != null && (
-                      <span className="ml-auto font-mono text-teal">
-                        {entry.result.isopterAreas['III4e']!.toFixed(0)} deg²
-                      </span>
-                    )}
+                    <span className="text-body font-medium">Legacy result — tap to view</span>
                   </button>
                 ) : leftResult ? (
                   <button
                     onClick={() => onSelect(leftResult)}
-                    className="flex-1 px-3 py-2 bg-elevated hover:bg-overlay rounded-xl text-xs text-left transition-colors border border-white/[0.04] flex items-center gap-2"
+                    className="flex-1 px-3 py-2 bg-elevated hover:bg-overlay rounded-xl text-xs text-left transition-colors border border-line flex items-center gap-2"
                   >
                     {showSync && <SyncIndicator synced={syncedIds.has(leftResult.id)} />}
-                    <span className="text-zinc-300 font-medium">OS (Left)</span>
-                    {leftResult.isopterAreas['III4e'] != null && (
-                      <span
-                        className="ml-auto font-mono text-teal"
-                        title={isopterStrategyHint(leftResult.testType)}
-                      >
-                        {leftResult.isopterAreas['III4e']!.toFixed(0)} deg²
-                        {leftResult.testType && (
-                          <span className="text-zinc-500 font-sans ml-1">{isopterStrategyShort(leftResult.testType)}</span>
-                        )}
-                      </span>
-                    )}
+                    <span className="text-body font-medium">OS (Left)</span>
                   </button>
                 ) : (
-                  <div className="flex-1 px-3 py-2 rounded-xl text-xs text-zinc-600 text-left border border-dashed border-white/[0.04]">
+                  <div className="flex-1 px-3 py-2 rounded-xl text-xs text-muted text-left border border-dashed border-line">
                     OS (Left) — not tested
                   </div>
                 )}
                 {entry.kind === 'single' && !isStandardEye ? null : rightResult ? (
                   <button
                     onClick={() => onSelect(rightResult)}
-                    className="flex-1 px-3 py-2 bg-elevated hover:bg-overlay rounded-xl text-xs text-left transition-colors border border-white/[0.04] flex items-center gap-2"
+                    className="flex-1 px-3 py-2 bg-elevated hover:bg-overlay rounded-xl text-xs text-left transition-colors border border-line flex items-center gap-2"
                   >
                     {showSync && <SyncIndicator synced={syncedIds.has(rightResult.id)} />}
-                    <span className="text-zinc-300 font-medium">OD (Right)</span>
-                    {rightResult.isopterAreas['III4e'] != null && (
-                      <span
-                        className="ml-auto font-mono text-teal"
-                        title={isopterStrategyHint(rightResult.testType)}
-                      >
-                        {rightResult.isopterAreas['III4e']!.toFixed(0)} deg²
-                        {rightResult.testType && (
-                          <span className="text-zinc-500 font-sans ml-1">{isopterStrategyShort(rightResult.testType)}</span>
-                        )}
-                      </span>
-                    )}
+                    <span className="text-body font-medium">OD (Right)</span>
                   </button>
                 ) : (
-                  <div className="flex-1 px-3 py-2 rounded-xl text-xs text-zinc-600 text-left border border-dashed border-white/[0.04]">
+                  <div className="flex-1 px-3 py-2 rounded-xl text-xs text-muted text-left border border-dashed border-line">
                     OD (Right) — not tested
                   </div>
                 )}
               </div>
-              {[leftResult, rightResult].map((result, ri) => result?.reliabilityIndices && result.reliabilityIndices.catchTrialsPresented > 0 && (() => {
+              {showReliability && [leftResult, rightResult].map((result, ri) => result?.reliabilityIndices && result.reliabilityIndices.catchTrialsPresented > 0 && (() => {
                 const {
                   catchTrialsPresented,
                   catchTrialsFalsePositive,
@@ -918,21 +928,21 @@ function ResultsList({
                 return (
                   <div key={ri} className="space-y-0.5">
                     <div
-                      className="text-sm text-zinc-400"
+                      className="text-sm text-muted"
                       title="Fixation Accuracy — % of blindspot catch trials correctly ignored. Normal 79–99% (Dzwiniel 2017)."
                     >
                       <span className="font-medium">FA: </span>
                       {faPct.toFixed(0)}% ({faCorrect}/{catchTrialsPresented})
-                      <span className="text-zinc-500"> · normal 79–99%</span>
+                      <span className="text-muted"> · normal 79–99%</span>
                     </div>
                     {fprrD > 0 && (
                       <div
-                        className="text-sm text-zinc-400"
+                        className="text-sm text-muted"
                         title="False-Positive Response Rate — % of key presses when no stimulus was shown. Normal 0.3–2.3% (Dzwiniel 2017)."
                       >
                         <span className="font-medium">FPRR: </span>
                         {fprrPct.toFixed(1)}%
-                        <span className="text-zinc-500"> · normal 0.3–2.3%</span>
+                        <span className="text-muted"> · normal 0.3–2.3%</span>
                       </div>
                     )}
                   </div>
@@ -943,125 +953,5 @@ function ResultsList({
         })}
       </div>
     </section>
-  )
-}
-
-/** Per-test-type colors for the isopter trend chart. Static and kinetic
- *  produce III4e areas on different scales (kinetic typically 1.5–4×
- *  larger on the same eye — see the test-type caption below), so we never
- *  connect them with a single line. */
-const TEST_TYPE_COLORS: Record<string, string> = {
-  static: '#2dd4bf',   // teal — matches the Static badge
-  goldmann: '#fb923c', // orange — matches the Goldmann badge
-}
-const TEST_TYPE_LABELS: Record<string, string> = {
-  static: 'Static (scatter)',
-  goldmann: 'Goldmann (kinetic)',
-}
-
-function AreaChart({ results }: { results: TestResult[] }) {
-  const sorted = [...results].sort((a, b) => a.date.localeCompare(b.date))
-
-  // Group by testType. Static-scatter and Goldmann-kinetic produce the
-  // III4e area via different algorithms (seen-points hull vs. kinetic
-  // sweep endpoints) and shouldn't share a line.
-  const byType = new Map<string, { date: string; area: number }[]>()
-  for (const r of sorted) {
-    const area = r.isopterAreas['III4e']
-    if (area == null) continue
-    const type = r.testType ?? 'unknown'
-    const arr = byType.get(type) ?? []
-    arr.push({ date: r.date, area })
-    byType.set(type, arr)
-  }
-
-  // Chart only useful when at least ONE strategy has ≥2 points.
-  const hasLine = [...byType.values()].some(arr => arr.length >= 2)
-  if (!hasLine) return null
-
-  const allPoints = [...byType.values()].flat()
-  const maxArea = Math.max(...allPoints.map(d => d.area), 1)
-  // Normalize all series along a shared time axis (index-based, not
-  // real-time), so each series' first point is at x=0 and last is at x=1
-  // relative to the ALL-points timeline. We use min/max date for that.
-  const allDates = allPoints.map(d => d.date).sort()
-  const minDate = allDates[0]
-  const maxDate = allDates[allDates.length - 1]
-  const spanMs = Math.max(1, new Date(maxDate).getTime() - new Date(minDate).getTime())
-
-  const w = 600
-  const h = 160
-  const px = 40
-  const py = 20
-  const rightPad = 20
-
-  const xFor = (date: string) => {
-    const t = new Date(date).getTime() - new Date(minDate).getTime()
-    return px + ((w - px - rightPad) * t) / spanMs
-  }
-  const yFor = (area: number) => py + (h - 2 * py) * (1 - area / maxArea)
-
-  const series = [...byType.entries()]
-    .map(([type, arr]) => ({
-      type,
-      color: TEST_TYPE_COLORS[type] ?? '#a1a1aa',
-      label: TEST_TYPE_LABELS[type] ?? type,
-      points: arr.map(d => ({ x: xFor(d.date), y: yFor(d.area), date: d.date, area: d.area })),
-    }))
-
-  return (
-    <div className="space-y-2">
-      <div className="flex items-baseline justify-between flex-wrap gap-x-3 gap-y-1">
-        <h2 className="text-sm text-zinc-400 font-heading font-semibold">
-          III4e isopter area over time
-        </h2>
-        <div className="flex items-center gap-3 text-[10px] text-zinc-500" aria-label="Test-type legend">
-          {series.map(s => (
-            <span key={s.type} className="inline-flex items-center gap-1.5">
-              <span aria-hidden="true" className="inline-block rounded-full" style={{ width: 8, height: 8, background: s.color }} />
-              <span>{s.label}</span>
-            </span>
-          ))}
-        </div>
-      </div>
-      <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ maxWidth: w }} role="img" aria-label="Chart showing III4e isopter area trend over time, split by test type">
-        <text x={px - 4} y={py + 4} fill="#71717a" fontSize={10} textAnchor="end">
-          {maxArea.toFixed(0)}
-        </text>
-        <text x={px - 4} y={h - py + 4} fill="#71717a" fontSize={10} textAnchor="end">
-          0
-        </text>
-        <line x1={px} y1={py} x2={px} y2={h - py} stroke="#27272a" strokeWidth={0.5} />
-        <line x1={px} y1={h - py} x2={w - rightPad} y2={h - py} stroke="#27272a" strokeWidth={0.5} />
-        {series.map(s => {
-          const linePath = s.points.length >= 2
-            ? s.points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
-            : null
-          return (
-            <g key={s.type}>
-              {linePath && <path d={linePath} fill="none" stroke={s.color} strokeWidth={2} />}
-              {s.points.map((p, i) => (
-                <circle key={i} cx={p.x} cy={p.y} r={4} fill={s.color}>
-                  <title>{`${s.label}: ${p.area.toFixed(0)} deg² · ${new Date(p.date).toLocaleDateString()}`}</title>
-                </circle>
-              ))}
-            </g>
-          )
-        })}
-        {/* X-axis date labels at min/max of the combined timeline */}
-        <text x={px} y={h - 2} fill="#71717a" fontSize={9} textAnchor="start">
-          {new Date(minDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-        </text>
-        <text x={w - rightPad} y={h - 2} fill="#71717a" fontSize={9} textAnchor="end">
-          {new Date(maxDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-        </text>
-      </svg>
-      <p className="text-[11px] text-zinc-500 leading-snug">
-        Static and kinetic isopter areas aren't directly comparable — kinetic
-        sweeps record only the detection boundary while static scatter tests
-        can leave seen-points clustered near fovea. Expect kinetic III4e area
-        to be 1.5–4× the static area on the same eye.
-      </p>
-    </div>
   )
 }

@@ -26,7 +26,7 @@
 
 import type { TestPoint, StimulusKey, CalibrationData } from './types'
 import { STIMULI, ISOPTER_ORDER } from './types'
-import { expectedNormalArea } from './clinicalClassifications'
+import { scoreField, type FieldScore } from './clinicalClassifications'
 
 export type Tone = 'critical' | 'warning' | 'caution' | 'info' | 'ok' | 'muted'
 
@@ -246,6 +246,11 @@ export function detectRPFindings(
   areas: Partial<Record<StimulusKey, number>>,
   maxEccentricityDeg: number,
   calibration?: CalibrationData,
+  /** The headline field score. Pass the already-computed result so the
+   *  concentric-constriction card and the headline stage share ONE source of
+   *  truth and can't contradict each other. Omit (undefined) to compute it
+   *  here; pass null only to force "no measurable field". */
+  fieldScore?: FieldScore | null,
 ): RPFinding[] {
   const findings: RPFinding[] = []
 
@@ -255,18 +260,22 @@ export function detectRPFindings(
   const i4e = areas['I4e']
   const i2e = areas['I2e']
 
-  // 1. Concentric constriction — hallmark of RP. Compared against the
-  //    screen-bounded testable area, not a clinical 90° bowl.
-  if (iii4e != null) {
-    const equivRadius = Math.sqrt(iii4e / Math.PI)
-    const fraction = iii4e / expectedNormalArea(maxEccentricityDeg, calibration)
-    const constricted = fraction < 0.65
+  // 1. Concentric constriction — hallmark of RP. Driven by the SAME
+  //    multi-isopter field score as the headline stage, so this card can never
+  //    contradict it (a single-isopter test here used to flag "tunnel vision"
+  //    while the averaged headline read normal, and vice-versa). Callers pass
+  //    the headline's already-computed score in; undefined means compute it.
+  const fScore = fieldScore !== undefined ? fieldScore : scoreField(areas, maxEccentricityDeg, calibration)
+  if (fScore != null) {
+    const fraction = fScore.overallFraction
+    // Constricted once we leave the normal/borderline band — matches the stage.
+    const constricted = fScore.band.severity !== 'normal' && fScore.band.severity !== 'borderline'
     findings.push({
       tone: constricted ? 'warning' : 'ok',
       label: 'Concentric field constriction',
       description: constricted
-        ? `The visual field is constricted concentrically (III4e covers ~${(fraction * 100).toFixed(0)}% of the testable area, equivalent radius ~${equivRadius.toFixed(0)}°). This is the hallmark pattern of retinitis pigmentosa — the field narrows inward from all sides like a tunnel.`
-        : `The III4e field covers ~${(fraction * 100).toFixed(0)}% of the testable area (radius ~${equivRadius.toFixed(0)}°) and does not show significant concentric constriction. This is a positive sign.`,
+        ? `The visual field is constricted concentrically (overall field score ${fScore.score}/100 — ~${(fraction * 100).toFixed(0)}% of normal averaged across isopters). This is the hallmark pattern of retinitis pigmentosa — the field narrows inward from all sides like a tunnel.`
+        : `The field covers ~${(fraction * 100).toFixed(0)}% of normal across isopters (field score ${fScore.score}/100) and does not show significant concentric constriction. This is a positive sign.`,
       present: constricted,
     })
   }
@@ -393,6 +402,16 @@ export function detectAnomalies(
 ): Anomaly[] {
   const anomalies: Anomaly[] = []
 
+  // Detected (non-catch-trial) point count per isopter. An isopter mapped from
+  // only a handful of points yields an unreliable polygon area — common in
+  // phone-VR where the dim/small stimuli (III2e, I2e) are barely visible, so
+  // their isopter collapses to a tiny area. Comparing such a sparse isopter to
+  // a well-mapped neighbour produces spurious "inner larger than outer" flags,
+  // so we require both isopters in a comparison to have enough points first.
+  const MIN_RELIABLE_ISOPTER_POINTS = 4
+  const detectedCount = (stim: StimulusKey): number =>
+    points.filter(p => p.stimulus === stim && p.detected && !p.catchTrial).length
+
   // 1. Inner isopter larger than outer. Mild overlap between adjacent
   //    isopters is very common in RP (steep sensitivity gradient,
   //    constricted fields, brightness vs size differences), so adjacent
@@ -405,6 +424,14 @@ export function detectAnomalies(
       const outerArea = areas[outer]
       const innerArea = areas[inner]
       if (outerArea == null || innerArea == null) continue
+      // Don't flag an ordering reversal when either isopter is too sparse to
+      // have a trustworthy area (e.g. a dim stimulus barely seen in a headset).
+      if (
+        detectedCount(outer) < MIN_RELIABLE_ISOPTER_POINTS ||
+        detectedCount(inner) < MIN_RELIABLE_ISOPTER_POINTS
+      ) {
+        continue
+      }
 
       const gap = j - i
       const threshold = gap === 1 ? 3.0 : 2.0
@@ -425,7 +452,11 @@ export function detectAnomalies(
   // much stronger.
   const v4e = areas['V4e']
   const i2e = areas['I2e']
-  if (v4e != null && i2e != null && i2e > v4e * 1.1) {
+  if (
+    v4e != null && i2e != null && i2e > v4e * 1.1 &&
+    detectedCount('V4e') >= MIN_RELIABLE_ISOPTER_POINTS &&
+    detectedCount('I2e') >= MIN_RELIABLE_ISOPTER_POINTS
+  ) {
     anomalies.push({
       icon: 'error',
       tone: 'critical',

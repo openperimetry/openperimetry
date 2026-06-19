@@ -793,12 +793,33 @@ export async function deleteVFResult(userId: string, resultId: string): Promise<
   // Need to find the item first to get the logKey
   const results = await listVFResults(userId, 200)
   const target = results.find(r => r.id === resultId)
-  if (!target) return
-  const logKey = `vf#${target.date}#${target.id}`
-  await ddb.send(new DeleteCommand({
+  if (target) {
+    await ddb.send(new DeleteCommand({
+      TableName: DDB_VF_RESULTS_TABLE,
+      Key: { userId, logKey: `vf#${target.date}#${target.id}` },
+    }))
+  }
+  // Durable server-side tombstone (`vfdel#<id>`) so another device can't
+  // resurrect this result by re-pushing its stale local copy on sync. We
+  // write it even when the result is already gone, so the delete is
+  // idempotent and order-independent across devices. The `vfdel#` prefix
+  // sorts apart from `vf#`/`vfsurvey#` and is never matched by the result
+  // or survey list queries (their prefixes require the next char to be
+  // `#` / `s`, not `d`).
+  await ddb.send(new PutCommand({
     TableName: DDB_VF_RESULTS_TABLE,
-    Key: { userId, logKey },
+    Item: { userId, logKey: `vfdel#${resultId}`, id: resultId, type: 'vf-deleted' },
   }))
+}
+
+export async function listDeletedVFResultIds(userId: string): Promise<string[]> {
+  const response = await ddb.send(new QueryCommand({
+    TableName: DDB_VF_RESULTS_TABLE,
+    KeyConditionExpression: '#userId = :userId AND begins_with(#logKey, :prefix)',
+    ExpressionAttributeNames: { '#userId': 'userId', '#logKey': 'logKey' },
+    ExpressionAttributeValues: { ':userId': userId, ':prefix': 'vfdel#' },
+  }))
+  return (response.Items ?? []).map((item: any) => String(item.id))
 }
 
 /** Admin: fetch a single result (including the full `data` JSON) by the
@@ -861,6 +882,30 @@ export async function listVFSurveys(userId: string, limit = 200): Promise<VFSurv
     date: item.date,
     data: item.data,
   }))
+}
+
+export async function deleteVFSurvey(surveyId: string): Promise<void> {
+  // Surveys live in the VF results table under a `device:<id>` partition,
+  // keyed `vfsurvey#<date>#<id>`. The admin UI only knows the survey id,
+  // so scan the (small, product-feedback-sized) survey set to recover the
+  // full (userId, logKey) primary key, then delete every match.
+  let lastKey: Record<string, unknown> | undefined
+  do {
+    const response = await ddb.send(new ScanCommand({
+      TableName: DDB_VF_RESULTS_TABLE,
+      FilterExpression: '#type = :vfsurvey AND #id = :id',
+      ExpressionAttributeNames: { '#type': 'type', '#id': 'id' },
+      ExpressionAttributeValues: { ':vfsurvey': 'vf-survey', ':id': surveyId },
+      ExclusiveStartKey: lastKey,
+    }))
+    for (const item of response.Items ?? []) {
+      await ddb.send(new DeleteCommand({
+        TableName: DDB_VF_RESULTS_TABLE,
+        Key: { userId: item.userId, logKey: item.logKey },
+      }))
+    }
+    lastKey = response.LastEvaluatedKey as Record<string, unknown> | undefined
+  } while (lastKey)
 }
 
 // ── Admin ──
@@ -1262,6 +1307,13 @@ export type EventType =
   | 'whatsapp_shared'
   | 'account_created'
 
+// GSI (see infra) that orders all events by timestamp under one partition so
+// the admin feed can paginate without a full-table scan. `gsiPk` is a constant
+// — the events table is bounded by the 90-day TTL, so a single hot partition is
+// fine at this volume.
+const RECENT_EVENTS_INDEX = 'recent-events-index'
+const EVENTS_GSI_PK = 'evt'
+
 export async function trackEvent(deviceId: string, event: EventType, meta?: Record<string, string>): Promise<void> {
   const now = new Date()
   const eventKey = `${now.toISOString()}#${randomUUID().slice(0, 8)}`
@@ -1276,8 +1328,52 @@ export async function trackEvent(deviceId: string, event: EventType, meta?: Reco
       timestamp: now.toISOString(),
       ...(meta ?? {}),
       ttlEpoch,
+      gsiPk: EVENTS_GSI_PK,
     },
   }))
+}
+
+export type EventPage = {
+  events: AdminEventRecord[]
+  /** Opaque cursor for the next (older) page, or null when no more remain. */
+  nextCursor: string | null
+}
+
+/** One timestamp-descending page of events via the recent-events GSI. */
+export async function listEventsPage(limit = 50, cursor?: string): Promise<EventPage> {
+  let exclusiveStartKey: Record<string, unknown> | undefined
+  if (cursor) {
+    try {
+      exclusiveStartKey = JSON.parse(Buffer.from(cursor, 'base64').toString('utf8'))
+    } catch {
+      exclusiveStartKey = undefined
+    }
+  }
+
+  const response = await ddb.send(new QueryCommand({
+    TableName: DDB_EVENTS_TABLE,
+    IndexName: RECENT_EVENTS_INDEX,
+    KeyConditionExpression: 'gsiPk = :pk',
+    ExpressionAttributeValues: { ':pk': EVENTS_GSI_PK },
+    ScanIndexForward: false, // newest first
+    Limit: limit,
+    ExclusiveStartKey: exclusiveStartKey,
+  }))
+
+  const events: AdminEventRecord[] = (response.Items ?? []).map(item => {
+    const { deviceId, eventKey, event, timestamp, ttlEpoch, gsiPk, ...meta } = item as Record<string, unknown>
+    void eventKey; void ttlEpoch; void gsiPk
+    return {
+      deviceId: String(deviceId ?? ''),
+      event: String(event ?? ''),
+      timestamp: String(timestamp ?? ''),
+      meta: Object.fromEntries(Object.entries(meta).map(([k, v]) => [k, String(v)])),
+    }
+  })
+
+  const lastKey = response.LastEvaluatedKey
+  const nextCursor = lastKey ? Buffer.from(JSON.stringify(lastKey)).toString('base64') : null
+  return { events, nextCursor }
 }
 
 export type AdminEventRecord = {
@@ -1285,6 +1381,35 @@ export type AdminEventRecord = {
   event: string
   timestamp: string
   meta: Record<string, string>
+}
+
+/** One-time migration: stamp `gsiPk` on pre-existing events so they appear in
+ *  the recent-events GSI (new events get it on write). Idempotent — items
+ *  already stamped are skipped. Run once after the GSI is created. */
+export async function backfillEventsGsiPk(): Promise<{ scanned: number; updated: number }> {
+  let scanned = 0
+  let updated = 0
+  let lastKey: Record<string, unknown> | undefined
+  do {
+    const response = await ddb.send(new ScanCommand({
+      TableName: DDB_EVENTS_TABLE,
+      ExclusiveStartKey: lastKey,
+    }))
+    for (const item of response.Items ?? []) {
+      const rec = item as Record<string, unknown>
+      scanned++
+      if (rec.gsiPk === EVENTS_GSI_PK) continue
+      await ddb.send(new UpdateCommand({
+        TableName: DDB_EVENTS_TABLE,
+        Key: { deviceId: rec.deviceId, eventKey: rec.eventKey },
+        UpdateExpression: 'SET gsiPk = :pk',
+        ExpressionAttributeValues: { ':pk': EVENTS_GSI_PK },
+      }))
+      updated++
+    }
+    lastKey = response.LastEvaluatedKey as Record<string, unknown> | undefined
+  } while (lastKey)
+  return { scanned, updated }
 }
 
 export async function listAllEvents(limit = 500): Promise<AdminEventRecord[]> {

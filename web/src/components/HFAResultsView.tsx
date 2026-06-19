@@ -42,6 +42,7 @@ import type { TestPoint, StoredEye } from '../types'
 import { SensitivityMap } from './SensitivityMap'
 import { formatEyeLabelLong } from '../eyeLabels'
 import type { StaticGridPattern } from '../grids'
+import { DB_MAX, DB_MIN, sensitivityGreyForT } from '../sensitivity'
 
 interface Props {
   /** All test points from the run. Locations with `thresholdDb` set
@@ -65,13 +66,14 @@ interface Props {
   /** Detected responses to real stimuli — used as the FP-rate
    *  denominator and to show "true positives" for context. */
   truePositiveResponses?: number
+  showReliability?: boolean
 }
 
 function HeaderRow({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="flex justify-between text-[13px] leading-snug">
-      <span className="text-zinc-400">{label}</span>
-      <span className="text-zinc-100 font-mono">{value}</span>
+      <span className="text-muted">{label}</span>
+      <span className="text-ink font-mono">{value}</span>
     </div>
   )
 }
@@ -79,6 +81,16 @@ function HeaderRow({ label, value }: { label: string; value: ReactNode }) {
 function polarToCartesian(meridianDeg: number, eccentricityDeg: number): { x: number; y: number } {
   const rad = (meridianDeg * Math.PI) / 180
   return { x: eccentricityDeg * Math.cos(rad), y: eccentricityDeg * Math.sin(rad) }
+}
+
+function thresholdTileStyle(db: number, dbCeiling = DB_MAX): { fill: string; text: string; stroke: string } {
+  const effectiveCeiling = Math.min(DB_MAX, Math.max(DB_MIN + 1, Math.round(dbCeiling)))
+  const t = (Math.max(DB_MIN, Math.min(DB_MAX, db)) - DB_MIN) / (effectiveCeiling - DB_MIN)
+  const { r, g, b } = sensitivityGreyForT(t)
+  const fill = `rgb(${r},${g},${b})`
+  const text = r < 118 ? '#ffffff' : '#111827'
+  const stroke = r < 118 ? 'rgba(255,255,255,0.28)' : 'rgba(15,23,42,0.22)'
+  return { fill, text, stroke }
 }
 
 interface Indices {
@@ -146,6 +158,7 @@ export function HFAResultsView({
   maxEccentricityDeg,
   fpIsiPresses,
   truePositiveResponses,
+  showReliability = false,
 }: Props) {
   const measured = points.filter(p => p.thresholdDb != null && Number.isFinite(p.thresholdDb))
   const measuredDbPoints = measured.map(p => ({
@@ -161,6 +174,9 @@ export function HFAResultsView({
   // what the screen could in theory reach.
   const dataExtentDeg = Math.max(1, ...measured.map(p => p.eccentricityDeg))
   const extentDeg = dataExtentDeg * 1.15
+  const dbCeiling = brightnessFloor != null && brightnessFloor > 0
+    ? -10 * Math.log10(brightnessFloor)
+    : undefined
 
   const durationStr = durationSeconds != null
     ? `${Math.floor(durationSeconds / 60)}:${String(durationSeconds % 60).padStart(2, '0')}`
@@ -191,9 +207,9 @@ export function HFAResultsView({
   // the GHT colour cues clinicians expect.
   const hemiClassColour =
     indices.hemiClass === 'within' ? 'text-teal' :
-    indices.hemiClass === 'borderline' ? 'text-amber-400' :
-    indices.hemiClass === 'outside' ? 'text-red-400' :
-    'text-zinc-500'
+    indices.hemiClass === 'borderline' ? 'text-amber-600' :
+    indices.hemiClass === 'outside' ? 'text-red-600' :
+    'text-muted'
 
   const hemiClassLabel =
     indices.hemiClass === 'within' ? 'Within normal limits' :
@@ -202,14 +218,14 @@ export function HFAResultsView({
     'Insufficient data'
 
   return (
-    <section className="space-y-4 text-left bg-zinc-950/60 rounded-2xl border border-white/[0.08] p-4 sm:p-5">
+    <section className="space-y-4 text-left bg-surface rounded-2xl border border-line p-4 sm:p-5">
       {/* Header — eye + test type on top row, meta-grid below */}
-      <header className="space-y-3 pb-3 border-b border-white/[0.08]">
+      <header className="space-y-3 pb-3 border-b border-line">
         <div className="flex items-baseline justify-between gap-2 flex-wrap">
-          <h2 className="text-base sm:text-lg font-medium text-white">
+          <h2 className="text-base sm:text-lg font-medium text-ink">
             {formatEyeLabelLong(eye)} — Single Field Analysis
           </h2>
-          <span className="text-[11px] sm:text-xs text-zinc-500 font-mono uppercase tracking-wider">
+          <span className="text-[11px] sm:text-xs text-muted font-mono uppercase tracking-wider">
             {gridPattern === 'custom' ? 'Custom grid' : `Central ${gridPattern} Threshold Test`}
           </span>
         </div>
@@ -218,7 +234,7 @@ export function HFAResultsView({
           <HeaderRow label="Duration" value={durationStr} />
           <HeaderRow label="Strategy" value="4-2 dB adaptive" />
           <HeaderRow label="Stimulus" value="III, white" />
-          <HeaderRow label="FP errors" value={fpRateStr} />
+          {showReliability && <HeaderRow label="FP errors" value={fpRateStr} />}
           {brightnessFloor != null && (
             <HeaderRow label="Screen floor" value={`${(brightnessFloor * 100).toFixed(0)}%`} />
           )}
@@ -251,8 +267,8 @@ export function HFAResultsView({
           threshold-map block — clinicians read each cell as the
           measured threshold at that location. */}
       <div>
-        <p className="text-[11px] text-zinc-400 uppercase tracking-[0.08em] mb-2">Threshold map (dB)</p>
-        <div className="bg-zinc-900/60 rounded-lg border border-white/[0.04] p-3 mx-auto" style={{ maxWidth: 360 }}>
+        <p className="text-[11px] text-muted uppercase tracking-[0.08em] mb-2">Threshold map (dB)</p>
+        <div className="bg-zinc-900 rounded-lg border border-slate-800 p-3 mx-auto" style={{ maxWidth: 360 }}>
           <svg
             viewBox={`${-extentDeg} ${-extentDeg} ${extentDeg * 2} ${extentDeg * 2}`}
             className="w-full"
@@ -268,19 +284,35 @@ export function HFAResultsView({
             />
             {measured.map((p, i) => {
               const { x, y } = polarToCartesian(p.meridianDeg, p.eccentricityDeg)
+              const fontSize = extentDeg * 0.071
+              const tileW = fontSize * 2.12
+              const tileH = fontSize * 1.52
+              const tile = thresholdTileStyle(p.thresholdDb!, dbCeiling)
               return (
-                <text
-                  key={`th-${i}`}
-                  x={x}
-                  y={-y}
-                  fontSize={extentDeg * 0.08}
-                  fill="#fafafa"
-                  textAnchor="middle"
-                  dominantBaseline="central"
-                  fontFamily="ui-monospace, 'SF Mono', monospace"
-                >
-                  {p.thresholdDb!.toFixed(0)}
-                </text>
+                <g key={`th-${i}`}>
+                  <rect
+                    x={x - tileW / 2}
+                    y={-y - tileH / 2}
+                    width={tileW}
+                    height={tileH}
+                    rx={fontSize * 0.24}
+                    fill={tile.fill}
+                    stroke={tile.stroke}
+                    strokeWidth={extentDeg * 0.004}
+                  />
+                  <text
+                    x={x}
+                    y={-y}
+                    fontSize={fontSize}
+                    fill={tile.text}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fontWeight={700}
+                    fontFamily="ui-monospace, 'SF Mono', monospace"
+                  >
+                    {p.thresholdDb!.toFixed(0)}
+                  </text>
+                </g>
               )
             })}
           </svg>
@@ -295,21 +327,19 @@ export function HFAResultsView({
           shows up instead of bunching at the dark end of a fixed
           -5 → 40 dB scale. */}
       <div>
-        <p className="text-[11px] text-zinc-400 uppercase tracking-[0.08em] mb-2">Greyscale plot</p>
+        <p className="text-[11px] text-muted uppercase tracking-[0.08em] mb-2">Greyscale plot</p>
         <SensitivityMap
           points={measuredDbPoints}
           eye={eye}
           maxEccentricity={maxEccentricityDeg}
           size={Math.min(360, typeof window !== 'undefined' ? window.innerWidth - 80 : 360)}
-          dbCeiling={brightnessFloor != null && brightnessFloor > 0
-            ? -10 * Math.log10(brightnessFloor)
-            : undefined}
+          dbCeiling={dbCeiling}
         />
       </div>
 
       {/* Summary indices */}
-      <div className="space-y-1.5 border-t border-white/[0.08] pt-3">
-        <p className="text-[11px] text-zinc-400 uppercase tracking-[0.08em] mb-1">Summary indices</p>
+      <div className="space-y-1.5 border-t border-line pt-3">
+        <p className="text-[11px] text-muted uppercase tracking-[0.08em] mb-1">Summary indices</p>
         <HeaderRow label="Mean dB" value={`${indices.meanDb.toFixed(1)} dB`} />
         <HeaderRow label="PSD (threshold spread)" value={`${indices.psd.toFixed(1)} dB`} />
         {indices.asymmetry !== null && (
@@ -319,7 +349,7 @@ export function HFAResultsView({
               value={`${indices.asymmetry > 0 ? '+' : ''}${indices.asymmetry.toFixed(1)} dB`}
             />
             <div className="flex justify-between text-[13px] leading-snug">
-              <span className="text-zinc-400">Asymmetry</span>
+              <span className="text-muted">Asymmetry</span>
               <span className={hemiClassColour}>{hemiClassLabel}</span>
             </div>
           </>

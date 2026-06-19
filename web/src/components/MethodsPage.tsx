@@ -65,21 +65,21 @@ function buildSpeedPresetRows(): Row[] {
 
 function ParamTable({ rows }: { rows: Row[] }) {
   return (
-    <div className="overflow-x-auto rounded-xl border border-white/[0.06]">
+    <div className="overflow-x-auto rounded-xl border border-line">
       <table className="w-full text-sm">
-        <thead className="bg-white/[0.03] text-zinc-400 text-xs uppercase tracking-wider">
+        <thead className="bg-subtle text-muted text-xs uppercase tracking-wider">
           <tr>
             <th className="text-left font-medium px-4 py-2">Parameter</th>
             <th className="text-left font-medium px-4 py-2 whitespace-nowrap">Value</th>
             <th className="text-left font-medium px-4 py-2">Meaning</th>
           </tr>
         </thead>
-        <tbody className="divide-y divide-white/[0.05]">
+        <tbody className="divide-y divide-line">
           {rows.map((r, i) => (
-            <tr key={i} className="hover:bg-white/[0.02]">
-              <td className="px-4 py-2 text-zinc-200 font-medium align-top">{r.param}</td>
+            <tr key={i} className="hover:bg-subtle-2">
+              <td className="px-4 py-2 text-body font-medium align-top">{r.param}</td>
               <td className="px-4 py-2 text-accent font-mono whitespace-nowrap align-top">{r.value}</td>
-              <td className="px-4 py-2 text-zinc-400 align-top">{r.meaning}</td>
+              <td className="px-4 py-2 text-muted align-top">{r.meaning}</td>
             </tr>
           ))}
         </tbody>
@@ -92,7 +92,7 @@ function Section({ title, intro, children }: { title: string; intro?: string; ch
   return (
     <section className="space-y-3">
       <h2 className="text-xl font-heading font-bold">{title}</h2>
-      {intro && <p className="text-zinc-400 text-sm leading-relaxed">{intro}</p>}
+      {intro && <p className="text-muted text-sm leading-relaxed">{intro}</p>}
       <div className="space-y-4">{children}</div>
     </section>
   )
@@ -210,14 +210,14 @@ const RP_FINDING_ROWS: Row[] = [
 
 export function MethodsPage({ onBack }: Props) {
   return (
-    <main className="min-h-[100dvh] bg-base text-white safe-pad p-6 animate-page-in">
+    <main className="min-h-[100dvh] bg-base text-body safe-pad p-6 animate-page-in">
       <div className="max-w-3xl mx-auto space-y-10 pb-12">
-        <div className="flex items-center justify-between pb-5 border-b border-white/[0.06]">
+        <div className="flex items-center justify-between pb-5 border-b border-line">
           <h1 className="text-3xl font-heading font-bold">Methods &amp; parameters</h1>
           <BackButton onClick={onBack} label="Home" />
         </div>
 
-        <p className="text-zinc-300 leading-relaxed">
+        <p className="text-body leading-relaxed">
           A complete reference of every threshold and constant used by {APP_NAME} —
           from stimulus definitions, through the test loops, to the algorithms that turn
           your responses into a severity classification. If you want to inspect, replicate, or
@@ -235,9 +235,9 @@ export function MethodsPage({ onBack }: Props) {
           title="Goldmann test (kinetic)"
           intro="Classic kinetic perimetry: a stimulus moves slowly inward along each meridian; you press a key the moment you see it. Each detected position becomes one node on an isopter. The test runs five stimulus levels in sequence, with adaptive refinement for noisy areas."
         >
-          <h3 className="text-sm font-medium text-zinc-300">Speeds and timing</h3>
+          <h3 className="text-sm font-medium text-body">Speeds and timing</h3>
           <ParamTable rows={GOLDMANN_SPEED_ROWS} />
-          <h3 className="text-sm font-medium text-zinc-300 pt-2">Sampling and adaptive logic</h3>
+          <h3 className="text-sm font-medium text-body pt-2">Sampling and adaptive logic</h3>
           <ParamTable rows={GOLDMANN_LOGIC_ROWS} />
         </Section>
 
@@ -294,9 +294,9 @@ export function MethodsPage({ onBack }: Props) {
           title="Reliability score (isopter-based)"
           intro="Every kinetic result carries a 0–100 reliability score. It starts at 100 and accumulates penalties from the checks below. The score band controls the colour shown next to your result. This is separate from Fixation Accuracy and False-Positive Response Rate below — those are per-trial fixation metrics adopted from Specvis."
         >
-          <h3 className="text-sm font-medium text-zinc-300">Penalty components</h3>
+          <h3 className="text-sm font-medium text-body">Penalty components</h3>
           <ParamTable rows={RELIABILITY_ROWS} />
-          <h3 className="text-sm font-medium text-zinc-300 pt-2">Score bands</h3>
+          <h3 className="text-sm font-medium text-body pt-2">Score bands</h3>
           <ParamTable rows={RELIABILITY_BAND_ROWS} />
         </Section>
 
@@ -333,9 +333,9 @@ export function MethodsPage({ onBack }: Props) {
               ]
             })()}
           />
-          <p className="text-xs text-zinc-500 italic pt-1">
+          <p className="text-xs text-muted italic pt-1">
             These values are editable per-user in the{' '}
-            <strong className="not-italic text-zinc-300">Advanced test settings</strong>{' '}
+            <strong className="not-italic text-body">Advanced test settings</strong>{' '}
             panel on the calibration <em>Screen calibration</em> step (below
             the field-coverage preview), and can be exported / imported as
             JSON — see{' '}
@@ -369,7 +369,7 @@ export function MethodsPage({ onBack }: Props) {
               },
             ]}
           />
-          <p className="text-xs text-zinc-500 pt-1">Reference: {RELIABILITY_REFERENCE_RANGES.citation}.</p>
+          <p className="text-xs text-muted pt-1">Reference: {RELIABILITY_REFERENCE_RANGES.citation}.</p>
         </Section>
 
         <Section
@@ -390,9 +390,9 @@ export function MethodsPage({ onBack }: Props) {
           title="Related tools and where this project stands"
           intro="Browser-based and consumer visual-field self-tests are a small but growing space. The table below positions this project honestly against the tools most often cited alongside it."
         >
-          <div className="overflow-x-auto rounded-xl border border-white/[0.06]">
+          <div className="overflow-x-auto rounded-xl border border-line">
             <table className="w-full text-sm">
-              <thead className="bg-white/[0.03] text-zinc-400 text-xs uppercase tracking-wider">
+              <thead className="bg-subtle text-muted text-xs uppercase tracking-wider">
                 <tr>
                   <th className="text-left font-medium px-4 py-2">Tool</th>
                   <th className="text-left font-medium px-4 py-2">Platform</th>
@@ -400,48 +400,48 @@ export function MethodsPage({ onBack }: Props) {
                   <th className="text-left font-medium px-4 py-2">Validation</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-white/[0.05]">
-                <tr className="hover:bg-white/[0.02]">
-                  <td className="px-4 py-2 text-zinc-200 font-medium">HFA (Humphrey)</td>
-                  <td className="px-4 py-2 text-zinc-400">Clinical perimeter</td>
-                  <td className="px-4 py-2 text-zinc-400">SITA 24-2 / 30-2 / 10-2</td>
-                  <td className="px-4 py-2 text-zinc-400">Clinical gold standard</td>
+              <tbody className="divide-y divide-line">
+                <tr className="hover:bg-subtle-2">
+                  <td className="px-4 py-2 text-body font-medium">HFA (Humphrey)</td>
+                  <td className="px-4 py-2 text-muted">Clinical perimeter</td>
+                  <td className="px-4 py-2 text-muted">SITA 24-2 / 30-2 / 10-2</td>
+                  <td className="px-4 py-2 text-muted">Clinical gold standard</td>
                 </tr>
-                <tr className="hover:bg-white/[0.02]">
-                  <td className="px-4 py-2 text-zinc-200 font-medium">Specvis Desktop</td>
-                  <td className="px-4 py-2 text-zinc-400">Windows / macOS / Linux</td>
-                  <td className="px-4 py-2 text-zinc-400">Static staircase, 48/96 pts</td>
-                  <td className="px-4 py-2 text-zinc-400">vs Medmont M700 (Dzwiniel 2017)</td>
+                <tr className="hover:bg-subtle-2">
+                  <td className="px-4 py-2 text-body font-medium">Specvis Desktop</td>
+                  <td className="px-4 py-2 text-muted">Windows / macOS / Linux</td>
+                  <td className="px-4 py-2 text-muted">Static staircase, 48/96 pts</td>
+                  <td className="px-4 py-2 text-muted">vs Medmont M700 (Dzwiniel 2017)</td>
                 </tr>
-                <tr className="hover:bg-white/[0.02]">
-                  <td className="px-4 py-2 text-zinc-200 font-medium">Peristat Online</td>
-                  <td className="px-4 py-2 text-zinc-400">Web — any monitor</td>
-                  <td className="px-4 py-2 text-zinc-400">Suprathreshold (4 levels)</td>
-                  <td className="px-4 py-2 text-zinc-400">80–86% sens, 94–97% spec vs HFA</td>
+                <tr className="hover:bg-subtle-2">
+                  <td className="px-4 py-2 text-body font-medium">Peristat Online</td>
+                  <td className="px-4 py-2 text-muted">Web — any monitor</td>
+                  <td className="px-4 py-2 text-muted">Suprathreshold (4 levels)</td>
+                  <td className="px-4 py-2 text-muted">80–86% sens, 94–97% spec vs HFA</td>
                 </tr>
-                <tr className="hover:bg-white/[0.02]">
-                  <td className="px-4 py-2 text-zinc-200 font-medium">Visual Fields Easy</td>
-                  <td className="px-4 py-2 text-zinc-400">iPad</td>
-                  <td className="px-4 py-2 text-zinc-400">Suprathreshold, 96 pts</td>
-                  <td className="px-4 py-2 text-zinc-400">Inadequate for one-time home screen</td>
+                <tr className="hover:bg-subtle-2">
+                  <td className="px-4 py-2 text-body font-medium">Visual Fields Easy</td>
+                  <td className="px-4 py-2 text-muted">iPad</td>
+                  <td className="px-4 py-2 text-muted">Suprathreshold, 96 pts</td>
+                  <td className="px-4 py-2 text-muted">Inadequate for one-time home screen</td>
                 </tr>
-                <tr className="bg-white/[0.04] font-semibold">
+                <tr className="bg-subtle font-semibold">
                   <td className="px-4 py-2 text-accent">this website</td>
-                  <td className="px-4 py-2 text-zinc-300">Web — any browser</td>
-                  <td className="px-4 py-2 text-zinc-300">Kinetic + static</td>
-                  <td className="px-4 py-2 text-zinc-300">Not yet validated against a clinical perimeter</td>
+                  <td className="px-4 py-2 text-body">Web — any browser</td>
+                  <td className="px-4 py-2 text-body">Kinetic + static</td>
+                  <td className="px-4 py-2 text-body">Not yet validated against a clinical perimeter</td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <p className="text-sm text-zinc-400">
+          <p className="text-sm text-muted">
             If a defect appears in your results, follow up with an ophthalmologist for a
             test on a calibrated clinical perimeter. This tool is not a diagnostic device.
           </p>
         </Section>
 
-        <div className="bg-surface rounded-2xl p-6 space-y-2 border border-white/[0.06]">
-          <p className="text-sm text-zinc-300">
+        <div className="bg-surface rounded-2xl p-6 space-y-2 border border-line">
+          <p className="text-sm text-body">
             All thresholds above are the defaults the app ships with. They are tuned for
             self-screening on standard desktop screens, not clinical diagnosis. If you spot a
             value you think should be different — or want to argue for a different methodology —

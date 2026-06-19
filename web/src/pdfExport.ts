@@ -1,9 +1,9 @@
 import jsPDF from 'jspdf'
-import type { TestResult, TestPoint, StimulusKey, CalibrationData } from './types'
+import type { TestResult, TestPoint, StimulusKey } from './types'
 import { STIMULI, ISOPTER_ORDER, isGoldmannResult } from './types'
 import { getAllScenarios } from './testFixtures'
 import { calcIsopterAreas } from './isopterCalc'
-import { classifyFieldLoss, expectedNormalArea, type FieldSeverity } from './clinicalClassifications'
+import { scoreField, type FieldSeverity } from './clinicalClassifications'
 import {
   analyzeSensitivityGradient,
   analyzeCentralIsland,
@@ -14,12 +14,12 @@ import {
   type AnomalyIcon,
 } from './fieldAnalysis'
 import { eyeLabelForFilename } from './eyeLabels'
-import { APP_NAME, APP_DOMAIN, PDF_HEADER_TAGLINE } from './branding'
+import { APP_NAME, APP_DOMAIN } from './branding'
 import { computeReliability } from './reliabilityScore'
 import { computeReliabilityIndices } from './reliabilityIndices'
 import { RELIABILITY_REFERENCE_RANGES } from './testDefaults'
-import { polarToXY, smoothClosedPath, computeIsopters, computeScreenBoundary } from './isopterRender'
-import { renderSensitivityToCanvas } from './sensitivity'
+import { polarToXY, smoothClosedPath, computeIsopters, computeScreenBoundary, vrPlotExtentDeg } from './isopterRender'
+import { DB_MAX, DB_MIN, renderSensitivityToCanvas, sensitivityGreyForT } from './sensitivity'
 
 // ── Classification logic ──
 // Thresholds, bands and the gradient / central-island / RP / anomaly
@@ -27,37 +27,22 @@ import { renderSensitivityToCanvas } from './sensitivity'
 // PDF and the in-app Interpretation panel cannot disagree. This file
 // just maps the shared outputs to jsPDF-specific colours.
 
-interface Classification {
-  label: string
-  description: string
-}
-
-/** PDF-specific descriptions keyed by severity. Labels come from the
- *  shared clinicalClassifications module so both renderers agree on the
- *  clinical grading. */
+/** PDF descriptions keyed by the (multi-isopter) field-score severity stage.
+ *  Qualitative — the headline number is the 0-100 field score, so these no
+ *  longer quote the old single-isopter percentages. */
 const PDF_CLASSIFICATION_DESCRIPTIONS: Record<FieldSeverity, string> = {
   'very-severe':
-    'Less than ~5% of the testable field is detected. This indicates a tiny central island of vision remaining. Daily activities and mobility are severely affected.',
+    'Only a tiny central island of vision remains across the tested targets. Daily activities and mobility are severely affected.',
   severe:
-    'Roughly 5-20% of the testable field is detected. This degree of constriction often meets criteria for legal blindness when the central field is <= 20 deg diameter.',
+    'The field is severely constricted - often meeting legal-blindness criteria when the central field is <= 20 deg diameter. Significant mobility challenges are likely.',
   moderate:
-    'Roughly 20-45% of the testable field is detected. Peripheral awareness is reduced. Night vision and navigation in unfamiliar environments may be affected.',
+    'Peripheral awareness is moderately reduced; night vision and navigation in unfamiliar environments may be affected, while central vision is comparatively better preserved.',
   mild:
-    'Roughly 45-70% of the testable field is detected. Some peripheral loss is present but central vision is well preserved.',
+    'Some peripheral loss is present but central vision is well preserved. You may notice difficulty in dim lighting. This is the early-change range.',
   borderline:
-    'Roughly 70-85% of the testable field is detected. The field is near-normal with possible early constriction, though this may also reflect normal variation or test conditions.',
+    'The field is near-normal with possible early constriction, though this may also reflect normal variation or test conditions.',
   normal:
-    'More than ~85% of the testable field is detected - within normal limits for the tested range. A screen-based test cannot cover the full clinical field; a clinical Goldmann test assesses out to 90 deg.',
-}
-
-function classifyField(
-  iii4eArea: number,
-  maxEccentricityDeg: number,
-  calibration?: CalibrationData,
-): Classification {
-  const fraction = iii4eArea / expectedNormalArea(maxEccentricityDeg, calibration)
-  const band = classifyFieldLoss(fraction)
-  return { label: band.label, description: PDF_CLASSIFICATION_DESCRIPTIONS[band.severity] }
+    'Within normal limits for the tested range. A screen-based test cannot cover the full clinical field; a clinical Goldmann test assesses out to 90 deg.',
 }
 
 /** jsPDF RGB triples per tone emitted by fieldAnalysis.ts. The in-app
@@ -91,10 +76,37 @@ async function renderRadarImage(result: TestResult, sizePx: number): Promise<str
   const PADDING = 40
   const center = sizePx / 2
   const radius = center - PADDING
-  const maxEcc = result.calibration.maxEccentricityDeg
+  // Phone-VR fits the plotted extent to the measured data (≈32° here) instead
+  // of the ~44° screen-edge maxEccentricity, so the radar isn't a small isopter
+  // in a wide untested halo. Non-VR keeps the full testable extent. Use the
+  // in-field points (same filter the on-screen map uses) so the PDF and screen
+  // radars fit to the same extent.
+  const inFieldPoints = result.points.filter(
+    p => p.eccentricityDeg <= result.calibration.maxEccentricityDeg + 2,
+  )
+  const maxEcc = vrPlotExtentDeg(inFieldPoints, result.calibration, result.calibration.maxEccentricityDeg)
+    ?? result.calibration.maxEccentricityDeg
   const scale = radius / maxEcc
   const ringStep = maxEcc <= 30 ? 5 : 10
   const eye = result.eye === 'left' ? 'left' : 'right'
+
+  // Print-friendly palette — this radar is embedded in the white PDF, so it
+  // uses a light card (not the dark on-screen theme) with darker ink for
+  // labels so everything reads on paper.
+  const T = {
+    bg: '#ffffff',
+    border: '#e2e8f0',     // slate-200 card edge
+    ring: '#cbd5e1',       // slate-300 rings
+    meridian: '#e2e8f0',   // slate-200 spokes
+    ringLabel: '#64748b',  // slate-500
+    axisLabel: '#334155',  // slate-700 — readable on white
+    maskFill: '#94a3b8',   // slate-400 shading for untested area
+    boundary: '#2563eb',   // blue-600 screen-limit outline
+    bsFill: '#e2e8f0',
+    bsStroke: '#94a3b8',
+    miss: '#dc2626',       // red-600 misses
+    fixation: '#d97706',   // amber-600 — visible on white (yellow washes out)
+  }
 
   const grouped: Partial<Record<StimulusKey, TestPoint[]>> = {}
   for (const p of result.points) {
@@ -103,50 +115,51 @@ async function renderRadarImage(result: TestResult, sizePx: number): Promise<str
   }
 
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${sizePx} ${sizePx}" width="${sizePx}" height="${sizePx}">`
-  svg += `<rect width="${sizePx}" height="${sizePx}" fill="#0f172a" rx="12"/>`
+  svg += `<rect x="0.5" y="0.5" width="${sizePx - 1}" height="${sizePx - 1}" fill="${T.bg}" stroke="${T.border}" stroke-width="1" rx="12"/>`
 
   // Concentric rings
   for (let deg = ringStep; deg < maxEcc; deg += ringStep) {
-    svg += `<circle cx="${center}" cy="${center}" r="${deg * scale}" fill="none" stroke="#334155" stroke-width="0.5"/>`
+    svg += `<circle cx="${center}" cy="${center}" r="${deg * scale}" fill="none" stroke="${T.ring}" stroke-width="0.6"/>`
   }
 
   // Ring labels
   const rings = Array.from({ length: Math.floor(maxEcc / ringStep) }, (_, i) => (i + 1) * ringStep)
   for (const deg of rings.filter((_, i) => i % 2 === 1 || rings.length <= 6)) {
-    svg += `<text x="${center + deg * scale + 2}" y="${center - 3}" fill="#64748b" font-size="9" font-family="sans-serif">${deg}°</text>`
+    svg += `<text x="${center + deg * scale + 2}" y="${center - 3}" fill="${T.ringLabel}" font-size="9" font-family="sans-serif">${deg}°</text>`
   }
 
   // Meridian lines
   for (let m = 0; m < 360; m += 30) {
     const [x, y] = polarToXY(maxEcc, m, center, scale)
-    svg += `<line x1="${center}" y1="${center}" x2="${x}" y2="${y}" stroke="#334155" stroke-width="0.5"/>`
+    svg += `<line x1="${center}" y1="${center}" x2="${x}" y2="${y}" stroke="${T.meridian}" stroke-width="0.6"/>`
   }
 
   // Axis labels
-  svg += `<text x="${sizePx - PADDING + 4}" y="${center + 4}" fill="#94a3b8" font-size="11" font-family="sans-serif">${eye === 'right' ? 'T' : 'N'}</text>`
-  svg += `<text x="4" y="${center + 4}" fill="#94a3b8" font-size="11" font-family="sans-serif">${eye === 'right' ? 'N' : 'T'}</text>`
-  svg += `<text x="${center - 3}" y="${PADDING - 6}" fill="#94a3b8" font-size="11" font-family="sans-serif">S</text>`
-  svg += `<text x="${center - 3}" y="${sizePx - PADDING + 14}" fill="#94a3b8" font-size="11" font-family="sans-serif">I</text>`
+  svg += `<text x="${sizePx - PADDING + 4}" y="${center + 4}" fill="${T.axisLabel}" font-size="11" font-family="sans-serif">${eye === 'right' ? 'T' : 'N'}</text>`
+  svg += `<text x="4" y="${center + 4}" fill="${T.axisLabel}" font-size="11" font-family="sans-serif">${eye === 'right' ? 'N' : 'T'}</text>`
+  svg += `<text x="${center - 3}" y="${PADDING - 6}" fill="${T.axisLabel}" font-size="11" font-family="sans-serif">S</text>`
+  svg += `<text x="${center - 3}" y="${sizePx - PADDING + 14}" fill="${T.axisLabel}" font-size="11" font-family="sans-serif">I</text>`
 
   // Screen boundary + "not tested beyond screen" mask. Shared with the
   // on-screen VisualFieldMap via computeScreenBoundary so the two
   // surfaces paint the same untested region.
   const boundary = computeScreenBoundary(result.calibration, center, scale, radius)
   if (boundary) {
-    svg += `<path d="${boundary.maskPath}" fill="#475569" fill-opacity="0.22" fill-rule="evenodd"/>`
-    svg += `<polygon points="${boundary.polygonStr}" fill="none" stroke="#3b82f6" stroke-width="1" stroke-opacity="0.45" stroke-dasharray="4,3"/>`
-    svg += `<text x="${center}" y="${PADDING - 22}" text-anchor="middle" fill="#94a3b8" font-size="8" font-family="sans-serif" opacity="0.7">not tested (beyond screen)</text>`
+    svg += `<path d="${boundary.maskPath}" fill="${T.maskFill}" fill-opacity="0.14" fill-rule="evenodd"/>`
+    svg += `<polygon points="${boundary.polygonStr}" fill="none" stroke="${T.boundary}" stroke-width="1" stroke-opacity="0.4" stroke-dasharray="4,3"/>`
+    svg += `<text x="${center}" y="${PADDING - 22}" text-anchor="middle" fill="${T.ringLabel}" font-size="8" font-family="sans-serif" opacity="0.85">not tested (beyond screen)</text>`
   }
 
   // Blind spot
   const bsMeridian = eye === 'right' ? 0 : 180
   const [bsX, bsY] = polarToXY(15, bsMeridian - 2, center, scale)
-  svg += `<ellipse cx="${bsX}" cy="${bsY}" rx="${3.5 * scale}" ry="${2.5 * scale}" fill="#1e293b" stroke="#475569" stroke-width="0.5" stroke-dasharray="2,2"/>`
+  svg += `<ellipse cx="${bsX}" cy="${bsY}" rx="${3.5 * scale}" ry="${2.5 * scale}" fill="${T.bsFill}" stroke="${T.bsStroke}" stroke-width="0.6" stroke-dasharray="2,2"/>`
 
-  // Isopters
+  // Isopters. Slightly higher fill opacity than on-screen so the tinted
+  // regions still read on the white page; stroke colours match the legend.
   const dashPatterns = ['', '', '6,3', '3,3', '1,3']
   const strokeWidths = [2, 1.8, 1.5, 1.5, 1.3]
-  const fillOpacities = [0.10, 0.08, 0.06, 0.05, 0.04]
+  const fillOpacities = [0.14, 0.12, 0.10, 0.08, 0.06]
 
   for (const { key, isopterIdx, svgPts, isScattered } of computeIsopters(grouped, center, scale)) {
     const color = STIMULI[key].color
@@ -163,11 +176,11 @@ async function renderRadarImage(result: TestResult, sizePx: number): Promise<str
   // Undetected points
   for (const p of result.points.filter(p => !p.detected)) {
     const [x, y] = polarToXY(p.eccentricityDeg, p.meridianDeg, center, scale)
-    svg += `<circle cx="${x}" cy="${y}" r="1.5" fill="#ef4444" opacity="0.4"/>`
+    svg += `<circle cx="${x}" cy="${y}" r="1.5" fill="${T.miss}" opacity="0.55"/>`
   }
 
   // Fixation dot
-  svg += `<circle cx="${center}" cy="${center}" r="2" fill="#fbbf24"/>`
+  svg += `<circle cx="${center}" cy="${center}" r="2" fill="${T.fixation}"/>`
   svg += '</svg>'
 
   // Render SVG to canvas → data URL
@@ -331,6 +344,10 @@ async function renderThresholdGridImage(result: TestResult, sizePx: number): Pro
   const center = sizePx / 2
   // 1 unit in viewBox-degrees → this many pixels:
   const pxPerDeg = (sizePx / 2) / extentDeg
+  const dbCeiling = result.calibration.brightnessFloor > 0
+    ? -10 * Math.log10(result.calibration.brightnessFloor)
+    : DB_MAX
+  const effectiveCeiling = Math.min(DB_MAX, Math.max(DB_MIN + 1, Math.round(dbCeiling)))
 
   // Axis crosshair — full-width horizontal + vertical at fixation
   ctx.strokeStyle = 'rgba(0,0,0,0.25)'
@@ -342,10 +359,13 @@ async function renderThresholdGridImage(result: TestResult, sizePx: number): Pro
   ctx.lineTo(center, sizePx)
   ctx.stroke()
 
-  // Numbers
+  // dB tiles + numbers. Matches HFAResultsView: low sensitivity is
+  // darker, high sensitivity is lighter, and text flips for contrast.
   const fontSize = Math.max(10, Math.round(sizePx / extentDeg * 0.8))
-  ctx.fillStyle = '#000000'
-  ctx.font = `${fontSize}px ui-monospace, "SF Mono", monospace`
+  const tileW = fontSize * 2.12
+  const tileH = fontSize * 1.52
+  const tileRadius = fontSize * 0.24
+  ctx.font = `700 ${fontSize}px ui-monospace, "SF Mono", monospace`
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   for (const p of measured) {
@@ -353,6 +373,16 @@ async function renderThresholdGridImage(result: TestResult, sizePx: number): Pro
     const x = center + Math.cos(rad) * p.eccentricityDeg * pxPerDeg
     // Screen y-axis inverted: + ecc points up visually, so subtract.
     const y = center - Math.sin(rad) * p.eccentricityDeg * pxPerDeg
+    const t = (Math.max(DB_MIN, Math.min(DB_MAX, p.thresholdDb!)) - DB_MIN) / (effectiveCeiling - DB_MIN)
+    const { r, g, b } = sensitivityGreyForT(t)
+    ctx.fillStyle = `rgb(${r},${g},${b})`
+    ctx.strokeStyle = r < 118 ? 'rgba(255,255,255,0.32)' : 'rgba(15,23,42,0.22)'
+    ctx.lineWidth = Math.max(1, sizePx * 0.0015)
+    ctx.beginPath()
+    ctx.roundRect(x - tileW / 2, y - tileH / 2, tileW, tileH, tileRadius)
+    ctx.fill()
+    ctx.stroke()
+    ctx.fillStyle = r < 118 ? '#ffffff' : '#111827'
     ctx.fillText(p.thresholdDb!.toFixed(0), x, y)
   }
 
@@ -398,6 +428,16 @@ function computeStaticIndices(points: TestPoint[]): {
   return { meanDb, psd, asymmetry }
 }
 
+function pdfHeaderTagline(result: TestResult, showGoldmannMap: boolean): string {
+  if (showGoldmannMap) {
+    return `Goldmann Kinetic Perimetry Self-Check  |  ${APP_DOMAIN}`
+  }
+  if (result.testMode === 'threshold') {
+    return `Static Threshold Perimetry Self-Check  |  ${APP_DOMAIN}`
+  }
+  return `Static Perimetry Self-Check  |  ${APP_DOMAIN}`
+}
+
 // ── PDF text helpers ──
 
 /** Replace Unicode characters that break jsPDF's default font encoding */
@@ -437,17 +477,24 @@ export type PDFExportOptions = {
   /** Per-eye points for binocular tests — enables per-eye radar maps */
   rightEyePoints?: TestPoint[]
   leftEyePoints?: TestPoint[]
+  /** Reliability scores/indices are clinician/admin-only in user-facing
+   *  surfaces. Callers should set this only for clinician/admin viewers. */
+  includeReliabilityDetails?: boolean
 }
 
 export async function exportResultPDF(result: TestResult, options?: PDFExportOptions): Promise<void> {
   const isDemo = options?.isDemo ?? false
   const visionSimImage = options?.visionSimImage
   const isBinocular = options?.binocular ?? false
+  const includeReliabilityDetails = options?.includeReliabilityDetails === true
   // Which map/report vocabulary to render is determined by test type:
   // Goldmann produces isopters; Static threshold produces per-location
   // dB values. Keep this near the top so the info table does not use
   // Goldmann "detected points" language for static tests.
   const showGoldmannMap = isGoldmannResult(result)
+  // Phone-VR can't present the size-I targets (sub-pixel at the lens focal
+  // length); used below to label/omit them so their absence isn't read as data.
+  const isVr = result.calibration.vr?.enabled === true
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
   const pageW = doc.internal.pageSize.getWidth()
   const pageH = doc.internal.pageSize.getHeight()
@@ -479,7 +526,7 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
   doc.setFontSize(9)
   doc.setFont('helvetica', 'normal')
   doc.setTextColor(120, 120, 120)
-  doc.text(PDF_HEADER_TAGLINE, margin, y)
+  doc.text(pdfHeaderTagline(result, showGoldmannMap), margin, y)
   y += 5
 
   // Horizontal rule
@@ -505,6 +552,21 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
     ['Max eccentricity:', `${result.calibration.maxEccentricityDeg.toFixed(1)} deg`],
   ]
 
+  // Test setup + device provenance — a phone-VR run is interpreted differently
+  // from a clinical bowl, and the device/viewport aids reproducibility. Kept to
+  // one or two short lines (not the full user-agent string).
+  const isVrRun = result.calibration.vr?.enabled === true || result.protocol?.presentationMode === 'phone-vr'
+  const headsetPreset = result.protocol?.vrHeadsetPreset
+  info.push(['Test setup:', isVrRun ? `Phone-VR${headsetPreset ? ` (${headsetPreset} headset)` : ''}` : 'Standard screen'])
+  const dev = result.device
+  if (dev) {
+    const bits: string[] = []
+    if (dev.platform) bits.push(dev.platform)
+    if (dev.viewportWidth != null && dev.viewportHeight != null) bits.push(`${dev.viewportWidth}x${dev.viewportHeight}`)
+    if (dev.pixelRatio != null) bits.push(`DPR ${dev.pixelRatio}`)
+    if (bits.length > 0) info.push(['Device:', bits.join(' / ')])
+  }
+
   if (showGoldmannMap) {
     info.push(
       ['Total test points:', `${result.points.length}`],
@@ -529,8 +591,8 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
     }
   }
 
-  const reliabilityIdx = computeReliabilityIndices(result)
-  if (reliabilityIdx.fa) {
+  const reliabilityIdx = includeReliabilityDetails ? computeReliabilityIndices(result) : { fa: null, fprr: null }
+  if (includeReliabilityDetails && reliabilityIdx.fa) {
     const faRange = RELIABILITY_REFERENCE_RANGES.faPercent
     info.push([
       'Fixation accuracy (FA):',
@@ -576,6 +638,7 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
     y += 5
 
     doc.setFont('helvetica', 'normal')
+    let vrSkippedSizeI = false
     for (const stim of ISOPTER_ORDER) {
       const area = result.isopterAreas[stim]
       const pts = result.points.filter(p => p.stimulus === stim)
@@ -586,11 +649,27 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
       doc.text(def.label, margin + 2, y)
       doc.setTextColor(80, 80, 80)
       doc.text(`${def.sizeDeg.toFixed(2)} deg`, margin + 30, y)
-      doc.text(`${(def.intensityFrac * 100).toFixed(0)}%`, margin + 55, y)
-      doc.text(area != null ? area.toFixed(0) : '-', margin + 85, y)
-      doc.text(area != null ? `~${Math.sqrt(area / Math.PI).toFixed(1)} deg` : '-', margin + 115, y)
-      doc.text(`${detected}/${pts.length}`, margin + 145, y)
+      // Phone-VR never presents the size-I targets (sub-pixel at the lens focal
+      // length). Label that explicitly instead of printing "- / 0/0", which
+      // would read as "shown and missed" (a dense central scotoma). Only when
+      // the isopter is genuinely absent, so imported data is still shown.
+      if (isVr && pts.length === 0 && (stim === 'I4e' || stim === 'I2e')) {
+        doc.text('not testable in VR', margin + 55, y)
+        vrSkippedSizeI = true
+      } else {
+        doc.text(`${(def.intensityFrac * 100).toFixed(0)}%`, margin + 55, y)
+        doc.text(area != null ? area.toFixed(0) : '-', margin + 85, y)
+        doc.text(area != null ? `~${Math.sqrt(area / Math.PI).toFixed(1)} deg` : '-', margin + 115, y)
+        doc.text(`${detected}/${pts.length}`, margin + 145, y)
+      }
       y += 4.5
+    }
+    if (vrSkippedSizeI) {
+      doc.setFontSize(7)
+      doc.setTextColor(120, 120, 120)
+      y += 1
+      y = drawWrappedText(doc, 'Size-I isopters (I4e, I2e) are sub-pixel at the headset focal length and are not presented in the phone-in-headset configuration.', margin + 2, y, pageW - 2 * margin - 4, 7)
+      doc.setFontSize(8)
     }
     y += 6
   }
@@ -607,22 +686,24 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
     doc.addImage(radarImg, 'PNG', mapX, y, mapSizeMm, mapSizeMm)
     y += mapSizeMm + 4
 
-    // Legend below map
+    // Legend below map. Only show swatches for isopters actually mapped — this
+    // hides the size-I entries in phone-VR (never presented) so the legend
+    // matches the on-screen map and doesn't imply they were tested.
     doc.setFontSize(7)
     const legendColors: Record<StimulusKey, string> = { 'V4e': '#60a5fa', 'III4e': '#34d399', 'III2e': '#a78bfa', 'I4e': '#fb923c', 'I2e': '#f472b6' }
-    for (let i = 0; i < ISOPTER_ORDER.length; i++) {
-      const stim = ISOPTER_ORDER[i]
+    const legendKeys = ISOPTER_ORDER.filter(stim => result.isopterAreas[stim] != null)
+    legendKeys.forEach((stim, slot) => {
       const hex = legendColors[stim]
       const cr = parseInt(hex.slice(1, 3), 16)
       const cg = parseInt(hex.slice(3, 5), 16)
       const cb = parseInt(hex.slice(5, 7), 16)
-      const lx = margin + i * 33
+      const lx = margin + slot * 33
       doc.setFillColor(cr, cg, cb)
       doc.circle(lx + 1.5, y - 0.5, 1.5, 'F')
       doc.setTextColor(80, 80, 80)
       doc.setFont('helvetica', 'normal')
       doc.text(STIMULI[stim].label, lx + 4, y)
-    }
+    })
     y += 6
   } else {
     // Static (threshold) result. Mirrors the in-app HFAResultsView:
@@ -792,28 +873,34 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
   // moderate-RP central vision intact. Misleading + demoralising.
   // Static results' useful signals (Mean dB, PSD, hemifield Δ)
   // live in the threshold/greyscale section below.
-  const iii4eArea = result.isopterAreas['III4e']
+  // Multi-isopter field score → base stage + 0-100 field score. Averages every
+  // measured isopter (vs its own screen-capped normal), so one atypically-low
+  // isopter (inferior defect, VR periphery collapse) no longer drags the grade.
+  // Shared with the in-app Interpretation panel so both agree.
   const maxEccDeg = result.calibration.maxEccentricityDeg
-  const expectedArea = expectedNormalArea(maxEccDeg, result.calibration)
-  if (iii4eArea != null && isGoldmannResult(result)) {
-    const classification = classifyField(iii4eArea, maxEccDeg, result.calibration)
+  const fieldScore = scoreField(result.isopterAreas, maxEccDeg, result.calibration)
+  if (fieldScore && isGoldmannResult(result)) {
     doc.setFont('helvetica', 'bold')
     doc.setFontSize(10)
     doc.setTextColor(0, 0, 0)
-    doc.text(`Classification: ${classification.label}`, margin, y)
+    doc.text(`Classification: ${fieldScore.band.label}  -  Field score ${fieldScore.score}/100`, margin, y)
     y += 4
     doc.setFont('helvetica', 'normal')
     doc.setFontSize(8)
     doc.setTextColor(100, 100, 100)
-    doc.text(pdfSafe(`III4e isopter: ${iii4eArea.toFixed(0)} deg² (~${((iii4eArea / expectedArea) * 100).toFixed(0)}% of testable area, equiv. radius ~${Math.sqrt(iii4eArea / Math.PI).toFixed(1)}°)`), margin, y)
+    doc.text(pdfSafe(`Per isopter (% of normal): ${fieldScore.perIsopter.map(p => `${p.key} ${(p.fraction * 100).toFixed(0)}%`).join(', ')}`), margin, y)
     y += 5
   }
 
-  const reliability = computeReliability(result.points, result.isopterAreas)
-  doc.setFont('helvetica', 'normal')
-  doc.setFontSize(9)
-  doc.setTextColor(80, 80, 80)
-  doc.text(`Test reliability: ${reliability.score}/100 (${reliability.label})`, margin, y)
+  const reliability = includeReliabilityDetails
+    ? computeReliability(result.points, result.isopterAreas)
+    : null
+  if (reliability) {
+    doc.setFont('helvetica', 'normal')
+    doc.setFontSize(9)
+    doc.setTextColor(80, 80, 80)
+    doc.text(`Test reliability: ${reliability.score}/100 (${reliability.label})`, margin, y)
+  }
 
   // Page 1 footer
   doc.setFontSize(7)
@@ -841,61 +928,62 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
 
   const contentW = pageW - 2 * margin
 
-  // ── Reliability score ──
-  y = drawSection(doc, 'Test Reliability', y, margin)
+  if (reliability) {
+    // ── Reliability score ──
+    y = drawSection(doc, 'Test Reliability', y, margin)
 
-  // Score bar
-  doc.setFillColor(229, 231, 235) // gray bg
-  doc.rect(margin, y, 60, 3, 'F')
-  const barColor: [number, number, number] = reliability.score >= 85 ? [74, 222, 128] : reliability.score >= 65 ? [250, 204, 21] : reliability.score >= 40 ? [251, 146, 60] : [248, 113, 113]
-  doc.setFillColor(...barColor)
-  doc.rect(margin, y, 60 * (reliability.score / 100), 3, 'F')
+    // Score bar
+    doc.setFillColor(229, 231, 235) // gray bg
+    doc.rect(margin, y, 60, 3, 'F')
+    const barColor: [number, number, number] = reliability.score >= 85 ? [74, 222, 128] : reliability.score >= 65 ? [250, 204, 21] : reliability.score >= 40 ? [251, 146, 60] : [248, 113, 113]
+    doc.setFillColor(...barColor)
+    doc.rect(margin, y, 60 * (reliability.score / 100), 3, 'F')
 
-  doc.setFont('helvetica', 'bold')
-  doc.setFontSize(10)
-  doc.setTextColor(0, 0, 0)
-  doc.text(`${reliability.score}/100 - ${reliability.label}`, margin + 65, y + 2.5)
-  y += 6
+    doc.setFont('helvetica', 'bold')
+    doc.setFontSize(10)
+    doc.setTextColor(0, 0, 0)
+    doc.text(`${reliability.score}/100 - ${reliability.label}`, margin + 65, y + 2.5)
+    y += 6
 
-  if (reliability.factors.length > 0) {
-    doc.setFont('helvetica', 'normal')
-    doc.setFontSize(7.5)
-    for (const f of reliability.factors) {
-      doc.setTextColor(220, 38, 38) // red
-      doc.text(`-${f.penalty}`, margin + 2, y)
-      doc.setTextColor(100, 100, 100)
-      doc.text(f.detail, margin + 12, y)
-      y += 3.5
+    if (reliability.factors.length > 0) {
+      doc.setFont('helvetica', 'normal')
+      doc.setFontSize(7.5)
+      for (const f of reliability.factors) {
+        doc.setTextColor(220, 38, 38) // red
+        doc.text(`-${f.penalty}`, margin + 2, y)
+        doc.setTextColor(100, 100, 100)
+        doc.text(f.detail, margin + 12, y)
+        y += 3.5
+      }
+    } else {
+      doc.setFont('helvetica', 'normal')
+      doc.setFontSize(8)
+      doc.setTextColor(120, 120, 120)
+      doc.text('No reliability issues detected.', margin + 2, y)
+      y += 4
     }
-  } else {
-    doc.setFont('helvetica', 'normal')
-    doc.setFontSize(8)
-    doc.setTextColor(120, 120, 120)
-    doc.text('No reliability issues detected.', margin + 2, y)
     y += 4
   }
-  y += 4
 
   // ── Field classification ──
   // Same Goldmann-only gate as the page-1 summary. Static results
   // can't be validly classified by the kinetic-isopter-area
   // method — see comment at the earlier classification call.
-  if (iii4eArea != null && isGoldmannResult(result)) {
-    const classification = classifyField(iii4eArea, maxEccDeg, result.calibration)
+  if (fieldScore && isGoldmannResult(result)) {
     y = drawSection(doc, 'Field Classification', y, margin)
 
     doc.setFont('helvetica', 'bold')
     doc.setFontSize(10)
     doc.setTextColor(0, 0, 0)
-    doc.text(classification.label, margin + 2, y)
+    doc.text(`${fieldScore.band.label}  -  Field score ${fieldScore.score}/100`, margin + 2, y)
     y += 4
 
     doc.setFont('helvetica', 'normal')
     doc.setTextColor(60, 60, 60)
-    y = drawWrappedText(doc, classification.description, margin + 2, y, contentW - 4, 8)
+    y = drawWrappedText(doc, PDF_CLASSIFICATION_DESCRIPTIONS[fieldScore.band.severity], margin + 2, y, contentW - 4, 8)
 
     doc.setTextColor(120, 120, 120)
-    y = drawWrappedText(doc, `III4e isopter: ${iii4eArea.toFixed(0)} deg2 (~${((iii4eArea / expectedArea) * 100).toFixed(0)}% of testable area, equiv. radius ~${Math.sqrt(iii4eArea / Math.PI).toFixed(1)} deg)`, margin + 2, y, contentW - 4, 7)
+    y = drawWrappedText(doc, `Per isopter (% of normal): ${fieldScore.perIsopter.map(p => `${p.key} ${(p.fraction * 100).toFixed(0)}%`).join(', ')}`, margin + 2, y, contentW - 4, 7)
     y += 4
   }
 
@@ -937,11 +1025,14 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
     doc.setTextColor(60, 60, 60)
     y = drawWrappedText(doc, gradient.description, margin + 2, y, contentW - 4, 8)
 
+    // Rod-vs-cone sensitivity ratio — always III2e/III4e regardless of VR
+    // grading isopter (it's a differential-sensitivity metric, not a field-size grade).
     const iii2e = result.isopterAreas['III2e']
-    if (iii4eArea != null && iii2e != null) {
+    const iii4eRatioArea = result.isopterAreas['III4e']
+    if (iii4eRatioArea != null && iii2e != null) {
       doc.setFontSize(7)
       doc.setTextColor(120, 120, 120)
-      doc.text(`III2e/III4e ratio: ${((iii2e / iii4eArea) * 100).toFixed(0)}%`, margin + 2, y)
+      doc.text(`III2e/III4e ratio: ${((iii2e / iii4eRatioArea) * 100).toFixed(0)}%`, margin + 2, y)
       y += 3
     }
     y += 4
@@ -987,6 +1078,7 @@ export async function exportResultPDF(result: TestResult, options?: PDFExportOpt
         result.isopterAreas,
         maxEccDeg,
         result.calibration,
+        fieldScore, // share the headline's score so the card can't contradict it
       ).filter(f => f.present)
     : []
   if (rpFindings.length > 0) {

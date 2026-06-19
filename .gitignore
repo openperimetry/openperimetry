@@ -1,6 +1,7 @@
 .DS_Store
 .idea/
 .claude/worktrees/
+test-results/
 
 web/node_modules
 web/dist

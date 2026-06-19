@@ -135,22 +135,22 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
   )
 
   return (
-    <div className="bg-surface/60 border border-white/[0.06] rounded-2xl">
+    <div className="bg-surface border border-line rounded-2xl">
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
         aria-expanded={open}
         aria-controls="advanced-settings-body"
-        className="w-full flex items-center justify-between px-4 py-3 text-left text-xs text-zinc-400 hover:text-zinc-200"
+        className="w-full flex items-center justify-between px-4 py-3 text-left text-xs text-muted hover:text-body"
       >
         <span>Advanced test settings (optional)</span>
-        <span aria-hidden className="font-mono text-zinc-500">{open ? '−' : '+'}</span>
+        <span aria-hidden className="font-mono text-muted">{open ? '−' : '+'}</span>
       </button>
 
       {open && (
         <div
           id="advanced-settings-body"
-          className="px-4 pb-4 pt-1 space-y-4 text-xs text-zinc-400 border-t border-white/[0.04]"
+          className="px-4 pb-4 pt-1 space-y-4 text-xs text-muted border-t border-line"
         >
           {/* Pre-test position screen — shows the HeadGuide profile and
               the "sit X cm from the screen, cover Y eye" prompt. On by
@@ -164,7 +164,7 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
                 onChange={e => update('showPositionGuide', e.target.checked)}
                 className="w-3.5 h-3.5 rounded accent-indigo-400"
               />
-              <span className="text-zinc-300">Show position guide before test</span>
+              <span className="text-body">Show position guide before test</span>
             </label>
           </div>
 
@@ -179,7 +179,7 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
                 onChange={e => update('initialBlindspotCheck', e.target.checked)}
                 className="w-3.5 h-3.5 rounded accent-indigo-400"
               />
-              <span className="text-zinc-300">Blindspot check before test</span>
+              <span className="text-body">Blindspot check before test</span>
             </label>
           </div>
 
@@ -200,9 +200,9 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
                 onChange={e => update('measureReactionTime', e.target.checked)}
                 className="w-3.5 h-3.5 rounded accent-indigo-400"
               />
-              <span className="text-zinc-300">Measure my reaction time (Goldmann only)</span>
+              <span className="text-body">Measure my reaction time (Goldmann only)</span>
             </label>
-            <p className="mt-1 pl-5 text-[11px] leading-relaxed text-zinc-500">
+            <p className="mt-1 pl-5 text-[11px] leading-relaxed text-muted">
               Adds a 5-trial reaction-time test to the calibration. When off, a default reaction time is used.
             </p>
           </div>
@@ -216,13 +216,13 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
                 onChange={e => update('catchTrialsEnabled', e.target.checked)}
                 className="w-3.5 h-3.5 rounded accent-indigo-400"
               />
-              <span className="text-zinc-300">Blindspot catch trials</span>
+              <span className="text-body">Blindspot catch trials</span>
             </label>
             {settings.catchTrialsEnabled && (
               <div className="space-y-1 pl-5">
-                <label htmlFor="adv-catch" className="block text-zinc-400">
+                <label htmlFor="adv-catch" className="block text-muted">
                   Cadence
-                  <span className="ml-1 text-zinc-500 font-normal">
+                  <span className="ml-1 text-muted font-normal">
                     (1 blindspot trial every N presentations)
                   </span>
                 </label>
@@ -236,7 +236,7 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
                     const n = Number(e.target.value)
                     if (Number.isInteger(n) && n >= 1 && n <= 50) update('catchTrialEveryN', n)
                   }}
-                  className="w-24 px-2 py-1 rounded bg-base border border-white/[0.08] font-mono text-white"
+                  className="w-24 px-2 py-1 rounded bg-surface border border-line font-mono text-ink"
                 />
               </div>
             )}
@@ -244,9 +244,9 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
 
           {/* Fixation-alert duration */}
           <div className="space-y-1">
-            <label htmlFor="adv-alert-ms" className="block text-zinc-300">
+            <label htmlFor="adv-alert-ms" className="block text-body">
               Fixation-alert duration
-              <span className="ml-1 text-zinc-500 font-normal">(ms; 0 = disabled)</span>
+              <span className="ml-1 text-muted font-normal">(ms; 0 = disabled)</span>
             </label>
             <input
               id="adv-alert-ms"
@@ -259,13 +259,13 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
                 const n = Number(e.target.value)
                 if (Number.isInteger(n) && n >= 0 && n <= 5000) update('fixationAlertMs', n)
               }}
-              className="w-24 px-2 py-1 rounded bg-base border border-white/[0.08] font-mono text-white"
+              className="w-24 px-2 py-1 rounded bg-surface border border-line font-mono text-ink"
             />
           </div>
 
           {/* Fixation-alert message */}
           <div className="space-y-1">
-            <label htmlFor="adv-alert-msg" className="block text-zinc-300">
+            <label htmlFor="adv-alert-msg" className="block text-body">
               Fixation-alert message
             </label>
             <input
@@ -274,7 +274,7 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
               maxLength={200}
               value={settings.fixationAlertMessage}
               onChange={e => update('fixationAlertMessage', e.target.value)}
-              className="w-full px-2 py-1 rounded bg-base border border-white/[0.08] text-white"
+              className="w-full px-2 py-1 rounded bg-surface border border-line text-ink"
             />
           </div>
 
@@ -284,7 +284,7 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
               the setting from looking live when it has no effect. */}
           {showStaticOnly && (
             <div className="space-y-2">
-              <label className="flex items-center gap-2 text-zinc-300">
+              <label className="flex items-center gap-2 text-body">
                 <input
                   type="checkbox"
                   checked={settings.speedPreset.override}
@@ -297,7 +297,7 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
               <div className="grid grid-cols-2 gap-2 pl-6">
                 {(['stimulusMs', 'responseMs', 'gapMinMs', 'gapMaxMs'] as const).map(f => (
                   <label key={f} className="space-y-1">
-                    <span className="block text-zinc-400 text-[11px]">{f}</span>
+                    <span className="block text-muted text-[11px]">{f}</span>
                     <input
                       type="number"
                       min={0}
@@ -309,7 +309,7 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
                         const n = Number(e.target.value)
                         if (Number.isInteger(n) && n >= 0 && n <= 5000) updateSpeedField(f, n)
                       }}
-                      className="w-full px-2 py-1 rounded bg-base border border-white/[0.08] font-mono text-white disabled:opacity-50"
+                      className="w-full px-2 py-1 rounded bg-surface border border-line font-mono text-ink disabled:opacity-50"
                     />
                   </label>
                 ))}
@@ -321,8 +321,8 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
               static test only. The Goldmann kinetic test doesn't use a
               discrete grid, so this section would be meaningless for it. */}
           {showStaticOnly && (
-          <fieldset className="space-y-2 pt-2 border-t border-white/[0.04]">
-            <legend className="text-zinc-300">Static grid pattern</legend>
+          <fieldset className="space-y-2 pt-2 border-t border-line">
+            <legend className="text-body">Static grid pattern</legend>
             <div className="flex gap-3 pt-1 flex-wrap">
               {(['24-2', '30-2', '10-2', 'custom'] as const).map(p => (
                 <label key={p} className="flex items-center gap-1.5">
@@ -338,22 +338,22 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
                 </label>
               ))}
             </div>
-            <p className="text-[11px] text-zinc-500 pl-0">
+            <p className="text-[11px] text-muted pl-0">
               24-2 / 30-2 / 10-2 are the standard clinical grids. Custom uses a
               parameter-driven generator with configurable spacing and extent.
             </p>
 
             {settings.staticGridPattern === 'custom' && (
-              <div className="space-y-3 pt-2 border-t border-white/[0.03]">
+              <div className="space-y-3 pt-2 border-t border-line">
                 <div className="flex items-center gap-2">
-                  <label htmlFor="adv-custom-preset" className="text-zinc-300">
+                  <label htmlFor="adv-custom-preset" className="text-body">
                     Grid preset
                   </label>
                   <select
                     id="adv-custom-preset"
                     value={currentCustomPreset}
                     onChange={e => pickCustomPreset(e.target.value as CustomGridPresetName | 'manual')}
-                    className="bg-base border border-white/[0.08] rounded px-2 py-1 text-white"
+                    className="bg-surface border border-line rounded px-2 py-1 text-ink"
                   >
                     <option value="screening">Screening (48 pts · 7.5° × 6° · ±22.5° × ±24°)</option>
                     <option value="fast">Fast (6° spacing, ±24°)</option>
@@ -365,7 +365,7 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
                 <div className="grid grid-cols-2 gap-2 pl-0">
                   {(['spacingXDeg', 'spacingYDeg', 'extentXDeg', 'extentYDeg'] as const).map(f => (
                     <label key={f} className="space-y-1">
-                      <span className="block text-zinc-400 text-[11px]">
+                      <span className="block text-muted text-[11px]">
                         {f.replace('Deg', '')} (°)
                       </span>
                       <input
@@ -376,7 +376,7 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
                         value={settings.customGrid[f]}
                         disabled={currentCustomPreset !== 'manual'}
                         onChange={e => updateCustomField(f, Number(e.target.value))}
-                        className="w-full px-2 py-1 rounded bg-base border border-white/[0.08] font-mono text-white disabled:opacity-50"
+                        className="w-full px-2 py-1 rounded bg-surface border border-line font-mono text-ink disabled:opacity-50"
                       />
                     </label>
                   ))}
@@ -392,9 +392,9 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
                     size={180}
                     caption="Preview (right eye)"
                   />
-                  <div className="space-y-1 text-[11px] text-zinc-400 pt-4">
+                  <div className="space-y-1 text-[11px] text-muted pt-4">
                     <div>
-                      <span className="text-zinc-300 font-mono">
+                      <span className="text-body font-mono">
                         {countCustomGridPoints(settings.customGrid)}
                       </span>{' '}
                       test locations
@@ -415,7 +415,7 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
 
           {/* Background shade */}
           <fieldset className="space-y-1">
-            <legend className="text-zinc-300">Background shade</legend>
+            <legend className="text-body">Background shade</legend>
             <div className="flex gap-3 pt-1">
               {(['dark', 'medium', 'light'] as const).map(shade => (
                 <label key={shade} className="flex items-center gap-1.5 capitalize">
@@ -434,26 +434,26 @@ export function AdvancedSettingsPanel({ speedPreset = 'normal', testMode = 'stat
           </fieldset>
 
           {/* Reset / Export / Import */}
-          <div className="pt-2 border-t border-white/[0.04] space-y-2">
+          <div className="pt-2 border-t border-line space-y-2">
             <div className="flex gap-4 flex-wrap">
               <button
                 type="button"
                 onClick={reset}
-                className="text-xs text-zinc-400 hover:text-zinc-200 underline decoration-dotted"
+                className="text-xs text-muted hover:text-body underline decoration-dotted"
               >
                 Reset to defaults
               </button>
               <button
                 type="button"
                 onClick={() => exportSettingsAsFile(settings)}
-                className="text-xs text-zinc-400 hover:text-zinc-200 underline decoration-dotted"
+                className="text-xs text-muted hover:text-body underline decoration-dotted"
               >
                 Export settings
               </button>
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="text-xs text-zinc-400 hover:text-zinc-200 underline decoration-dotted"
+                className="text-xs text-muted hover:text-body underline decoration-dotted"
               >
                 Import settings
               </button>

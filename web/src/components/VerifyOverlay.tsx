@@ -81,6 +81,9 @@ export function VerifyOverlay({ points, eye, calibration, onClose }: Props) {
   const detectedPoints = useMemo(() => points.filter(p => p.detected), [points])
   const [replayIdx, setReplayIdx] = useState(0)
   const [flashing, setFlashing] = useState(false)
+  // The instruction strip overlaps the contours, so let the user collapse it
+  // to a single title row once they've read it. Starts expanded.
+  const [infoCollapsed, setInfoCollapsed] = useState(false)
   const flashTimerRef = useRef<number>(0)
 
   useEffect(() => {
@@ -324,34 +327,49 @@ export function VerifyOverlay({ points, eye, calibration, onClose }: Props) {
         <circle cx={cx} cy={cy} r={3} fill="#fbbf24" />
       </svg>
 
-      {/* Top-left instruction strip */}
+      {/* Top-left instruction strip — collapsible so it stops covering the
+          contours once read. */}
       <div className="absolute top-4 left-4 max-w-md bg-white/[0.06] backdrop-blur-md rounded-xl border border-white/[0.08] p-4 space-y-2">
-        <h2 className="text-sm font-heading font-bold">Verify at 1:1 scale</h2>
-        <p className="text-xs text-zinc-300 leading-relaxed">
-          Cover your <strong className="text-white">{renderEye === 'right' ? 'left' : 'right'}</strong> eye and sit{' '}
-          <strong className="text-white">~{Math.round(liveDistanceCm)} cm</strong> from the screen
-          {overrideActive ? ' (recalibrated)' : ' — the same distance you tested at'}. Fixate the yellow cross. The
-          contours show where your tested isopters were; they should line up with where your peripheral vision fades.
-        </p>
-        <p className="text-[11px] text-zinc-400 leading-relaxed">
-          Keep fixating steadily for 10–20 seconds — the contours should progressively fade from
-          awareness, peripheral ones first, dimmer ones fastest (Troxler&apos;s fading). That&apos;s a
-          normal brain phenomenon, not vision loss: blink or glance away a hair and they snap back.
-          It&apos;s the same effect that makes static peripheral stimuli fade at the edge of your field,
-          and it&apos;s the reason the kinetic test uses a <em>moving</em> dot — movement defeats
-          Troxler, so the boundary the test draws is where your retina actually stopped responding.
-        </p>
-        <p className="text-[11px] text-zinc-500">
-          Press <kbd className="px-1 py-0.5 bg-white/[0.06] rounded text-zinc-300">Space</kbd> to flash a recorded
-          test point. Press <kbd className="px-1 py-0.5 bg-white/[0.06] rounded text-zinc-300">Esc</kbd> to close.
-        </p>
-        {windowShrunk && (
-          <p className="text-[11px] text-amber-400 leading-snug border-t border-white/[0.08] pt-2">
-            This window is smaller than the screen the test was run on
-            ({testScreenW ?? '?'}×{testScreenH ?? '?'}px). Outer isopters that
-            extend beyond the current viewport are clipped — go fullscreen or
-            use the same display for an accurate 1:1 check.
-          </p>
+        <button
+          type="button"
+          onClick={() => setInfoCollapsed(c => !c)}
+          aria-expanded={!infoCollapsed}
+          className="w-full flex items-center justify-between gap-3 text-left"
+        >
+          <h2 className="text-sm font-heading font-bold">Verify at 1:1 scale</h2>
+          <span className="text-zinc-400 text-xs shrink-0" aria-hidden="true">
+            {infoCollapsed ? 'Show ▸' : 'Hide ▾'}
+          </span>
+        </button>
+        {!infoCollapsed && (
+          <>
+            <p className="text-xs text-zinc-300 leading-relaxed">
+              Cover your <strong className="text-white">{renderEye === 'right' ? 'left' : 'right'}</strong> eye and sit{' '}
+              <strong className="text-white">~{Math.round(liveDistanceCm)} cm</strong> from the screen
+              {overrideActive ? ' (recalibrated)' : ' — the same distance you tested at'}. Fixate the yellow cross. The
+              contours show where your tested isopters were; they should line up with where your peripheral vision fades.
+            </p>
+            <p className="text-[11px] text-zinc-400 leading-relaxed">
+              Keep fixating steadily for 10–20 seconds — the contours should progressively fade from
+              awareness, peripheral ones first, dimmer ones fastest (Troxler&apos;s fading). That&apos;s a
+              normal brain phenomenon, not vision loss: blink or glance away a hair and they snap back.
+              It&apos;s the same effect that makes static peripheral stimuli fade at the edge of your field,
+              and it&apos;s the reason the kinetic test uses a <em>moving</em> dot — movement defeats
+              Troxler, so the boundary the test draws is where your retina actually stopped responding.
+            </p>
+            <p className="text-[11px] text-zinc-500">
+              Press <kbd className="px-1 py-0.5 bg-white/[0.06] rounded text-zinc-300">Space</kbd> to flash a recorded
+              test point. Press <kbd className="px-1 py-0.5 bg-white/[0.06] rounded text-zinc-300">Esc</kbd> to close.
+            </p>
+            {windowShrunk && (
+              <p className="text-[11px] text-amber-400 leading-snug border-t border-white/[0.08] pt-2">
+                This window is smaller than the screen the test was run on
+                ({testScreenW ?? '?'}×{testScreenH ?? '?'}px). Outer isopters that
+                extend beyond the current viewport are clipped — go fullscreen or
+                use the same display for an accurate 1:1 check.
+              </p>
+            )}
+          </>
         )}
       </div>
 

@@ -45,9 +45,6 @@ export const BUILD_SHA = envString(import.meta.env.VITE_BUILD_SHA, '')
  *  local dev. */
 export const BUILD_TIME = envString(import.meta.env.VITE_BUILD_TIME, '')
 
-/** PDF header tagline, e.g. "Goldmann Kinetic Perimetry Self-Check  |  openperimetry.org". */
-export const PDF_HEADER_TAGLINE = `Goldmann Kinetic Perimetry Self-Check  |  ${APP_DOMAIN}`
-
 /** Page <title> suffix, e.g. " — OpenPerimetry". Appended by App.tsx PAGE_TITLES. */
 export const TITLE_SUFFIX = ` — ${APP_NAME}`
 

@@ -8,6 +8,8 @@ import type {
   ResultStudyMetadata,
   RunSpeedMode,
   TestType,
+  PresentationMode,
+  VrHeadsetPreset,
 } from './types'
 import type { StudyModeState } from './studyMode'
 
@@ -22,15 +24,19 @@ export function buildProtocolSnapshot(args: {
   speedMode?: RunSpeedMode
   extendedField?: boolean
   staticGridPattern?: string
+  presentationMode?: PresentationMode
+  vrHeadsetPreset?: VrHeadsetPreset
   advancedSettings: AdvancedSettings
 }): ResultProtocolSnapshot {
-  const { studyMode, testType, testMode, speedMode, extendedField, staticGridPattern, advancedSettings } = args
+  const { studyMode, testType, testMode, speedMode, extendedField, staticGridPattern, presentationMode, vrHeadsetPreset, advancedSettings } = args
   const out: ResultProtocolSnapshot = {
     testType,
     ...(testMode ? { testMode } : {}),
     ...(speedMode ? { speedMode } : {}),
     ...(extendedField != null ? { extendedField } : {}),
     ...(staticGridPattern ? { staticGridPattern } : {}),
+    ...(presentationMode ? { presentationMode } : {}),
+    ...(vrHeadsetPreset ? { vrHeadsetPreset } : {}),
     advancedSettingsSnapshot: clone(advancedSettings) as unknown as Record<string, unknown>,
   }
   if (studyMode.enabled && studyMode.profile) {

@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import type { TestPoint, StimulusKey, CalibrationData, TestResult } from '../types'
-import { classifyFieldLoss, expectedNormalArea, type FieldSeverity } from '../clinicalClassifications'
+import { STIMULI } from '../types'
+import { scoreField, type FieldSeverity } from '../clinicalClassifications'
+import { SeverityContinuum } from './SeverityContinuum'
 import {
   analyzeSensitivityGradient,
   analyzeCentralIsland,
@@ -18,21 +20,21 @@ import { RELIABILITY_REFERENCE_RANGES } from '../testDefaults'
 // PDF renderer has its own RGB mapping — both stay in sync because the
 // shared module emits the tone, not the colour.
 const TONE_TEXT: Record<Tone, string> = {
-  critical: 'text-red-400',
-  warning: 'text-orange-400',
-  caution: 'text-yellow-400',
-  info: 'text-blue-400',
-  ok: 'text-green-400',
-  muted: 'text-gray-500',
+  critical: 'text-red-700 dark:text-red-200',
+  warning: 'text-orange-700 dark:text-orange-200',
+  caution: 'text-amber-700 dark:text-amber-200',
+  info: 'text-blue-700 dark:text-blue-200',
+  ok: 'text-green-700 dark:text-green-200',
+  muted: 'text-muted',
 }
 
 const TONE_CARD_BG: Record<Tone, string> = {
-  critical: 'bg-red-500/10 border-red-500/30',
-  warning: 'bg-orange-500/10 border-orange-500/30',
-  caution: 'bg-yellow-500/10 border-yellow-500/30',
-  info: 'bg-blue-500/10 border-blue-500/30',
-  ok: 'bg-green-500/10 border-green-500/30',
-  muted: 'bg-gray-500/10 border-gray-500/30',
+  critical: 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-900/60',
+  warning: 'bg-orange-50 dark:bg-orange-950/40 border-orange-200 dark:border-orange-900/60',
+  caution: 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-900/60',
+  info: 'bg-blue-50 dark:bg-blue-950/40 border-blue-200 dark:border-blue-900/60',
+  ok: 'bg-green-50 dark:bg-green-950/40 border-green-200 dark:border-green-900/60',
+  muted: 'bg-subtle border-line',
 }
 
 /** Anomaly glyph prefix — mirrors the PDF renderer so both surfaces
@@ -62,59 +64,54 @@ interface Classification {
  *  panel and the PDF export stay in lockstep on clinical grading. */
 const CLASSIFICATION_THEMES: Record<FieldSeverity, { color: string; bgColor: string; description: string }> = {
   'very-severe': {
-    color: 'text-red-400',
-    bgColor: 'bg-red-500/10 border-red-500/30',
+    color: 'text-red-700 dark:text-red-200',
+    bgColor: 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-900/60',
     description:
-      'Less than ~5% of the testable field is detected. This indicates a tiny central island of vision remaining. Daily activities and mobility are severely affected.',
+      'Only a tiny central island of vision remains across the tested targets. Daily activities and mobility are severely affected.',
   },
   severe: {
-    color: 'text-red-400',
-    bgColor: 'bg-red-500/10 border-red-500/30',
+    color: 'text-red-700 dark:text-red-200',
+    bgColor: 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-900/60',
     description:
-      'Roughly 5–20% of the testable field is detected. This degree of constriction often meets criteria for legal blindness when the central field is ≤ 20° diameter. Significant mobility challenges are likely.',
+      'The field is severely constricted — often meeting legal-blindness criteria when the central field is ≤ 20° diameter. Significant mobility challenges are likely.',
   },
   moderate: {
-    color: 'text-orange-400',
-    bgColor: 'bg-orange-500/10 border-orange-500/30',
+    color: 'text-orange-700 dark:text-orange-200',
+    bgColor: 'bg-orange-50 dark:bg-orange-950/40 border-orange-200 dark:border-orange-900/60',
     description:
-      'Roughly 20–45% of the testable field is detected. Peripheral awareness is reduced. Night vision and navigation in unfamiliar environments may be affected.',
+      'Peripheral awareness is moderately reduced. Night vision and navigation in unfamiliar environments may be affected, while central vision is comparatively better preserved.',
   },
   mild: {
-    color: 'text-yellow-400',
-    bgColor: 'bg-yellow-500/10 border-yellow-500/30',
+    color: 'text-amber-700 dark:text-amber-200',
+    bgColor: 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-900/60',
     description:
-      'Roughly 45–70% of the testable field is detected. Some peripheral loss is present but central vision is well preserved. You may notice difficulty in dim lighting.',
+      'Some peripheral loss is present but central vision is well preserved. You may notice difficulty in dim lighting. This is the early-change range.',
   },
   borderline: {
-    color: 'text-blue-400',
-    bgColor: 'bg-blue-500/10 border-blue-500/30',
+    color: 'text-blue-700 dark:text-blue-200',
+    bgColor: 'bg-blue-50 dark:bg-blue-950/40 border-blue-200 dark:border-blue-900/60',
     description:
-      'Roughly 70–85% of the testable field is detected. The field is near-normal with possible early constriction, though this may also reflect normal variation or test conditions.',
+      'The field is near-normal with possible early constriction, though this may also reflect normal variation or test conditions.',
   },
   normal: {
-    color: 'text-green-400',
-    bgColor: 'bg-green-500/10 border-green-500/30',
+    color: 'text-green-700 dark:text-green-200',
+    bgColor: 'bg-green-50 dark:bg-green-950/40 border-green-200 dark:border-green-900/60',
     description:
-      'More than ~85% of the testable field is detected — within normal limits for the tested range. Note that a screen-based test cannot cover the full clinical field; a clinical Goldmann test assesses out to 90°.',
+      'Within normal limits for the tested range. Note that a screen-based test cannot cover the full clinical field; a clinical Goldmann test assesses out to 90°.',
   },
 }
 
 /**
- * Classify the OVERALL constriction severity of the field. Always based on
- * the III4e fraction of the testable area — even when a ring scotoma or
- * vertical asymmetry is present. Those patterns are reported separately via
- * `detectFieldPatterns` so a user with, e.g., early-RP constriction *plus*
- * a ring scotoma sees both findings rather than having one hide the other.
+ * The OVERALL constriction severity is the base STAGE from the multi-isopter
+ * field score (scoreField) — robust because it averages every measured isopter
+ * rather than hanging the whole grade on III4e. Pattern (ring scotoma,
+ * asymmetry) is orthogonal and reported separately via `detectFieldPatterns`,
+ * so a user with, e.g., moderate constriction *plus* a ring scotoma sees the
+ * stage AND the modifier rather than one hiding the other.
  */
-function classifyField(
-  iii4eArea: number,
-  maxEccentricityDeg: number,
-  calibration?: CalibrationData,
-): Classification {
-  const fraction = iii4eArea / expectedNormalArea(maxEccentricityDeg, calibration)
-  const band = classifyFieldLoss(fraction)
-  const theme = CLASSIFICATION_THEMES[band.severity]
-  return { label: band.label, color: theme.color, bgColor: theme.bgColor, description: theme.description }
+function themeForSeverity(severity: FieldSeverity, label: string): Classification {
+  const theme = CLASSIFICATION_THEMES[severity]
+  return { label, color: theme.color, bgColor: theme.bgColor, description: theme.description }
 }
 
 // ── Main component ──
@@ -131,28 +128,40 @@ interface Props {
    *  Fixation Accuracy and False-Positive Response Rate. Absent on demo
    *  and legacy results — the section is simply hidden in that case. */
   reliabilityIndices?: TestResult['reliabilityIndices']
+  /** Reliability scoring is clinician/admin-only. Regular users still
+   *  see the field interpretation, but not scores or trial-quality
+   *  counters that can be misleading without clinical context. */
+  showReliability?: boolean
 }
 
-export function Interpretation({ points, areas, maxEccentricityDeg, calibration, reliabilityIndices }: Props) {
+export function Interpretation({
+  points,
+  areas,
+  maxEccentricityDeg,
+  calibration,
+  reliabilityIndices,
+  showReliability = false,
+}: Props) {
   const [expanded, setExpanded] = useState(false)
 
-  const iii4eArea = areas['III4e']
-  const classification = iii4eArea != null ? classifyField(iii4eArea, maxEccentricityDeg, calibration) : null
+  // Multi-isopter field score → base stage + 0–100 field score. Robust to one
+  // atypically-low isopter (inferior defect, VR periphery collapse).
+  const fieldScore = scoreField(areas, maxEccentricityDeg, calibration)
+  const classification = fieldScore ? themeForSeverity(fieldScore.band.severity, fieldScore.band.label) : null
   const patterns = detectFieldPatterns(points, areas)
   const gradient = analyzeSensitivityGradient(areas)
   const centralIsland = analyzeCentralIsland(areas)
-  const rpFindings = detectRPFindings(points, areas, maxEccentricityDeg, calibration).filter(f => f.present)
+  const rpFindings = detectRPFindings(points, areas, maxEccentricityDeg, calibration, fieldScore).filter(f => f.present)
   const anomalies = detectAnomalies(points, areas)
-  const reliability = computeReliability(points, areas)
-  const reliabilityIdx = computeReliabilityIndices({ reliabilityIndices })
-  const expectedArea = expectedNormalArea(maxEccentricityDeg, calibration)
+  const reliability = showReliability ? computeReliability(points, areas) : null
+  const reliabilityIdx = showReliability ? computeReliabilityIndices({ reliabilityIndices }) : { fa: null, fprr: null }
 
   return (
     <div className="space-y-3">
       {/* Toggle button */}
       <button
         onClick={() => setExpanded(v => !v)}
-        className="w-full text-left px-4 py-3 bg-gray-900 hover:bg-gray-800 rounded-xl border border-gray-800 transition-colors flex items-center justify-between"
+        className="w-full text-left px-4 py-3 bg-surface hover:bg-subtle rounded-xl border border-line transition-colors flex items-center justify-between"
       >
         <div className="flex items-center gap-3 flex-wrap">
           <span className="text-sm font-medium">Interpretation</span>
@@ -169,75 +178,77 @@ export function Interpretation({ points, areas, maxEccentricityDeg, calibration,
           ))}
         </div>
         <div className="flex items-center gap-3">
-          {/* Reliability badge */}
-          <span className={`text-xs ${reliability.color} font-mono`}>
-            Reliability: {reliability.score}%
-          </span>
-          <span className="text-gray-500 text-xs">{expanded ? '▲' : '▼'}</span>
+          {reliability && (
+            <span className={`text-xs ${reliability.color} font-mono`}>
+              Reliability: {reliability.score}%
+            </span>
+          )}
+          <span className="text-muted text-xs">{expanded ? '▲' : '▼'}</span>
         </div>
       </button>
 
       {expanded && (
         <div className="space-y-3 px-1">
-          {/* Reliability score */}
-          <div className="bg-gray-900 rounded-xl p-4 space-y-3 border border-gray-800">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-medium text-gray-300">Test reliability</h3>
-              <span className={`text-lg font-mono font-semibold ${reliability.color}`}>
-                {reliability.score}/100
-              </span>
-            </div>
-            <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
-              <div
-                className="h-full rounded-full transition-all duration-500"
-                style={{
-                  width: `${reliability.score}%`,
-                  backgroundColor:
-                    reliability.score >= 85
-                      ? '#4ade80'
-                      : reliability.score >= 65
-                        ? '#facc15'
-                        : reliability.score >= 40
-                          ? '#fb923c'
-                          : '#f87171',
-                }}
-              />
-            </div>
-            {reliability.factors.length > 0 && (
-              <div className="space-y-1.5 pt-1">
-                {reliability.factors.map((f, i) => (
-                  <div key={i} className="flex items-start gap-2 text-xs">
-                    <span className="text-red-400 font-mono shrink-0">-{f.penalty}</span>
-                    <span className="text-gray-400">{f.detail}</span>
-                  </div>
-                ))}
+          {reliability && (
+            <div className="bg-surface rounded-xl p-4 space-y-3 border border-line">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-medium text-body">Test reliability</h3>
+                <span className={`text-lg font-mono font-semibold ${reliability.color}`}>
+                  {reliability.score}/100
+                </span>
               </div>
+              <div className="w-full h-1.5 bg-subtle-2 rounded-full overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all duration-500"
+                  style={{
+                    width: `${reliability.score}%`,
+                    backgroundColor:
+                      reliability.score >= 85
+                        ? '#16a34a'
+                        : reliability.score >= 65
+                          ? '#ca8a04'
+                          : reliability.score >= 40
+                            ? '#ea580c'
+                            : '#dc2626',
+                  }}
+                />
+              </div>
+              {reliability.factors.length > 0 && (
+                <div className="space-y-1.5 pt-1">
+                  {reliability.factors.map((f, i) => (
+                    <div key={i} className="flex items-start gap-2 text-xs">
+                      <span className="text-red-700 dark:text-red-300 font-mono shrink-0">-{f.penalty}</span>
+                      <span className="text-muted">{f.detail}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {reliability.factors.length === 0 && (
+                <p className="text-xs text-muted">No reliability issues detected.</p>
+              )}
+            </div>
             )}
-            {reliability.factors.length === 0 && (
-              <p className="text-xs text-gray-500">No reliability issues detected.</p>
-            )}
-          </div>
 
           {/* Fixation Accuracy + False-Positive Response Rate — reference ranges
               from Dzwiniel et al., PLoS ONE 2017 (n=21 healthy controls). Only
               shown when the test recorded catch trials. */}
           {reliabilityIdx.fa && (
-            <div className="bg-gray-900 rounded-xl p-4 space-y-3 border border-gray-800">
-              <h3 className="text-sm font-medium text-gray-300">Reliability indices</h3>
+            <div className="bg-surface rounded-xl p-4 space-y-3 border border-line">
+              <h3 className="text-sm font-medium text-body">Reliability indices</h3>
               <div className="space-y-2 text-xs">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex-1">
-                    <div className="text-gray-300 font-medium">Fixation accuracy (FA)</div>
-                    <div className="text-gray-500">
+                    <div className="text-body font-medium">Fixation accuracy (FA)</div>
+                    <div className="text-muted">
                       {reliabilityIdx.fa.correct}/{reliabilityIdx.fa.presented} catch trials correctly ignored · normal {RELIABILITY_REFERENCE_RANGES.faPercent.min}–{RELIABILITY_REFERENCE_RANGES.faPercent.max}%
                     </div>
                     <div
                       className={
                         reliabilityIdx.fa.band === 'normal'
-                          ? 'text-green-400'
+                          ? 'text-green-700 dark:text-green-300'
                           : reliabilityIdx.fa.band === 'borderline'
-                            ? 'text-yellow-400'
-                            : 'text-red-400'
+                            ? 'text-amber-700 dark:text-amber-300'
+                            : 'text-red-700 dark:text-red-300'
                       }
                     >
                       {reliabilityIdx.fa.bandLabel}
@@ -246,29 +257,29 @@ export function Interpretation({ points, areas, maxEccentricityDeg, calibration,
                   <div
                     className={`font-mono text-lg shrink-0 ${
                       reliabilityIdx.fa.band === 'normal'
-                        ? 'text-green-400'
+                        ? 'text-green-700 dark:text-green-300'
                         : reliabilityIdx.fa.band === 'borderline'
-                          ? 'text-yellow-400'
-                          : 'text-red-400'
+                          ? 'text-amber-700 dark:text-amber-300'
+                          : 'text-red-700 dark:text-red-300'
                     }`}
                   >
                     {reliabilityIdx.fa.percent.toFixed(0)}%
                   </div>
                 </div>
                 {reliabilityIdx.fprr && (
-                  <div className="flex items-start justify-between gap-3 pt-2 border-t border-gray-800">
+                  <div className="flex items-start justify-between gap-3 pt-2 border-t border-line">
                     <div className="flex-1">
-                      <div className="text-gray-300 font-medium">False-positive response rate (FPRR)</div>
-                      <div className="text-gray-500">
+                      <div className="text-body font-medium">False-positive response rate (FPRR)</div>
+                      <div className="text-muted">
                         {reliabilityIdx.fprr.falsePositives}/{reliabilityIdx.fprr.total} responses were false positives · normal {RELIABILITY_REFERENCE_RANGES.fprrPercent.min}–{RELIABILITY_REFERENCE_RANGES.fprrPercent.max}%
                       </div>
                       <div
                         className={
                           reliabilityIdx.fprr.band === 'normal'
-                            ? 'text-green-400'
+                            ? 'text-green-700 dark:text-green-300'
                             : reliabilityIdx.fprr.band === 'elevated'
-                              ? 'text-yellow-400'
-                              : 'text-red-400'
+                              ? 'text-amber-700 dark:text-amber-300'
+                              : 'text-red-700 dark:text-red-300'
                         }
                       >
                         {reliabilityIdx.fprr.bandLabel}
@@ -277,17 +288,17 @@ export function Interpretation({ points, areas, maxEccentricityDeg, calibration,
                     <div
                       className={`font-mono text-lg shrink-0 ${
                         reliabilityIdx.fprr.band === 'normal'
-                          ? 'text-green-400'
+                          ? 'text-green-700 dark:text-green-300'
                           : reliabilityIdx.fprr.band === 'elevated'
-                            ? 'text-yellow-400'
-                            : 'text-red-400'
+                            ? 'text-amber-700 dark:text-amber-300'
+                            : 'text-red-700 dark:text-red-300'
                       }`}
                     >
                       {reliabilityIdx.fprr.percent.toFixed(1)}%
                     </div>
                   </div>
                 )}
-                <p className="text-gray-600 text-[10px] pt-1">
+                <p className="text-muted text-[10px] pt-1">
                   Reference ranges: {RELIABILITY_REFERENCE_RANGES.citation}
                 </p>
               </div>
@@ -297,17 +308,30 @@ export function Interpretation({ points, areas, maxEccentricityDeg, calibration,
           {/* Field classification — the headline severity tier. Additive
               pattern modifiers (ring scotoma, asymmetry) are rendered as
               separate cards below so they don't hide the base severity. */}
-          {classification && (
+          {classification && fieldScore && (
             <div className={`rounded-xl p-4 border ${classification.bgColor}`}>
               <h3 className={`text-sm font-medium ${classification.color} mb-2`}>
                 {classification.label}
+                {patterns.length > 0 && (
+                  <span className="text-body font-normal"> · {patterns.map(p => p.label.toLowerCase()).join(' · ')}</span>
+                )}
               </h3>
-              <p className="text-xs text-gray-300 leading-relaxed">{classification.description}</p>
-              {iii4eArea != null && (
-                <p className="text-xs text-gray-500 mt-2">
-                  III4e isopter: {iii4eArea.toFixed(0)} deg² (~{((iii4eArea / expectedArea) * 100).toFixed(0)}% of testable area, equivalent radius ~{Math.sqrt(iii4eArea / Math.PI).toFixed(1)}°)
-                </p>
-              )}
+              <p className="text-xs text-body leading-relaxed">{classification.description}</p>
+              {/* Field score on the base-stage continuum */}
+              <div className="mt-3">
+                <SeverityContinuum score={fieldScore.score} bandLabel={fieldScore.band.label} severity={fieldScore.band.severity} />
+              </div>
+              {/* Per-isopter breakdown — the pattern the overall score averages
+                  over (e.g. preserved V4e with reduced inner isopters in RP). */}
+              <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1">
+                {fieldScore.perIsopter.map(p => (
+                  <span key={p.key} className="text-[11px] text-body inline-flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: STIMULI[p.key].color }} />
+                    <span className="text-ink">{p.key}</span>
+                    <span className="font-mono tnum">{(p.fraction * 100).toFixed(0)}%</span>
+                  </span>
+                ))}
+              </div>
             </div>
           )}
 
@@ -316,41 +340,41 @@ export function Interpretation({ points, areas, maxEccentricityDeg, calibration,
           {patterns.map(p => (
             <div key={p.key} className={`rounded-xl p-4 border ${TONE_CARD_BG[p.tone]}`}>
               <h3 className={`text-sm font-medium ${TONE_TEXT[p.tone]} mb-2`}>{p.label}</h3>
-              <p className="text-xs text-gray-300 leading-relaxed">{p.description}</p>
+              <p className="text-xs text-body leading-relaxed">{p.description}</p>
             </div>
           ))}
 
           {/* Sensitivity gradient */}
           {gradient && (
-            <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
+            <div className="bg-surface rounded-xl p-4 border border-line">
               <h3 className={`text-sm font-medium ${TONE_TEXT[gradient.tone]} mb-2`}>{gradient.label}</h3>
-              <p className="text-xs text-gray-300 leading-relaxed">{gradient.description}</p>
+              <p className="text-xs text-body leading-relaxed">{gradient.description}</p>
             </div>
           )}
 
           {/* Central island */}
           {centralIsland && (
-            <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
+            <div className="bg-surface rounded-xl p-4 border border-line">
               <h3 className={`text-sm font-medium ${TONE_TEXT[centralIsland.tone]} mb-2`}>
                 {centralIsland.label}
               </h3>
-              <p className="text-xs text-gray-300 leading-relaxed">{centralIsland.description}</p>
+              <p className="text-xs text-body leading-relaxed">{centralIsland.description}</p>
             </div>
           )}
 
           {/* RP-specific findings */}
           {rpFindings.length > 0 && (
             <div className="space-y-2">
-              <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider px-1">
+              <h3 className="text-xs font-medium text-muted uppercase tracking-wider px-1">
                 RP indicators
               </h3>
               {rpFindings.map((f, i) => (
                 <div
                   key={i}
-                  className="bg-gray-900 rounded-xl p-4 border border-gray-800"
+                  className="bg-surface rounded-xl p-4 border border-line"
                 >
                   <h4 className={`text-sm font-medium ${TONE_TEXT[f.tone]} mb-1`}>{f.label}</h4>
-                  <p className="text-xs text-gray-300 leading-relaxed">{f.description}</p>
+                  <p className="text-xs text-body leading-relaxed">{f.description}</p>
                 </div>
               ))}
             </div>
@@ -359,7 +383,7 @@ export function Interpretation({ points, areas, maxEccentricityDeg, calibration,
           {/* Anomalies */}
           {anomalies.length > 0 && (
             <div className="space-y-2">
-              <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider px-1">
+              <h3 className="text-xs font-medium text-muted uppercase tracking-wider px-1">
                 Anomalies detected
               </h3>
               {anomalies.map((a, i) => (
@@ -370,14 +394,14 @@ export function Interpretation({ points, areas, maxEccentricityDeg, calibration,
                   <h4 className={`text-sm font-medium mb-1 ${TONE_TEXT[a.tone]}`}>
                     {ANOMALY_GLYPH[a.icon]} {a.label}
                   </h4>
-                  <p className="text-xs text-gray-300 leading-relaxed">{a.description}</p>
+                  <p className="text-xs text-body leading-relaxed">{a.description}</p>
                 </div>
               ))}
             </div>
           )}
 
           {/* Disclaimer */}
-          <p className="text-xs text-gray-600 leading-relaxed px-1">
+          <p className="text-xs text-muted leading-relaxed px-1">
             This tool has not been validated against a clinical perimeter. This interpretation
             is generated automatically for self-monitoring purposes only. Results may differ
             from clinical perimetry due to screen limitations, uncontrolled viewing distance,

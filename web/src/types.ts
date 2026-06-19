@@ -11,6 +11,37 @@ export type Eye = 'left' | 'right' | 'both'
  */
 export type RunSpeedMode = 'slow' | 'normal' | 'quick'
 
+/** How the test is presented physically.
+ *  - `standard` — the test fills the device's screen/viewport as usual
+ *    (desktop monitor, laptop, tablet, or a phone held at arm's length).
+ *  - `phone-vr` — the phone is mounted in landscape inside a passive
+ *    optical headset. The screen is split into two lens halves; the
+ *    tested eye uses one half while the other stays dark. See
+ *    `VrCalibration` and `vrGeometry.ts`. */
+export type PresentationMode = 'standard' | 'phone-vr'
+
+/** Passive-headset lens presets. `standard` carries the default optics
+ *  for a typical passive phone-VR viewer; `custom` means the user dialed
+ *  in their own lens separation / vertical offset. */
+export type VrHeadsetPreset = 'standard' | 'custom'
+
+/** Lens geometry for phone-in-headset (`phone-vr`) presentation.
+ *  All pixel values are in the phone's CSS-pixel (viewport) space at the
+ *  landscape orientation the test runs in. The two lens centers sit at
+ *  ±`lensSeparationPx / 2` from the horizontal screen center; the active
+ *  half (left vs right of screen center) is chosen from the tested eye.
+ *  See `computeVrViewport` in `vrGeometry.ts`. */
+export interface VrCalibration {
+  enabled: boolean
+  headsetPreset: VrHeadsetPreset
+  /** Distance between the two lens optical centers, in viewport px. */
+  lensSeparationPx: number
+  /** Vertical offset of the lens centers from screen center, in viewport
+   *  px (positive = down). Usually small; phones rarely sit perfectly
+   *  centered in the headset cradle. */
+  lensCenterYOffsetPx: number
+}
+
 export type StimulusKey = 'V4e' | 'III4e' | 'III2e' | 'I4e' | 'I2e'
 
 export interface StimulusDef {
@@ -48,6 +79,11 @@ export interface CalibrationData {
    *  matches SPECVIS's single-scalar px/deg but under-projects past
    *  ~20° of eccentricity. */
   sphericityCorrection?: boolean
+  /** Phone-in-headset lens geometry. Present and `enabled` only on
+   *  `phone-vr` runs; absent/undefined for standard runs (which keep
+   *  using the full screen). When enabled, the testable surface is the
+   *  active lens half rather than the whole screen — see `vrGeometry.ts`. */
+  vr?: VrCalibration
 }
 
 export interface TestPoint {
@@ -79,6 +115,12 @@ export interface ResultProtocolSnapshot {
   speedMode?: RunSpeedMode
   extendedField?: boolean
   staticGridPattern?: string
+  /** How the run was presented. Omitted on legacy results (treat absent
+   *  as `'standard'`). `'phone-vr'` marks a phone-in-headset run so it
+   *  isn't confused with a monitor run during analysis. */
+  presentationMode?: PresentationMode
+  /** Headset preset for `phone-vr` runs. Omitted otherwise. */
+  vrHeadsetPreset?: VrHeadsetPreset
   advancedSettingsSnapshot?: Record<string, unknown>
 }
 

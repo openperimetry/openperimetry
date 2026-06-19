@@ -11,6 +11,7 @@ import { SensitivityMap } from './SensitivityMap'
 import { calcIsopterAreas } from '../isopterCalc'
 import { Interpretation } from './Interpretation'
 import { STIMULI, ISOPTER_ORDER } from '../types'
+import { useAuth } from '../AuthContext'
 
 /** HFA 24-2 grid fits within ~28° eccentricity; round up for a snug view. */
 const STATIC_MAX_ECC_DEG = 30
@@ -42,12 +43,20 @@ function LazySection({ children, minHeight = 360 }: { children: React.ReactNode;
 
   return (
     <div ref={ref}>
-      {visible ? children : <div style={{ minHeight }} className="flex items-center justify-center text-zinc-600 text-sm">Scroll to load…</div>}
+      {visible ? children : <div style={{ minHeight }} className="flex items-center justify-center text-muted text-sm">Scroll to load…</div>}
     </div>
   )
 }
 
-function ScenarioCard({ scenario, mapSize }: { scenario: ReturnType<typeof getAllScenarios>[number]; mapSize: number }) {
+function ScenarioCard({
+  scenario,
+  mapSize,
+  showReliability,
+}: {
+  scenario: ReturnType<typeof getAllScenarios>[number]
+  mapSize: number
+  showReliability: boolean
+}) {
   const areas = useMemo(() => calcIsopterAreas(scenario.points), [scenario.points])
   const staticDbPoints = useMemo(
     () =>
@@ -62,12 +71,12 @@ function ScenarioCard({ scenario, mapSize }: { scenario: ReturnType<typeof getAl
   )
 
   return (
-    <div data-scenario={scenario.id} className="space-y-4 border border-white/[0.06] rounded-2xl p-6 bg-surface/30">
+    <div data-scenario={scenario.id} className="space-y-4 border border-line rounded-2xl p-6 bg-surface">
       {/* Header — always rendered */}
       <div className="flex items-start justify-between">
         <div>
           <h2 className="text-xl font-heading font-bold">{scenario.label}</h2>
-          <p className="text-zinc-400 text-sm mt-1">{scenario.description}</p>
+          <p className="text-muted text-sm mt-1">{scenario.description}</p>
         </div>
         <span className={`px-3 py-1 rounded-full text-xs font-medium shrink-0 ${
           scenario.severity === 'Normal' ? 'bg-green-500/15 text-green-400' :
@@ -85,16 +94,16 @@ function ScenarioCard({ scenario, mapSize }: { scenario: ReturnType<typeof getAl
         {ISOPTER_ORDER.map(key => {
           const area = areas[key]
           return (
-            <div key={key} className="bg-surface rounded-xl p-2 text-center border border-white/[0.06]">
+            <div key={key} className="bg-surface rounded-xl p-2 text-center border border-line">
               <div className="flex items-center justify-center gap-1 mb-1">
                 <span className="w-2 h-2 rounded-full" style={{ backgroundColor: STIMULI[key].color }} />
-                <span className="text-xs text-zinc-400">{key}</span>
+                <span className="text-xs text-muted">{key}</span>
               </div>
-              <span className="text-sm font-mono text-zinc-300">
+              <span className="text-sm font-mono text-body">
                 {area != null ? `${area.toFixed(0)}°²` : '—'}
               </span>
               {area != null && (
-                <span className="block text-xs text-zinc-500">
+                <span className="block text-xs text-muted">
                   ~{Math.sqrt(area / Math.PI).toFixed(1)}° r
                 </span>
               )}
@@ -112,7 +121,7 @@ function ScenarioCard({ scenario, mapSize }: { scenario: ReturnType<typeof getAl
               plot from the heatmap at a glance. */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
-              <h3 className="text-xs uppercase tracking-wider text-zinc-400 text-center">Goldmann</h3>
+              <h3 className="text-xs uppercase tracking-wider text-muted text-center">Goldmann</h3>
               {/* No calibration prop: demo fixtures are synthetic data
                   with points well beyond any realistic screen boundary,
                   so the "not tested" overlay would misrepresent the
@@ -125,7 +134,7 @@ function ScenarioCard({ scenario, mapSize }: { scenario: ReturnType<typeof getAl
               />
             </div>
             <div className="space-y-2">
-              <h3 className="text-xs uppercase tracking-wider text-zinc-400 text-center">Static</h3>
+              <h3 className="text-xs uppercase tracking-wider text-muted text-center">Static</h3>
               <SensitivityMap
                 points={staticDbPoints}
                 eye="right"
@@ -147,6 +156,7 @@ function ScenarioCard({ scenario, mapSize }: { scenario: ReturnType<typeof getAl
             areas={areas}
             maxEccentricityDeg={scenario.maxEccentricity}
             calibration={scenario.calibration}
+            showReliability={showReliability}
           />
 
         </div>
@@ -156,16 +166,18 @@ function ScenarioCard({ scenario, mapSize }: { scenario: ReturnType<typeof getAl
 }
 
 export function TestDemo({ onBack }: Props) {
+  const { user } = useAuth()
+  const canViewReliability = user?.isAdmin === true || user?.isClinician === true
   const scenarios = getAllScenarios()
   const mapSize = Math.min(380, typeof window !== 'undefined' ? window.innerWidth - 64 : 380)
 
   return (
-    <main className="min-h-[100dvh] bg-base text-white safe-pad p-6 overflow-y-auto animate-page-in">
+    <main className="min-h-[100dvh] bg-base text-body safe-pad p-6 overflow-y-auto animate-page-in">
       <div className="max-w-4xl mx-auto space-y-12 pb-16">
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-3xl font-heading font-bold">Clinical Scenario Demo</h1>
-            <p className="text-zinc-400 text-sm mt-1">
+            <p className="text-muted text-sm mt-1">
               Visual verification of radar maps, vision simulations, and interpretations
             </p>
           </div>
@@ -173,7 +185,12 @@ export function TestDemo({ onBack }: Props) {
         </div>
 
         {scenarios.map(scenario => (
-          <ScenarioCard key={scenario.id} scenario={scenario} mapSize={mapSize} />
+          <ScenarioCard
+            key={scenario.id}
+            scenario={scenario}
+            mapSize={mapSize}
+            showReliability={canViewReliability}
+          />
         ))}
       </div>
     </main>

@@ -551,11 +551,11 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
   ]
 
   return (
-    <div className="min-h-[100dvh] bg-base text-white safe-pad p-6 animate-page-in">
+    <div className="min-h-[100dvh] bg-base text-body safe-pad p-6 animate-page-in">
       <main className="mx-auto max-w-5xl space-y-6">
-        <header className="flex flex-wrap items-start justify-between gap-4 border-b border-white/[0.06] pb-5">
+        <header className="flex flex-wrap items-start justify-between gap-4 border-b border-line pb-5">
           <div>
-            <p className="text-xs font-medium uppercase tracking-[0.12em] text-zinc-500">Clinician portal</p>
+            <p className="text-xs font-medium uppercase tracking-[0.12em] text-muted">Clinician portal</p>
             <h1 className="mt-1 text-3xl font-heading font-bold">Study sessions</h1>
           </div>
           <BackButton onClick={onBack} label="Home" />
@@ -579,11 +579,11 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
             missing. Session metadata (session ID + visit/repeat/
             operator) sits below the choices so the clinician can fill
             them in without leaving the summary. */}
-        <section className="rounded-2xl border border-white/[0.08] bg-[#0b0b12]/80 p-5 space-y-4">
+        <section className="rounded-2xl border border-line bg-surface p-5 space-y-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500">Next session</p>
-              <p className="mt-1 text-sm text-zinc-400">
+              <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-muted">Next session</p>
+              <p className="mt-1 text-sm text-muted">
                 {missing.length === 0
                   ? 'Ready — confirm session ID below and start.'
                   : `Pick ${missing.join(', ')} to enable Start.`}
@@ -592,7 +592,7 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
             {studyMode.profile || studyMode.session.participantId ? (
               <button
                 onClick={() => setStudyMode(DEFAULT_STUDY_MODE_STATE)}
-                className="text-xs text-zinc-400 underline decoration-dotted hover:text-zinc-200"
+                className="text-xs text-muted underline decoration-dotted hover:text-body"
               >
                 clear session
               </button>
@@ -628,9 +628,9 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
             />
           </div>
 
-          <div className="grid gap-3 rounded-xl border border-white/[0.08] bg-white/[0.02] p-3 sm:grid-cols-[auto_1fr]">
+          <div className="grid gap-3 rounded-xl border border-line bg-subtle p-3 sm:grid-cols-[auto_1fr]">
             <div className="flex items-center gap-3">
-              <span className="text-xs font-medium uppercase tracking-[0.08em] text-zinc-400">Eye</span>
+              <span className="text-xs font-medium uppercase tracking-[0.08em] text-muted">Eye</span>
               <div className="flex gap-1" role="radiogroup" aria-label="Eye for next test">
                 {(['left', 'both', 'right'] as const).map(value => {
                   const label = value === 'right' ? 'OD' : value === 'left' ? 'OS' : 'OU'
@@ -644,8 +644,8 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                       onClick={() => setEye(value)}
                       className={`min-w-[44px] rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-colors ${
                         selected
-                          ? 'border-accent/60 bg-accent/15 text-white'
-                          : 'border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:bg-white/[0.06]'
+                          ? 'border-accent bg-accent-tint text-accent'
+                          : 'border-line bg-subtle text-body hover:bg-subtle-2'
                       }`}
                     >
                       {label}
@@ -700,8 +700,8 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
             disabled={!canStartTest}
             className={`w-full rounded-xl px-4 py-3.5 text-base font-semibold transition-colors ${
               canStartTest
-                ? 'bg-accent text-white hover:bg-accent-light shadow-[0_4px_24px_rgba(200,144,42,0.22)]'
-                : 'cursor-not-allowed bg-white/[0.06] text-zinc-500'
+                ? 'bg-accent text-white hover:bg-accent-light shadow-[0_4px_24px_rgba(10,108,201,0.22)]'
+                : 'cursor-not-allowed bg-subtle-2 text-muted'
             }`}
           >
             Start test session
@@ -718,7 +718,7 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
             section the clinician is editing, instead of stacking every
             list at once. Defaults to Participants since that's the most
             common entry point. */}
-        <nav className="flex flex-wrap gap-1 border-b border-white/[0.06]" role="tablist" aria-label="Manage">
+        <nav className="flex flex-wrap gap-1 border-b border-line" role="tablist" aria-label="Manage">
           {tabs.map(t => (
             <button
               key={t.id}
@@ -726,13 +726,13 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
               aria-selected={tab === t.id}
               onClick={() => setTab(t.id)}
               className={`relative px-3 py-2.5 text-sm font-medium transition-colors ${
-                tab === t.id ? 'text-white' : 'text-zinc-400 hover:text-zinc-200'
+                tab === t.id ? 'text-accent' : 'text-muted hover:text-body'
               }`}
             >
               {t.label}
               {t.badge && (
                 <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-mono ${
-                  tab === t.id ? 'bg-accent/20 text-accent-light' : 'bg-white/[0.06] text-zinc-500'
+                  tab === t.id ? 'bg-accent/15 text-accent' : 'bg-subtle-2 text-muted'
                 }`}>{t.badge}</span>
               )}
               <span className={`absolute -bottom-[1px] inset-x-2 h-[2px] rounded-full bg-accent transition-all duration-200 ${
@@ -745,7 +745,7 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
         <section className="space-y-4">
           {tab === 'participants' && (
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1.3fr)_minmax(280px,0.7fr)]">
-              <div className="space-y-4 rounded-xl border border-white/[0.08] bg-[#0b0b12]/80 p-4">
+              <div className="space-y-4 rounded-xl border border-line bg-surface p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <h2 className="text-base font-heading font-semibold">Participants</h2>
                   <input
@@ -756,29 +756,29 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                     aria-label="Search participants"
                   />
                 </div>
-                <div className="divide-y divide-white/[0.06] overflow-hidden rounded-xl border border-white/[0.08]">
+                <div className="divide-y divide-line overflow-hidden rounded-xl border border-line">
                   {loading && (
-                    <div className="px-3 py-8 text-center text-sm text-zinc-500">Loading…</div>
+                    <div className="px-3 py-8 text-center text-sm text-muted">Loading…</div>
                   )}
                   {filteredParticipants.map(participant => {
                     const selected = participant.id === studyMode.session.participantId
                     const count = countsByParticipant.get(participant.id) ?? 0
                     return (
-                      <div key={participant.id} className={`grid gap-3 px-3 py-3 sm:grid-cols-[1fr_auto] ${selected ? 'bg-teal/10' : 'bg-white/[0.02]'}`}>
+                      <div key={participant.id} className={`grid gap-3 px-3 py-3 sm:grid-cols-[1fr_auto] ${selected ? 'bg-teal/10' : 'bg-subtle'}`}>
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                            <span className="font-medium text-white">{participant.label}</span>
-                            <span className="font-mono text-xs text-zinc-400">{participant.id}</span>
+                            <span className="font-medium text-ink">{participant.label}</span>
+                            <span className="font-mono text-xs text-muted">{participant.id}</span>
                             {selected && <span className="rounded-full border border-teal/25 bg-teal/10 px-2 py-0.5 text-[11px] text-teal">Selected</span>}
                           </div>
-                          <p className="mt-1 text-xs text-zinc-500">
+                          <p className="mt-1 text-xs text-muted">
                             {count} result{count === 1 ? '' : 's'} · Updated {new Date(participant.updatedAt).toLocaleDateString()}
                           </p>
                         </div>
                         <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                           <button
                             onClick={() => selectParticipant(participant)}
-                            className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-zinc-100 transition-colors hover:bg-white/[0.08]"
+                            className="rounded-lg border border-line bg-subtle px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-subtle-2"
                           >
                             Select
                           </button>
@@ -793,22 +793,22 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                     )
                   })}
                   {!loading && filteredParticipants.length === 0 && (
-                    <div className="px-3 py-8 text-center text-sm text-zinc-500">No matches.</div>
+                    <div className="px-3 py-8 text-center text-sm text-muted">No matches.</div>
                   )}
                 </div>
               </div>
 
-              <div className="space-y-3 rounded-xl border border-white/[0.08] bg-[#0b0b12]/80 p-4">
+              <div className="space-y-3 rounded-xl border border-line bg-surface p-4">
                 <h2 className="text-base font-heading font-semibold">Add participant</h2>
-                <p className="text-xs leading-5 text-zinc-400">
+                <p className="text-xs leading-5 text-muted">
                   Use a pseudonymous code. Records save to your account{user?.email ? ` (${user.email})` : ''}; keep clinical details in your source system.
                 </p>
                 <label className="block space-y-1">
-                  <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-400">Participant ID</span>
+                  <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Participant ID</span>
                   <input value={draft.id} onChange={e => setDraft({ ...draft, id: e.target.value })} className="input-field" placeholder="P-002" />
                 </label>
                 <label className="block space-y-1">
-                  <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-400">Display name</span>
+                  <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Display name</span>
                   <input value={draft.label} onChange={e => setDraft({ ...draft, label: e.target.value })} className="input-field" placeholder="Participant 002" />
                 </label>
                 <button onClick={handleAddParticipant} className="w-full rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-accent-light">
@@ -819,7 +819,7 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
           )}
 
           {tab === 'protocols' && (
-            <div className="space-y-4 rounded-xl border border-white/[0.08] bg-[#0b0b12]/80 p-4">
+            <div className="space-y-4 rounded-xl border border-line bg-surface p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <h2 className="text-base font-heading font-semibold">Protocols</h2>
                 <div className="flex flex-wrap items-center gap-2">
@@ -840,7 +840,7 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                   )}
                   <button
                     onClick={() => profileInputRef.current?.click()}
-                    className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-zinc-100 transition-colors hover:bg-white/[0.08]"
+                    className="rounded-lg border border-line bg-subtle px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-subtle-2"
                   >
                     Import
                   </button>
@@ -849,7 +849,7 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                       onClick={() => {
                         if (studyMode.profile) exportStudyProfileAsFile(studyMode.profile)
                       }}
-                      className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-zinc-100 transition-colors hover:bg-white/[0.08]"
+                      className="rounded-lg border border-line bg-subtle px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-subtle-2"
                     >
                       Export active
                     </button>
@@ -868,33 +868,33 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
 
               {userProfiles.length > 0 && (
                 <div className="space-y-2">
-                  <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-500">Your protocols</p>
-                  <div className="divide-y divide-white/[0.06] overflow-hidden rounded-xl border border-white/[0.08]">
+                  <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Your protocols</p>
+                  <div className="divide-y divide-line overflow-hidden rounded-xl border border-line">
                     {userProfiles.map(profile => {
                       const isActive = studyMode.profile?.id === profile.id
                       return (
                         <div
                           key={profile.id}
-                          className={`grid gap-2 px-3 py-2.5 sm:grid-cols-[1fr_auto] ${isActive ? 'bg-teal/10' : 'bg-white/[0.02]'}`}
+                          className={`grid gap-2 px-3 py-2.5 sm:grid-cols-[1fr_auto] ${isActive ? 'bg-teal/10' : 'bg-subtle'}`}
                         >
                           <button
                             onClick={() => handleProfileSelect(profile)}
                             className="min-w-0 text-left"
                           >
-                            <span className="block text-sm font-medium leading-5 text-zinc-100">
+                            <span className="block text-sm font-medium leading-5 text-ink">
                               {profile.label}
-                              <span className="ml-2 rounded-full border border-white/[0.08] bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-normal uppercase tracking-wider text-zinc-400">
+                              <span className="ml-2 rounded-full border border-line bg-subtle px-1.5 py-0.5 text-[10px] font-normal uppercase tracking-wider text-muted">
                                 {profile.testType === 'static' ? 'Static' : 'Goldmann'}
                               </span>
                             </span>
                             {profile.notes && (
-                              <span className="mt-0.5 block text-xs leading-5 text-zinc-400">{profile.notes}</span>
+                              <span className="mt-0.5 block text-xs leading-5 text-muted">{profile.notes}</span>
                             )}
                           </button>
                           <div className="flex items-center gap-2 sm:justify-end">
                             <button
                               onClick={() => exportStudyProfileAsFile(profile)}
-                              className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 text-xs font-medium text-zinc-100 transition-colors hover:bg-white/[0.08]"
+                              className="rounded-lg border border-line bg-subtle px-2.5 py-1 text-xs font-medium text-ink transition-colors hover:bg-subtle-2"
                             >
                               Export
                             </button>
@@ -913,18 +913,18 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
               )}
 
               <div className="space-y-2">
-                <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-500">Built-in protocols</p>
-                <div className="divide-y divide-white/[0.06] overflow-hidden rounded-xl border border-white/[0.08]">
+                <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Built-in protocols</p>
+                <div className="divide-y divide-line overflow-hidden rounded-xl border border-line">
                   {STANDARD_PROFILES.map(profile => (
                     <button
                       key={profile.id}
                       onClick={() => handleProfileSelect(profile)}
-                      className={`block w-full px-3 py-2.5 text-left transition-colors hover:bg-white/[0.05] ${
-                        studyMode.profile?.id === profile.id ? 'bg-teal/10' : 'bg-white/[0.02]'
+                      className={`block w-full px-3 py-2.5 text-left transition-colors hover:bg-subtle-2 ${
+                        studyMode.profile?.id === profile.id ? 'bg-teal/10' : 'bg-subtle'
                       }`}
                     >
-                      <span className="block text-sm font-medium leading-5 text-zinc-100">{profile.label}</span>
-                      {profile.notes && <span className="mt-0.5 block text-xs leading-5 text-zinc-400">{profile.notes}</span>}
+                      <span className="block text-sm font-medium leading-5 text-ink">{profile.label}</span>
+                      {profile.notes && <span className="mt-0.5 block text-xs leading-5 text-muted">{profile.notes}</span>}
                     </button>
                   ))}
                 </div>
@@ -933,11 +933,11 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
           )}
 
           {tab === 'workstations' && (
-            <div className="space-y-4 rounded-xl border border-white/[0.08] bg-[#0b0b12]/80 p-4">
+            <div className="space-y-4 rounded-xl border border-line bg-surface p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h2 className="text-base font-heading font-semibold">Workstations</h2>
-                  <p className="mt-1 text-xs leading-5 text-zinc-500">
+                  <p className="mt-1 text-xs leading-5 text-muted">
                     Each entry captures the bank-card width and (optionally) chin-rest distance and brightness floor. The active workstation's saved values let tests skip those calibration steps.
                   </p>
                 </div>
@@ -959,23 +959,23 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
               )}
 
               {screens.length > 0 && !wizard && (
-                <div className="divide-y divide-white/[0.06] overflow-hidden rounded-xl border border-white/[0.08]">
+                <div className="divide-y divide-line overflow-hidden rounded-xl border border-line">
                   {screens.map(screen => {
                     const isActive = screen.id === activeScreenId
                     const has = (val: number | undefined) => val != null
                     return (
                       <div
                         key={screen.id}
-                        className={`grid gap-3 px-3 py-3 sm:grid-cols-[1fr_auto] ${isActive ? 'bg-teal/10' : 'bg-white/[0.02]'}`}
+                        className={`grid gap-3 px-3 py-3 sm:grid-cols-[1fr_auto] ${isActive ? 'bg-teal/10' : 'bg-subtle'}`}
                       >
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                            <span className="font-medium text-white">{screen.label}</span>
+                            <span className="font-medium text-ink">{screen.label}</span>
                             {isActive && (
                               <span className="rounded-full border border-teal/25 bg-teal/10 px-2 py-0.5 text-[11px] text-teal">Active</span>
                             )}
                           </div>
-                          <p className="mt-1 text-xs text-zinc-400">
+                          <p className="mt-1 text-xs text-muted">
                             {screen.screenWidthPx}×{screen.screenHeightPx} px · card {screen.cardWidthPx.toFixed(0)} px
                             {has(screen.viewingDistanceCm) && ` · ${screen.viewingDistanceCm} cm`}
                             {has(screen.brightnessFloor) && ` · brightness ${(screen.brightnessFloor! * 100).toFixed(1)}%`}
@@ -986,7 +986,7 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                             <button
                               type="button"
                               onClick={() => handleActivateScreen(screen)}
-                              className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-zinc-100 transition-colors hover:bg-white/[0.08]"
+                              className="rounded-lg border border-line bg-subtle px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-subtle-2"
                             >
                               Make active
                             </button>
@@ -994,7 +994,7 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                           <button
                             type="button"
                             onClick={() => beginEditScreen(screen)}
-                            className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-zinc-100 transition-colors hover:bg-white/[0.08]"
+                            className="rounded-lg border border-line bg-subtle px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-subtle-2"
                           >
                             Recalibrate
                           </button>
@@ -1030,21 +1030,21 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                   for the currently-selected participant. The cross-
                   study list below covers every clinician's runs. */}
               {activeParticipant && (
-                <div className="space-y-3 rounded-xl border border-white/[0.08] bg-[#0b0b12]/80 p-4">
+                <div className="space-y-3 rounded-xl border border-line bg-surface p-4">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <h2 className="text-base font-heading font-semibold">Latest for {activeParticipant.label}</h2>
-                    <span className="text-xs text-zinc-500">{selectedResults.length} local result{selectedResults.length === 1 ? '' : 's'}</span>
+                    <span className="text-xs text-muted">{selectedResults.length} local result{selectedResults.length === 1 ? '' : 's'}</span>
                   </div>
                   {selectedResults.length === 0 ? (
-                    <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-6 text-center text-sm text-zinc-500">
+                    <div className="rounded-xl border border-line bg-subtle px-4 py-6 text-center text-sm text-muted">
                       No local runs tied to this participant yet — full study history is in the table below.
                     </div>
                   ) : (
-                    <div className="divide-y divide-white/[0.06] overflow-hidden rounded-xl border border-white/[0.08]">
+                    <div className="divide-y divide-line overflow-hidden rounded-xl border border-line">
                       {selectedResults.map(result => (
                         <div key={result.id} className="px-3 py-3">
-                          <div className="text-sm font-medium text-zinc-100">{resultSummary(result)}</div>
-                          <div className="mt-1 font-mono text-xs text-zinc-500">
+                          <div className="text-sm font-medium text-ink">{resultSummary(result)}</div>
+                          <div className="mt-1 font-mono text-xs text-muted">
                             {result.study?.sessionId ?? 'no-session'} · {result.id}
                           </div>
                         </div>
@@ -1056,11 +1056,11 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
 
               {/* Cross-study results — server-fetched, every study-
                   tagged run by any user. */}
-              <div className="space-y-4 rounded-xl border border-white/[0.08] bg-[#0b0b12]/80 p-4">
+              <div className="space-y-4 rounded-xl border border-line bg-surface p-4">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
                   <div>
                     <h2 className="text-base font-heading font-semibold">Study results</h2>
-                    <p className="text-xs text-zinc-500 mt-1">
+                    <p className="text-xs text-muted mt-1">
                       {filteredStudyResults.length} of {studyResults.length} study-tagged result{studyResults.length === 1 ? '' : 's'} match.
                     </p>
                   </div>
@@ -1076,7 +1076,7 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
 
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                   <label className="space-y-1">
-                    <span className="text-[11px] uppercase tracking-[0.08em] text-zinc-500">Study</span>
+                    <span className="text-[11px] uppercase tracking-[0.08em] text-muted">Study</span>
                     <select
                       className="input-field"
                       value={studyIdFilter}
@@ -1087,7 +1087,7 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                     </select>
                   </label>
                   <label className="space-y-1">
-                    <span className="text-[11px] uppercase tracking-[0.08em] text-zinc-500">Protocol</span>
+                    <span className="text-[11px] uppercase tracking-[0.08em] text-muted">Protocol</span>
                     <select
                       className="input-field"
                       value={protocolIdFilter}
@@ -1098,7 +1098,7 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                     </select>
                   </label>
                   <label className="space-y-1">
-                    <span className="text-[11px] uppercase tracking-[0.08em] text-zinc-500">Participant contains</span>
+                    <span className="text-[11px] uppercase tracking-[0.08em] text-muted">Participant contains</span>
                     <input
                       className="input-field"
                       value={participantFilter}
@@ -1107,7 +1107,7 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                     />
                   </label>
                   <label className="space-y-1">
-                    <span className="text-[11px] uppercase tracking-[0.08em] text-zinc-500">Session contains</span>
+                    <span className="text-[11px] uppercase tracking-[0.08em] text-muted">Session contains</span>
                     <input
                       className="input-field"
                       value={sessionFilter}
@@ -1118,12 +1118,12 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                 </div>
 
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <p className="text-xs text-zinc-500">
+                  <p className="text-xs text-muted">
                     OVFX export preserves study metadata for every result in the current filter.
                   </p>
                   <button
                     type="button"
-                    className="text-xs text-zinc-400 hover:text-white"
+                    className="text-xs text-muted hover:text-ink"
                     onClick={clearStudyFilters}
                   >
                     Clear filters
@@ -1142,7 +1142,7 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                         ? 'border-red-800/40 bg-red-900/20 text-red-300'
                         : studyResultsNotice.tone === 'success'
                           ? 'border-green-800/40 bg-green-900/20 text-green-300'
-                          : 'border-white/[0.08] bg-white/[0.03] text-zinc-300'
+                          : 'border-line bg-subtle text-body'
                     }`}
                   >
                     {studyResultsNotice.message}
@@ -1150,17 +1150,17 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                 )}
 
                 {studyResults.length === 0 && !studyResultsError ? (
-                  <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-6 text-center text-sm text-zinc-500">
+                  <div className="rounded-xl border border-line bg-subtle px-4 py-6 text-center text-sm text-muted">
                     No study-tagged results yet.
                   </div>
                 ) : filteredStudyResults.length === 0 ? (
-                  <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-6 text-center text-sm text-zinc-500">
+                  <div className="rounded-xl border border-line bg-subtle px-4 py-6 text-center text-sm text-muted">
                     No study results match the current filters.
                   </div>
                 ) : (
-                  <div className="overflow-x-auto rounded-xl border border-white/[0.08]">
+                  <div className="overflow-x-auto rounded-xl border border-line">
                     <table className="w-full text-sm text-left">
-                      <thead className="bg-white/[0.02] text-zinc-400 text-[11px] uppercase tracking-wider">
+                      <thead className="bg-subtle text-muted text-[11px] uppercase tracking-wider">
                         <tr>
                           <th className="px-3 py-3">Date</th>
                           <th className="px-3 py-3">Eye</th>
@@ -1172,36 +1172,36 @@ export function ClinicianPortal({ onBack, onStartTest }: Props) {
                           <th className="px-3 py-3">Duration</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-white/[0.06]">
+                      <tbody className="divide-y divide-line">
                         {filteredStudyResults.map(r => (
-                          <tr key={`${r.userId}-${r.id}`} className="hover:bg-white/[0.02]">
-                            <td className="px-3 py-2.5 text-zinc-300 whitespace-nowrap">
+                          <tr key={`${r.userId}-${r.id}`} className="hover:bg-subtle-2">
+                            <td className="px-3 py-2.5 text-body whitespace-nowrap">
                               {new Date(r.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
-                              <span className="text-zinc-600 ml-2">
+                              <span className="text-muted ml-2">
                                 {new Date(r.date).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
                               </span>
                             </td>
-                            <td className="px-3 py-2.5 text-zinc-300">{r.eye}</td>
-                            <td className="px-3 py-2.5 text-zinc-400">{r.testType ?? '—'}</td>
+                            <td className="px-3 py-2.5 text-body">{r.eye}</td>
+                            <td className="px-3 py-2.5 text-muted">{r.testType ?? '—'}</td>
                             <td className="px-3 py-2.5 text-xs">
-                              <div className="font-mono text-zinc-300">{r.studyId ?? '—'}</div>
-                              <div className="text-zinc-600">{r.sessionId ?? 'no-session'}</div>
+                              <div className="font-mono text-body">{r.studyId ?? '—'}</div>
+                              <div className="text-muted">{r.sessionId ?? 'no-session'}</div>
                             </td>
                             <td className="px-3 py-2.5 text-xs">
-                              <div className="font-mono text-zinc-300">{r.participantId ?? '—'}</div>
-                              <div className="text-zinc-600">
+                              <div className="font-mono text-body">{r.participantId ?? '—'}</div>
+                              <div className="text-muted">
                                 visit {r.visitId ?? '—'}{r.repeatIndex != null ? ` · repeat ${r.repeatIndex}` : ''}
                               </div>
                             </td>
                             <td className="px-3 py-2.5 text-xs">
-                              <div className="font-mono text-zinc-300">{r.protocolId ?? '—'}</div>
-                              <div className="text-zinc-600">v{r.protocolVersion ?? '—'}</div>
+                              <div className="font-mono text-body">{r.protocolId ?? '—'}</div>
+                              <div className="text-muted">v{r.protocolVersion ?? '—'}</div>
                             </td>
-                            <td className="px-3 py-2.5 font-mono text-xs text-zinc-400">
+                            <td className="px-3 py-2.5 font-mono text-xs text-muted">
                               <span className="text-green-400">{r.detectedPoints}</span>
-                              <span className="text-zinc-600">/{r.totalPoints}</span>
+                              <span className="text-muted">/{r.totalPoints}</span>
                             </td>
-                            <td className="px-3 py-2.5 font-mono text-xs text-zinc-400">
+                            <td className="px-3 py-2.5 font-mono text-xs text-muted">
                               {r.durationSeconds != null ? `${Math.floor(r.durationSeconds / 60)}m ${(r.durationSeconds % 60).toString().padStart(2, '0')}s` : '—'}
                             </td>
                           </tr>
@@ -1233,13 +1233,13 @@ function SummaryRow({ label, value, valueHint, action, onAction, optional }: Sum
   return (
     <div className={`rounded-xl border px-3 py-3 ${
       hasValue
-        ? 'border-white/[0.08] bg-white/[0.02]'
+        ? 'border-line bg-subtle'
         : optional
-          ? 'border-white/[0.06] bg-white/[0.015]'
+          ? 'border-line bg-white/[0.015]'
           : 'border-amber-500/20 bg-amber-500/10'
     }`}>
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-500">{label}</span>
+        <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted">{label}</span>
         <button
           type="button"
           onClick={onAction}
@@ -1251,11 +1251,11 @@ function SummaryRow({ label, value, valueHint, action, onAction, optional }: Sum
       <div className="mt-1.5 min-h-[2.5rem]">
         {hasValue ? (
           <>
-            <p className="text-sm font-medium text-white truncate">{value}</p>
-            {valueHint && <p className="mt-0.5 text-[11px] text-zinc-500 truncate">{valueHint}</p>}
+            <p className="text-sm font-medium text-ink truncate">{value}</p>
+            {valueHint && <p className="mt-0.5 text-[11px] text-muted truncate">{valueHint}</p>}
           </>
         ) : (
-          <p className={`text-sm ${optional ? 'text-zinc-500' : 'text-amber-200'}`}>
+          <p className={`text-sm ${optional ? 'text-muted' : 'text-amber-200'}`}>
             {valueHint ?? (optional ? 'Optional' : 'Not selected')}
           </p>
         )}
@@ -1287,13 +1287,13 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
   }
   const speedOptions: RunSpeedMode[] = ['slow', 'normal']
   return (
-    <div className="space-y-3 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+    <div className="space-y-3 rounded-xl border border-line bg-subtle p-4">
       <div className="flex items-center justify-between gap-3">
-        <p className="text-xs font-medium uppercase tracking-[0.12em] text-zinc-400">New protocol</p>
+        <p className="text-xs font-medium uppercase tracking-[0.12em] text-muted">New protocol</p>
         <button
           type="button"
           onClick={onCancel}
-          className="text-xs text-zinc-400 underline decoration-dotted hover:text-zinc-200"
+          className="text-xs text-muted underline decoration-dotted hover:text-body"
         >
           cancel
         </button>
@@ -1301,7 +1301,7 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
 
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="block space-y-1 sm:col-span-2">
-          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-400">Label</span>
+          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Label</span>
           <input
             value={draft.label}
             onChange={e => set('label', e.target.value)}
@@ -1310,7 +1310,7 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
           />
         </label>
         <label className="block space-y-1">
-          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-400">Study ID</span>
+          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Study ID</span>
           <input
             value={draft.studyId}
             onChange={e => set('studyId', e.target.value)}
@@ -1319,7 +1319,7 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
           />
         </label>
         <label className="block space-y-1">
-          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-400">Test type</span>
+          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Test type</span>
           <div className="flex gap-1">
             {(['goldmann', 'static'] as const).map(value => {
               const selected = draft.testType === value
@@ -1330,8 +1330,8 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
                   onClick={() => onChange({ ...draft, testType: value })}
                   className={`flex-1 rounded-lg border px-3 py-2 text-xs font-semibold transition-colors ${
                     selected
-                      ? 'border-accent/60 bg-accent/15 text-white'
-                      : 'border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:bg-white/[0.06]'
+                      ? 'border-accent/60 bg-accent/15 text-accent'
+                      : 'border-line bg-subtle text-body hover:bg-subtle-2'
                   }`}
                 >
                   {value === 'goldmann' ? 'Goldmann' : 'Static'}
@@ -1341,7 +1341,7 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
           </div>
         </label>
         <label className="block space-y-1">
-          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-400">Speed</span>
+          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Speed</span>
           <div className="flex gap-1">
             {speedOptions.map(value => {
               const selected = draft.speedMode === value
@@ -1352,8 +1352,8 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
                   onClick={() => set('speedMode', value)}
                   className={`flex-1 rounded-lg border px-3 py-2 text-xs font-semibold capitalize transition-colors ${
                     selected
-                      ? 'border-accent/60 bg-accent/15 text-white'
-                      : 'border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:bg-white/[0.06]'
+                      ? 'border-accent/60 bg-accent/15 text-accent'
+                      : 'border-line bg-subtle text-body hover:bg-subtle-2'
                   }`}
                 >
                   {value}
@@ -1363,7 +1363,7 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
           </div>
         </label>
         {draft.testType === 'goldmann' && (
-          <label className="flex items-center gap-2 sm:col-span-2 text-sm text-zinc-300">
+          <label className="flex items-center gap-2 sm:col-span-2 text-sm text-body">
             <input
               type="checkbox"
               checked={draft.extendedField}
@@ -1375,7 +1375,7 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
         )}
         {draft.testType === 'static' && (
           <label className="block space-y-1 sm:col-span-2">
-            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-400">Static grid</span>
+            <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Static grid</span>
             <select
               value={draft.staticGridPattern}
               onChange={e => set('staticGridPattern', e.target.value as StudyProfile['staticGridPattern'])}
@@ -1388,7 +1388,7 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
           </label>
         )}
         <label className="block space-y-1 sm:col-span-2">
-          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-400">Notes (optional)</span>
+          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Notes (optional)</span>
           <textarea
             value={draft.notes}
             onChange={e => set('notes', e.target.value)}
@@ -1397,7 +1397,7 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
           />
         </label>
         <div className="sm:col-span-2 space-y-2">
-          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-400">
+          <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">
             Advanced settings
           </span>
           <div className="flex gap-1">
@@ -1416,8 +1416,8 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
                   onClick={() => set('advancedMode', mode)}
                   className={`flex-1 rounded-lg border px-3 py-2 text-xs font-semibold transition-colors ${
                     selected
-                      ? 'border-accent/60 bg-accent/15 text-white'
-                      : 'border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:bg-white/[0.06]'
+                      ? 'border-accent/60 bg-accent/15 text-accent'
+                      : 'border-line bg-subtle text-body hover:bg-subtle-2'
                   }`}
                 >
                   {label}
@@ -1425,7 +1425,7 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
               )
             })}
           </div>
-          <p className="text-[11px] text-zinc-500">
+          <p className="text-[11px] text-muted">
             {draft.advancedMode === 'defaults' && 'Built-in defaults for timings, fixation alert, and catch trials.'}
             {draft.advancedMode === 'current' && 'Bakes in your current advanced settings (timings, fixation alert, catch trials).'}
             {draft.advancedMode === 'manual' && 'Set each option below. Seeded from your current settings.'}
@@ -1445,7 +1445,7 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
         <button
           type="button"
           onClick={onCancel}
-          className="rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-zinc-100 transition-colors hover:bg-white/[0.08]"
+          className="rounded-xl border border-line bg-subtle px-4 py-2.5 text-sm font-medium text-ink transition-colors hover:bg-subtle-2"
         >
           Cancel
         </button>
@@ -1455,7 +1455,7 @@ function ProtocolForm({ draft, onChange, onCancel, onSubmit }: ProtocolFormProps
           disabled={draft.label.trim().length === 0}
           className={`rounded-xl px-4 py-2.5 text-sm font-semibold transition-colors ${
             draft.label.trim().length === 0
-              ? 'cursor-not-allowed bg-white/[0.06] text-zinc-500'
+              ? 'cursor-not-allowed bg-subtle-2 text-muted'
               : 'bg-accent text-white hover:bg-accent-light'
           }`}
         >
@@ -1482,7 +1482,7 @@ function ManualAdvancedEditor({ value, testType, onChange }: ManualAdvancedEdito
   ) => onChange({ ...value, speedPreset: { ...value.speedPreset, [field]: n } })
 
   return (
-    <div className="sm:col-span-2 space-y-3 rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs text-zinc-400">
+    <div className="sm:col-span-2 space-y-3 rounded-lg border border-line bg-subtle p-3 text-xs text-muted">
       <label className="flex items-center gap-2 cursor-pointer select-none">
         <input
           type="checkbox"
@@ -1490,7 +1490,7 @@ function ManualAdvancedEditor({ value, testType, onChange }: ManualAdvancedEdito
           onChange={e => update('initialBlindspotCheck', e.target.checked)}
           className="h-3.5 w-3.5 rounded accent-indigo-400"
         />
-        <span className="text-zinc-300">Blindspot check before test</span>
+        <span className="text-body">Blindspot check before test</span>
       </label>
 
       {testType === 'goldmann' && (
@@ -1501,7 +1501,7 @@ function ManualAdvancedEditor({ value, testType, onChange }: ManualAdvancedEdito
             onChange={e => update('measureReactionTime', e.target.checked)}
             className="h-3.5 w-3.5 rounded accent-indigo-400"
           />
-          <span className="text-zinc-300">Measure reaction time (Goldmann calibration)</span>
+          <span className="text-body">Measure reaction time (Goldmann calibration)</span>
         </label>
       )}
 
@@ -1513,12 +1513,12 @@ function ManualAdvancedEditor({ value, testType, onChange }: ManualAdvancedEdito
             onChange={e => update('catchTrialsEnabled', e.target.checked)}
             className="h-3.5 w-3.5 rounded accent-indigo-400"
           />
-          <span className="text-zinc-300">Blindspot catch trials</span>
+          <span className="text-body">Blindspot catch trials</span>
         </label>
         {value.catchTrialsEnabled && (
           <label className="block pl-5 space-y-1">
-            <span className="text-zinc-400">
-              Cadence <span className="text-zinc-500">(1 catch trial every N presentations)</span>
+            <span className="text-muted">
+              Cadence <span className="text-muted">(1 catch trial every N presentations)</span>
             </span>
             <input
               type="number"
@@ -1529,7 +1529,7 @@ function ManualAdvancedEditor({ value, testType, onChange }: ManualAdvancedEdito
                 const n = Number(e.target.value)
                 if (Number.isInteger(n) && n >= 1 && n <= 50) update('catchTrialEveryN', n)
               }}
-              className="w-24 rounded border border-white/[0.08] bg-base px-2 py-1 font-mono text-white"
+              className="w-24 rounded border border-line bg-surface px-2 py-1 font-mono text-ink"
             />
           </label>
         )}
@@ -1537,7 +1537,7 @@ function ManualAdvancedEditor({ value, testType, onChange }: ManualAdvancedEdito
 
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="block space-y-1">
-          <span className="block text-zinc-300">Fixation-alert duration <span className="text-zinc-500">(ms; 0 = off)</span></span>
+          <span className="block text-body">Fixation-alert duration <span className="text-muted">(ms; 0 = off)</span></span>
           <input
             type="number"
             min={0}
@@ -1548,23 +1548,23 @@ function ManualAdvancedEditor({ value, testType, onChange }: ManualAdvancedEdito
               const n = Number(e.target.value)
               if (Number.isInteger(n) && n >= 0 && n <= 5000) update('fixationAlertMs', n)
             }}
-            className="w-24 rounded border border-white/[0.08] bg-base px-2 py-1 font-mono text-white"
+            className="w-24 rounded border border-line bg-surface px-2 py-1 font-mono text-ink"
           />
         </label>
         <label className="block space-y-1">
-          <span className="block text-zinc-300">Fixation-alert message</span>
+          <span className="block text-body">Fixation-alert message</span>
           <input
             type="text"
             maxLength={200}
             value={value.fixationAlertMessage}
             onChange={e => update('fixationAlertMessage', e.target.value)}
-            className="w-full rounded border border-white/[0.08] bg-base px-2 py-1 text-white"
+            className="w-full rounded border border-line bg-surface px-2 py-1 text-ink"
           />
         </label>
       </div>
 
       <fieldset className="space-y-1">
-        <legend className="text-zinc-300">Background shade</legend>
+        <legend className="text-body">Background shade</legend>
         <div className="flex gap-3 pt-1">
           {(['dark', 'medium', 'light'] as const).map(shade => (
             <label key={shade} className="flex items-center gap-1.5 capitalize">
@@ -1594,12 +1594,12 @@ function ManualAdvancedEditor({ value, testType, onChange }: ManualAdvancedEdito
               })}
               className="accent-amber-500"
             />
-            <span className="text-zinc-300">Override speed-preset timings (Static)</span>
+            <span className="text-body">Override speed-preset timings (Static)</span>
           </label>
           <div className="grid grid-cols-2 gap-2 pl-6">
             {(['stimulusMs', 'responseMs', 'gapMinMs', 'gapMaxMs'] as const).map(f => (
               <label key={f} className="space-y-1">
-                <span className="block text-[11px] text-zinc-400">{f}</span>
+                <span className="block text-[11px] text-muted">{f}</span>
                 <input
                   type="number"
                   min={0}
@@ -1611,7 +1611,7 @@ function ManualAdvancedEditor({ value, testType, onChange }: ManualAdvancedEdito
                     const n = Number(e.target.value)
                     if (Number.isInteger(n) && n >= 0 && n <= 5000) updateSpeed(f, n)
                   }}
-                  className="w-full rounded border border-white/[0.08] bg-base px-2 py-1 font-mono text-white disabled:opacity-50"
+                  className="w-full rounded border border-line bg-surface px-2 py-1 font-mono text-ink disabled:opacity-50"
                 />
               </label>
             ))}
@@ -1646,15 +1646,15 @@ function ScreenSetupWizard({ step, draft, onCancel, onAdvance, onFinish }: Scree
   const stepNumber = step === 'card' ? 1 : step === 'distance' ? 2 : step === 'brightness' ? 3 : 4
 
   return (
-    <div className="space-y-4 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+    <div className="space-y-4 rounded-xl border border-line bg-subtle p-4">
       <div className="flex items-center justify-between gap-3">
-        <p className="text-xs font-medium uppercase tracking-[0.12em] text-zinc-400">
+        <p className="text-xs font-medium uppercase tracking-[0.12em] text-muted">
           {draft.editingId ? 'Recalibrate workstation' : 'New workstation'} · step {stepNumber} of 4
         </p>
         <button
           type="button"
           onClick={onCancel}
-          className="text-xs text-zinc-400 underline decoration-dotted hover:text-zinc-200"
+          className="text-xs text-muted underline decoration-dotted hover:text-body"
         >
           cancel
         </button>
@@ -1663,7 +1663,7 @@ function ScreenSetupWizard({ step, draft, onCancel, onAdvance, onFinish }: Scree
       {step === 'card' && (
         <div className="space-y-3">
           <h3 className="text-base font-heading font-semibold">Screen size</h3>
-          <p className="text-sm text-zinc-400">
+          <p className="text-sm text-muted">
             Hold a bank card flat against the screen and drag the slider until the rectangle exactly matches the card.
           </p>
           <div className="flex justify-center">
@@ -1701,10 +1701,10 @@ function ScreenSetupWizard({ step, draft, onCancel, onAdvance, onFinish }: Scree
       {step === 'distance' && (
         <div className="space-y-3">
           <h3 className="text-base font-heading font-semibold">Viewing distance</h3>
-          <p className="text-sm text-zinc-400">
+          <p className="text-sm text-muted">
             If this workstation has a fixed chin-rest distance, save it here. Otherwise the per-test calibration will still prompt for distance.
           </p>
-          <label className="flex items-center gap-2 text-sm text-zinc-300">
+          <label className="flex items-center gap-2 text-sm text-body">
             <input
               type="checkbox"
               checked={skipDistance}
@@ -1725,14 +1725,14 @@ function ScreenSetupWizard({ step, draft, onCancel, onAdvance, onFinish }: Scree
                 className="input-field w-28"
                 placeholder="50"
               />
-              <span className="text-sm text-zinc-400">cm</span>
+              <span className="text-sm text-muted">cm</span>
             </div>
           )}
           <div className="flex justify-between gap-2">
             <button
               type="button"
               onClick={() => onAdvance('card')}
-              className="rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-zinc-100 transition-colors hover:bg-white/[0.08]"
+              className="rounded-xl border border-line bg-subtle px-4 py-2.5 text-sm font-medium text-ink transition-colors hover:bg-subtle-2"
             >
               Back
             </button>
@@ -1753,10 +1753,10 @@ function ScreenSetupWizard({ step, draft, onCancel, onAdvance, onFinish }: Scree
       {step === 'brightness' && (
         <div className="space-y-3">
           <h3 className="text-base font-heading font-semibold">Brightness floor</h3>
-          <p className="text-sm text-zinc-400">
+          <p className="text-sm text-muted">
             If the room lighting and monitor brightness are controlled, save the dimmest visible dot here. Otherwise leave the toggle on and each test will prompt.
           </p>
-          <label className="flex items-center gap-2 text-sm text-zinc-300">
+          <label className="flex items-center gap-2 text-sm text-body">
             <input
               type="checkbox"
               checked={skipBrightness}
@@ -1767,12 +1767,15 @@ function ScreenSetupWizard({ step, draft, onCancel, onAdvance, onFinish }: Scree
           </label>
           {!skipBrightness && (
             <div className="space-y-3">
-              <div className="relative w-full h-32 bg-base rounded-xl border border-white/[0.06] flex items-center justify-center">
+              {/* Dark preview box: the dot is semi-transparent white, so a
+                  light background would make it invisible (mirrors the dim
+                  test surface). */}
+              <div className="relative w-full h-32 bg-black rounded-xl border border-slate-800 flex items-center justify-center">
                 <div
                   className="w-3 h-3 rounded-full"
                   style={{ backgroundColor: `rgba(255, 255, 255, ${brightness})` }}
                 />
-                <span className="absolute top-2 right-3 text-xs text-zinc-500 font-mono">
+                <span className="absolute top-2 right-3 text-xs text-muted font-mono">
                   {(brightness * 100).toFixed(1)}%
                 </span>
               </div>
@@ -1792,7 +1795,7 @@ function ScreenSetupWizard({ step, draft, onCancel, onAdvance, onFinish }: Scree
             <button
               type="button"
               onClick={() => onAdvance('distance')}
-              className="rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-zinc-100 transition-colors hover:bg-white/[0.08]"
+              className="rounded-xl border border-line bg-subtle px-4 py-2.5 text-sm font-medium text-ink transition-colors hover:bg-subtle-2"
             >
               Back
             </button>
@@ -1812,7 +1815,7 @@ function ScreenSetupWizard({ step, draft, onCancel, onAdvance, onFinish }: Scree
       {step === 'name' && (
         <div className="space-y-3">
           <h3 className="text-base font-heading font-semibold">Name this workstation</h3>
-          <p className="text-sm text-zinc-400">
+          <p className="text-sm text-muted">
             Give it a label so you can tell it apart from other workstations (e.g. "Clinic A · Station 3").
           </p>
           <input
@@ -1821,16 +1824,16 @@ function ScreenSetupWizard({ step, draft, onCancel, onAdvance, onFinish }: Scree
             className="input-field"
             placeholder="Workstation name"
           />
-          <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 text-xs text-zinc-400 space-y-1">
-            <p>Card width: <span className="text-zinc-100 font-mono">{draft.cardWidthPx.toFixed(0)} px</span></p>
-            <p>Distance: {draft.viewingDistanceCm != null ? <span className="text-zinc-100 font-mono">{draft.viewingDistanceCm} cm</span> : <span className="text-zinc-500">per-test</span>}</p>
-            <p>Brightness: {draft.brightnessFloor != null ? <span className="text-zinc-100 font-mono">{(draft.brightnessFloor * 100).toFixed(1)}%</span> : <span className="text-zinc-500">per-test</span>}</p>
+          <div className="rounded-xl border border-line bg-subtle p-3 text-xs text-muted space-y-1">
+            <p>Card width: <span className="text-ink font-mono">{draft.cardWidthPx.toFixed(0)} px</span></p>
+            <p>Distance: {draft.viewingDistanceCm != null ? <span className="text-ink font-mono">{draft.viewingDistanceCm} cm</span> : <span className="text-muted">per-test</span>}</p>
+            <p>Brightness: {draft.brightnessFloor != null ? <span className="text-ink font-mono">{(draft.brightnessFloor * 100).toFixed(1)}%</span> : <span className="text-muted">per-test</span>}</p>
           </div>
           <div className="flex justify-between gap-2">
             <button
               type="button"
               onClick={() => onAdvance('brightness')}
-              className="rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 py-2.5 text-sm font-medium text-zinc-100 transition-colors hover:bg-white/[0.08]"
+              className="rounded-xl border border-line bg-subtle px-4 py-2.5 text-sm font-medium text-ink transition-colors hover:bg-subtle-2"
             >
               Back
             </button>
@@ -1840,7 +1843,7 @@ function ScreenSetupWizard({ step, draft, onCancel, onAdvance, onFinish }: Scree
               disabled={label.trim().length === 0}
               className={`rounded-xl px-4 py-2.5 text-sm font-semibold transition-colors ${
                 label.trim().length === 0
-                  ? 'cursor-not-allowed bg-white/[0.06] text-zinc-500'
+                  ? 'cursor-not-allowed bg-subtle-2 text-muted'
                   : 'bg-accent text-white hover:bg-accent-light'
               }`}
             >

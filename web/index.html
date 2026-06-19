@@ -2,10 +2,37 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233b82f6' stroke-width='1.5'><circle cx='12' cy='12' r='10'/><circle cx='12' cy='12' r='6'/><circle cx='12' cy='12' r='2'/></svg>" />
+    <!-- Safari ignores inline data-URI SVG favicons, so ship real files.
+         .ico/.png are what Safari actually renders in the tab; the SVG is for
+         Chrome/Firefox and apple-touch-icon covers iOS/macOS bookmarks. -->
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="description" content="Free visual field self-test — Goldmann kinetic perimetry at home. Track your peripheral vision over time." />
-    <meta name="theme-color" content="#08080d" />
+    <!-- theme-color is updated by the no-flash script below (and by theme.ts at
+         runtime) to match the resolved theme; the default covers the no-JS case. -->
+    <meta name="theme-color" content="#f4f7fb" />
+    <!-- Resolve the saved theme preference to a concrete light|dark value and
+         apply it before first paint, so a dark-mode user never sees a white flash.
+         The theme-color meta above is already parsed, so we can sync it here too
+         to avoid a wrong-colored mobile status bar before React mounts. -->
+    <script>
+      (function () {
+        try {
+          var pref = localStorage.getItem('vfc-theme') || 'system';
+          var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var dark = pref === 'dark' || (pref === 'system' && prefersDark);
+          var t = dark ? 'dark' : 'light';
+          document.documentElement.dataset.theme = t;
+          document.documentElement.style.colorScheme = t;
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute('content', dark ? '#0b1220' : '#f4f7fb');
+        } catch (e) {}
+      })();
+    </script>
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 

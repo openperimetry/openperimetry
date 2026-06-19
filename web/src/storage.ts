@@ -9,13 +9,18 @@ const DEVICE_ID_KEY = 'goldmann-vf-device-id'
 // Tombstone set — IDs the user explicitly deleted locally. Lives here
 // because the server's mergeFromServer step would otherwise re-import
 // any server record that doesn't exist locally, silently undoing the
-// delete the moment the next sync runs. We hold tombstones until the
-// server confirms the corresponding DELETE; the auth-context sync
-// path tries to clear them on every sync and drops the tombstone on
-// 204 (or 404, meaning already gone). This is the only mechanism
-// keeping deletes durable when the server-delete network call drops
-// or 5xxs, which is exactly when the user previously saw "deleted
-// results come back".
+// delete the moment the next sync runs.
+//
+// Tombstones are PERMANENT — we never remove them. An earlier design
+// cleared a tombstone as soon as the server DELETE returned 204, but
+// that raced against an in-flight mergeFromServer that had snapshotted
+// the server list *before* the delete propagated: the stale merge would
+// re-import the row locally (and the next push would re-create it
+// server-side), which is exactly the "deleted results come back after
+// refresh" bug. Because result IDs are always fresh UUIDs (real tests
+// and OVFX imports alike), a permanent tombstone can never wrongly block
+// a legitimate record, so keeping them forever is both correct and
+// trivially cheap (a few dozen bytes per deleted result).
 const TOMBSTONES_KEY = 'goldmann-vf-tombstones'
 // Single device-level flag tracking whether the feedback modal has
 // already been shown. We only ask once per device across both
@@ -121,15 +126,16 @@ export function saveResult(result: TestResult): void {
 export function deleteResult(id: string): void {
   const results = getResults().filter(r => r.id !== id)
   localStorage.setItem(STORAGE_KEY, JSON.stringify(results))
-  // Tombstone the id so the next mergeFromServer doesn't quietly
-  // re-import it from the server copy. The auth context's sync loop
-  // will retry the server-side DELETE until the server agrees, then
-  // clear the tombstone.
+  // Tombstone the id so no future mergeFromServer re-imports it from the
+  // server copy. The auth-context sync loop retries the server-side
+  // DELETE until the server agrees; the tombstone stays forever so the
+  // delete survives even if that DELETE is still in flight at refresh.
   addTombstone(id)
 }
 
-/** Tombstone API — IDs the user has deleted but where the server
- *  may not yet have caught up. mergeFromServer respects these. */
+/** Tombstone API — IDs the user has deleted. Permanent (never cleared);
+ *  mergeFromServer always filters these out so a deleted result can
+ *  never be resurrected by a stale server snapshot. */
 export function getTombstones(): string[] {
   if (typeof localStorage === 'undefined') return []
   const raw = localStorage.getItem(TOMBSTONES_KEY)
@@ -147,12 +153,6 @@ export function addTombstone(id: string): void {
   const current = new Set(getTombstones())
   current.add(id)
   localStorage.setItem(TOMBSTONES_KEY, JSON.stringify([...current]))
-}
-
-export function removeTombstone(id: string): void {
-  if (typeof localStorage === 'undefined') return
-  const remaining = getTombstones().filter(x => x !== id)
-  localStorage.setItem(TOMBSTONES_KEY, JSON.stringify(remaining))
 }
 
 /**
@@ -188,6 +188,24 @@ export function syncToServer(): VFResultRecord[] {
     date: r.date,
     data: JSON.stringify(r),
   }))
+}
+
+/** Apply the server's authoritative set of deleted result IDs.
+ *  Deletions made on another device only live as a server-side tombstone;
+ *  this device may still hold the result locally with no local tombstone,
+ *  so without this it would keep showing the result and even re-push it on
+ *  the next sync. We mirror each server tombstone locally (so we never
+ *  re-upload it) and drop any local copy. Returns true if anything
+ *  changed, so callers can refresh their view. */
+export function applyServerDeletions(deletedIds: string[]): boolean {
+  if (!persistenceEnabled || deletedIds.length === 0) return false
+  const del = new Set(deletedIds)
+  for (const id of deletedIds) addTombstone(id)
+  const local = getResults()
+  const remaining = local.filter(r => !del.has(r.id))
+  if (remaining.length === local.length) return false
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(remaining))
+  return true
 }
 
 /** Merge server results into localStorage (adds any missing ones).

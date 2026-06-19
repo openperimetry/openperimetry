@@ -9,17 +9,17 @@ export function PrivacyPage({ onBack }: Props) {
   const emailLink = HAS_SUPPORT_EMAIL ? (
     <a href={`mailto:${SUPPORT_EMAIL}`} className="text-accent hover:text-accent-light underline">{SUPPORT_EMAIL}</a>
   ) : (
-    <span className="text-zinc-400">your deployment's support address</span>
+    <span className="text-muted">your deployment's support address</span>
   )
   return (
-    <main className="min-h-[100dvh] bg-base text-white safe-pad p-6 animate-page-in">
+    <main className="min-h-[100dvh] bg-base text-body safe-pad p-6 animate-page-in">
       <div className="max-w-3xl mx-auto space-y-8 pb-12">
-        <div className="flex items-center justify-between pb-5 border-b border-white/[0.06]">
+        <div className="flex items-center justify-between pb-5 border-b border-line">
           <h1 className="text-3xl font-heading font-bold">Privacy Policy</h1>
           <BackButton onClick={onBack} label="Home" />
         </div>
 
-        <p className="text-zinc-500 text-sm leading-relaxed">
+        <p className="text-muted text-sm leading-relaxed">
           Last updated: April 2026
         </p>
 
@@ -35,7 +35,7 @@ export function PrivacyPage({ onBack }: Props) {
           <Section title="What data I collect">
             <Subsection title="Without an account">
               <ul className="list-disc list-inside space-y-1">
-                <li>Test results are stored <strong className="text-white">only in your browser</strong> (localStorage). Sign in to sync them to the cloud across devices.</li>
+                <li>Test results are stored <strong className="text-ink">only in your browser</strong> (localStorage). Sign in to sync them to the cloud across devices.</li>
                 <li>Calibration data (screen size, viewing distance, brightness) stays local.</li>
                 <li>
                   Anonymous usage events (test started / completed / aborted, page views, PDF exports) are sent to my server tagged with a random device ID generated in your browser. These include summary stats &mdash; total points, detected count, test duration, and for threshold tests the distribution of measured dB values &mdash; to help me see whether the tool is working. They expire after 90 days and contain no name, email, or IP.
@@ -45,10 +45,10 @@ export function PrivacyPage({ onBack }: Props) {
             </Subsection>
             <Subsection title="With an account">
               <ul className="list-disc list-inside space-y-1">
-                <li><strong className="text-white">Email address</strong> &mdash; for login and password reset.</li>
-                <li><strong className="text-white">Display name</strong> &mdash; shown in the app, optional.</li>
-                <li><strong className="text-white">Password</strong> &mdash; stored as a salted hash (scrypt). I never see your actual password.</li>
-                <li><strong className="text-white">Visual field results</strong> &mdash; synced to the cloud only when you sign in, so you can access them across devices.</li>
+                <li><strong className="text-ink">Email address</strong> &mdash; for login and password reset.</li>
+                <li><strong className="text-ink">Display name</strong> &mdash; shown in the app, optional.</li>
+                <li><strong className="text-ink">Password</strong> &mdash; stored as a salted hash (scrypt). I never see your actual password.</li>
+                <li><strong className="text-ink">Visual field results</strong> &mdash; synced to the cloud only when you sign in, so you can access them across devices.</li>
               </ul>
             </Subsection>
             <Subsection title="Contact form">
@@ -120,8 +120,8 @@ export function PrivacyPage({ onBack }: Props) {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="space-y-3">
-      <h2 className="text-lg font-heading font-bold text-white">{title}</h2>
-      <div className="text-sm text-zinc-300 leading-relaxed space-y-3">{children}</div>
+      <h2 className="text-lg font-heading font-bold text-ink">{title}</h2>
+      <div className="text-sm text-body leading-relaxed space-y-3">{children}</div>
     </div>
   )
 }
@@ -129,7 +129,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function Subsection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="space-y-2">
-      <h3 className="text-sm font-medium text-zinc-200">{title}</h3>
+      <h3 className="text-sm font-medium text-body">{title}</h3>
       {children}
     </div>
   )

@@ -100,7 +100,7 @@ export function HeadGuide({ eye, viewingDistanceCm, compact = false, mode = 'des
           </text>
         </svg>
         {!compact && (
-          <p className="text-xs text-gray-500 text-center">
+          <p className="text-xs text-muted text-center">
             Rest your elbows on the desk and hold the phone {viewingDistanceCm} cm from your eye.
             Cover your {coveredEye} eye and look straight at the yellow dot.
           </p>
@@ -169,7 +169,7 @@ export function HeadGuide({ eye, viewingDistanceCm, compact = false, mode = 'des
         </text>
       </svg>
       {!compact && (
-        <p className="text-xs text-gray-500 text-center">
+        <p className="text-xs text-muted text-center">
           Sit {viewingDistanceCm} cm from the screen.
           Cover your {coveredEye} eye and look straight at the yellow dot.
         </p>

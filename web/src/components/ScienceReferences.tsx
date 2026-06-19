@@ -334,14 +334,14 @@ export function ScienceReferences({ onBack }: Props) {
   const togglePaper = (key: string) => setExpandedKey(expandedKey === key ? null : key)
 
   return (
-    <main className="min-h-[100dvh] bg-base text-white safe-pad p-6 animate-page-in">
+    <main className="min-h-[100dvh] bg-base text-body safe-pad p-6 animate-page-in">
       <div className="max-w-3xl mx-auto space-y-8 pb-12">
-        <div className="flex items-center justify-between pb-5 border-b border-white/[0.06]">
+        <div className="flex items-center justify-between pb-5 border-b border-line">
           <h1 className="text-3xl font-heading font-bold">Scientific References</h1>
           <BackButton onClick={onBack} label="Home" />
         </div>
 
-        <p className="text-zinc-400 text-sm leading-relaxed">
+        <p className="text-muted text-sm leading-relaxed">
           Key scientific papers on visual field testing, scotoma patterns, and disease progression in retinitis pigmentosa.
           These references provide the clinical basis for the testing methodology used in this app.
         </p>
@@ -350,8 +350,8 @@ export function ScienceReferences({ onBack }: Props) {
         {PAPER_GROUPS.map(group => (
           <div key={group.id} className="space-y-3">
             <div>
-              <h3 className="text-lg font-heading font-semibold text-zinc-200">{group.label}</h3>
-              <p className="text-xs text-zinc-500 mt-0.5">{group.description}</p>
+              <h3 className="text-lg font-heading font-semibold text-body">{group.label}</h3>
+              <p className="text-xs text-muted mt-0.5">{group.description}</p>
             </div>
             {group.papers.map((p, i) => {
               const key = `${group.id}-${i}`
@@ -360,22 +360,22 @@ export function ScienceReferences({ onBack }: Props) {
                 <button
                   key={key}
                   onClick={() => togglePaper(key)}
-                  className="w-full text-left bg-surface hover:bg-elevated rounded-2xl px-4 py-3 transition-all border border-white/[0.06] hover:border-white/[0.1]"
+                  className="w-full text-left bg-surface hover:bg-elevated rounded-2xl px-4 py-3 transition-all border border-line hover:border-line"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <p className="text-sm text-white font-medium leading-snug">{p.title}</p>
-                      <p className="text-xs text-zinc-500 mt-1">
-                        {p.authors} — <span className="text-zinc-600">{p.journal} ({p.year})</span>
+                      <p className="text-sm text-ink font-medium leading-snug">{p.title}</p>
+                      <p className="text-xs text-muted mt-1">
+                        {p.authors} — <span className="text-muted">{p.journal} ({p.year})</span>
                       </p>
                     </div>
-                    <span className={`text-zinc-600 text-xs shrink-0 mt-1 transition-transform ${isExpanded ? 'rotate-90' : ''}`}>
+                    <span className={`text-muted text-xs shrink-0 mt-1 transition-transform ${isExpanded ? 'rotate-90' : ''}`}>
                       &#9654;
                     </span>
                   </div>
                   {isExpanded && (
-                    <div className="mt-3 pt-3 border-t border-white/[0.06] space-y-2">
-                      <p className="text-sm text-zinc-300 leading-relaxed">{p.summary}</p>
+                    <div className="mt-3 pt-3 border-t border-line space-y-2">
+                      <p className="text-sm text-body leading-relaxed">{p.summary}</p>
                       {p.doi && (
                         <a
                           href={`https://doi.org/${p.doi}`}
@@ -408,26 +408,26 @@ export function ScienceReferences({ onBack }: Props) {
 
         {/* Links */}
         <div className="space-y-3">
-          <h3 className="text-lg font-heading font-semibold text-zinc-200">Useful resources</h3>
+          <h3 className="text-lg font-heading font-semibold text-body">Useful resources</h3>
           {LINKS.map((link, i) => (
             <a
               key={i}
               href={link.url}
               target="_blank"
               rel="noopener noreferrer"
-              className="block bg-surface hover:bg-elevated rounded-2xl px-4 py-3 transition-all border border-white/[0.06] hover:border-white/[0.1]"
+              className="block bg-surface hover:bg-elevated rounded-2xl px-4 py-3 transition-all border border-line hover:border-line"
             >
               <div className="flex items-center justify-between">
                 <span className="text-sm text-accent font-medium">{link.label}</span>
-                <span className="text-zinc-600 text-xs">&rarr;</span>
+                <span className="text-muted text-xs">&rarr;</span>
               </div>
-              <p className="text-xs text-zinc-500 mt-1">{link.description}</p>
+              <p className="text-xs text-muted mt-1">{link.description}</p>
             </a>
           ))}
         </div>
 
         {/* Disclaimer */}
-        <p className="text-xs text-zinc-600 leading-relaxed">
+        <p className="text-xs text-muted leading-relaxed">
           This reference list is not exhaustive. Papers were selected for their foundational importance to the field of RP visual field testing.
           Always consult your ophthalmologist for clinical decisions.
         </p>

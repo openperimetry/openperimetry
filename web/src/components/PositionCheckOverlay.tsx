@@ -19,7 +19,7 @@
 // they're already positioned; the check runs in-place instead of mid-
 // calibration where the user would have to re-settle before starting.
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { CalibrationData, StoredEye } from '../types'
 import { blindspotLocation } from '../blindspot'
 import { degToPx } from '../geometry'
@@ -80,9 +80,36 @@ export function PositionCheckOverlay({
   // check. Keeps the profile sketch that used to live in the pre-fd4596e
   // calibration blindspot step. Callers that already showed a HeadGuide
   // just before (Static's instructions phase) pass skipPrepare=true.
-  const [step, setStep] = useState<'prepare' | 'check'>(skipPrepare ? 'check' : 'prepare')
+  // Phone-in-headset: the headset optics fix the viewing geometry and the
+  // dark lens half already occludes the untested eye, so the "sit X cm
+  // away / cover your other eye" guidance and the blindspot distance check
+  // don't apply. Show headset-specific setup copy and skip the check.
+  const isVr = !!calibration.vr?.enabled
+  const blindspotEnabled = runBlindspotCheck && !isVr
+  const [step, setStep] = useState<'prepare' | 'check'>(
+    skipPrepare && !isVr ? 'check' : 'prepare',
+  )
   const [result, setResult] = useState<'ok' | 'saw' | null>(null)
   const coveredEyeTop = eye === 'right' ? 'left' : 'right'
+
+  // Phone-in-headset: the prepare screen ("Get into the headset" / "I'm
+  // ready") is centered full-screen, so through the lenses it splits across
+  // the nose bridge and is illegible, and its tap target is unreachable with
+  // the phone sealed in the headset. The blindspot check is also disabled in
+  // VR, and calibration already showed a single-eye "Ready to test" confirm
+  // immediately before — so the overlay has nothing to present here. Skip
+  // straight to the caller's next phase (the VR-aware countdown). A black
+  // frame covers the one render before onPass unmounts us.
+  const passedRef = useRef(false)
+  useEffect(() => {
+    if (isVr && !passedRef.current) {
+      passedRef.current = true
+      onPass()
+    }
+  }, [isVr, onPass])
+  if (isVr) {
+    return <div className="fixed inset-0 bg-black z-50" aria-hidden="true" />
+  }
 
   if (step === 'prepare') {
     return (
@@ -90,13 +117,22 @@ export function PositionCheckOverlay({
         className="fixed inset-0 bg-black z-50 flex items-center justify-center cursor-default text-white"
         role="dialog"
         aria-modal="true"
-        aria-label="Position your head"
+        aria-label={isVr ? 'Get into the headset' : 'Position your head'}
       >
         <div className="max-w-sm w-full px-6 text-center space-y-6">
           <div className="space-y-2">
-            <h2 className="text-xl font-semibold">Get in position</h2>
+            <h2 className="text-xl font-semibold">
+              {isVr ? 'Get into the headset' : 'Get in position'}
+            </h2>
             <p className="text-sm text-zinc-300">
-              {headGuideMode === 'phone' ? (
+              {isVr ? (
+                <>
+                  Seat the phone in the headset cradle, then put the headset
+                  on. Keep your head still and look straight ahead at the{' '}
+                  <span className="text-white font-semibold">yellow dot</span>{' '}
+                  through the lens.
+                </>
+              ) : headGuideMode === 'phone' ? (
                 <>
                   Hold the phone{' '}
                   <span className="text-white font-mono">{calibration.viewingDistanceCm} cm</span>{' '}
@@ -113,11 +149,13 @@ export function PositionCheckOverlay({
             </p>
           </div>
 
-          <div className="flex justify-center">
-            <HeadGuide eye={eye} viewingDistanceCm={calibration.viewingDistanceCm} compact mode={headGuideMode} />
-          </div>
+          {!isVr && (
+            <div className="flex justify-center">
+              <HeadGuide eye={eye} viewingDistanceCm={calibration.viewingDistanceCm} compact mode={headGuideMode} />
+            </div>
+          )}
 
-          {runBlindspotCheck && (
+          {blindspotEnabled && (
             <p className="text-xs text-zinc-500">
               Next we&apos;ll run a quick blindspot check to confirm your distance
               is correct.
@@ -125,7 +163,7 @@ export function PositionCheckOverlay({
           )}
 
           <button
-            onClick={() => runBlindspotCheck ? setStep('check') : onPass()}
+            onClick={() => blindspotEnabled ? setStep('check') : onPass()}
             className="w-full py-3 btn-primary rounded-xl text-base font-medium text-white"
           >
             I&apos;m ready

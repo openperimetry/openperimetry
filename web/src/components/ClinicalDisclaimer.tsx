@@ -21,15 +21,15 @@ export function ClinicalDisclaimer({ variant = 'home' }: Props) {
 
   const frameClass =
     variant === 'home'
-      ? 'rounded-xl border border-white/[0.05] bg-surface/60 px-4 py-3'
-      : 'rounded-xl border border-white/[0.06] bg-surface px-4 py-3'
-  const textClass = 'text-xs text-zinc-400 leading-relaxed'
+      ? 'rounded-xl border border-line bg-subtle px-4 py-3'
+      : 'rounded-xl border border-line bg-surface px-4 py-3'
+  const textClass = 'text-xs text-muted leading-relaxed'
 
   return (
     <div className={frameClass}>
       <div className="flex items-start gap-2.5">
         <svg
-          className="w-3.5 h-3.5 text-zinc-500 mt-0.5 shrink-0"
+          className="w-3.5 h-3.5 text-caution mt-0.5 shrink-0"
           viewBox="0 0 20 20"
           fill="currentColor"
           aria-hidden="true"
@@ -42,7 +42,7 @@ export function ClinicalDisclaimer({ variant = 'home' }: Props) {
         </svg>
         <div className={`${textClass} space-y-2 flex-1`}>
           <p>
-            <span className="text-zinc-200 font-medium">
+            <span className="text-ink font-medium">
               This tool has not been validated against a clinical perimeter.
             </span>
             {!expanded && (
@@ -51,7 +51,7 @@ export function ClinicalDisclaimer({ variant = 'home' }: Props) {
                 <button
                   type="button"
                   onClick={() => setExpanded(true)}
-                  className="text-zinc-300 underline decoration-zinc-600 underline-offset-2 hover:text-white hover:decoration-zinc-400 transition-colors"
+                  className="text-accent underline decoration-line-strong underline-offset-2 hover:text-accent-dark hover:decoration-accent transition-colors"
                   aria-expanded={expanded}
                 >
                   Read more
@@ -76,7 +76,7 @@ export function ClinicalDisclaimer({ variant = 'home' }: Props) {
               <button
                 type="button"
                 onClick={() => setExpanded(false)}
-                className="text-zinc-300 underline decoration-zinc-600 underline-offset-2 hover:text-white hover:decoration-zinc-400 transition-colors"
+                className="text-accent underline decoration-line-strong underline-offset-2 hover:text-accent-dark hover:decoration-accent transition-colors"
                 aria-expanded={expanded}
               >
                 Show less

@@ -90,7 +90,7 @@ export const DEFAULT_ADVANCED_SETTINGS: AdvancedSettings = {
   fixationAlertMs: FIXATION_LOSS_ALERT_MS,
   fixationAlertMessage: FIXATION_LOSS_ALERT_MESSAGE,
   speedPreset: { override: false, ...SPEED_PRESETS.normal },
-  backgroundShade: 'dark',
+  backgroundShade: 'medium',
   staticGridPattern: '24-2',
   customGrid: { ...CUSTOM_GRID_PRESETS.normal },
   measureReactionTime: false,

@@ -38,14 +38,14 @@ export function ContactPage({ onBack }: Props) {
   }
 
   return (
-    <main className="min-h-[100dvh] bg-base text-white safe-pad p-6 animate-page-in">
+    <main className="min-h-[100dvh] bg-base text-body safe-pad p-6 animate-page-in">
       <div className="max-w-lg mx-auto space-y-8 pb-12">
-        <div className="flex items-center justify-between pb-5 border-b border-white/[0.06]">
+        <div className="flex items-center justify-between pb-5 border-b border-line">
           <h1 className="text-3xl font-heading font-bold">Contact</h1>
           <BackButton onClick={onBack} label="Home" />
         </div>
 
-        <p className="text-zinc-400 text-sm leading-relaxed">
+        <p className="text-muted text-sm leading-relaxed">
           Have a question, suggestion, or just want to say hi? Send me a message and I'll get back to you.
         </p>
 
@@ -57,10 +57,10 @@ export function ContactPage({ onBack }: Props) {
               </svg>
             </div>
             <p className="text-teal font-heading font-semibold">Message sent!</p>
-            <p className="text-zinc-400 text-sm">Thanks for reaching out. I'll get back to you as soon as I can.</p>
+            <p className="text-muted text-sm">Thanks for reaching out. I'll get back to you as soon as I can.</p>
             <button
               onClick={() => { setSent(false); setName(''); setEmail(''); setMessage('') }}
-              className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
+              className="text-sm text-muted hover:text-body transition-colors"
             >
               Send another message
             </button>
@@ -74,7 +74,7 @@ export function ContactPage({ onBack }: Props) {
             )}
 
             <div className="space-y-1.5">
-              <label htmlFor="contact-name" className="text-sm text-zinc-400">Name</label>
+              <label htmlFor="contact-name" className="text-sm text-muted">Name</label>
               <input
                 id="contact-name"
                 type="text"
@@ -87,7 +87,7 @@ export function ContactPage({ onBack }: Props) {
             </div>
 
             <div className="space-y-1.5">
-              <label htmlFor="contact-email" className="text-sm text-zinc-400">Email</label>
+              <label htmlFor="contact-email" className="text-sm text-muted">Email</label>
               <input
                 id="contact-email"
                 type="email"
@@ -100,7 +100,7 @@ export function ContactPage({ onBack }: Props) {
             </div>
 
             <div className="space-y-1.5">
-              <label htmlFor="contact-message" className="text-sm text-zinc-400">Message</label>
+              <label htmlFor="contact-message" className="text-sm text-muted">Message</label>
               <textarea
                 id="contact-message"
                 value={message}

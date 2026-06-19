@@ -9,6 +9,12 @@ interface Props {
   points: TestPoint[]
   eye: Eye
   maxEccentricity: number
+  /** Plotted extent (rings + scale) in degrees. Defaults to `maxEccentricity`.
+   *  Phone-VR passes a smaller, data-fitted value so the radar isn't a tiny
+   *  isopter inside a wide untested halo (the screen-edge maxEccentricity ~44°
+   *  far exceeds the realistic VR-tested field). Render-only — does not affect
+   *  isopter geometry, areas, or classification. */
+  plotExtentDeg?: number
   size?: number
   showLabels?: boolean
   /** If provided, draws the screen-testable boundary on the radar */
@@ -54,6 +60,7 @@ export function VisualFieldMap({
   points,
   eye,
   maxEccentricity,
+  plotExtentDeg,
   size = 400,
   showLabels = true,
   calibration,
@@ -63,10 +70,13 @@ export function VisualFieldMap({
   const [verifyOpen, setVerifyOpen] = useState(false)
   const center = size / 2
   const radius = center - CHART_PADDING
-  const scale = radius / maxEccentricity
-  const ringStep = maxEccentricity <= 30 ? 5 : 10
+  // Plotted extent: caller-supplied (VR fits it to the data) or the full
+  // testable maxEccentricity. Guard against a degenerate <=0 value.
+  const effectiveMaxEcc = plotExtentDeg && plotExtentDeg > 0 ? plotExtentDeg : maxEccentricity
+  const scale = radius / effectiveMaxEcc
+  const ringStep = effectiveMaxEcc <= 30 ? 5 : 10
   const rings = Array.from(
-    { length: Math.floor(maxEccentricity / ringStep) },
+    { length: Math.floor(effectiveMaxEcc / ringStep) },
     (_, i) => (i + 1) * ringStep,
   )
   const meridians = Array.from({ length: 12 }, (_, i) => i * 30)
@@ -85,18 +95,6 @@ export function VisualFieldMap({
   return (
     <div className="flex flex-col items-center gap-2">
       <div className="relative">
-      {enableVerify && calibration && (
-        <button
-          onClick={() => setVerifyOpen(true)}
-          aria-label="Open 1:1 verify view"
-          title="Verify at 1:1 scale"
-          className="absolute top-2 right-2 z-10 w-8 h-8 rounded-lg bg-black/50 hover:bg-black/70 border border-white/[0.10] text-zinc-300 hover:text-white flex items-center justify-center transition-colors"
-        >
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-            <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
-          </svg>
-        </button>
-      )}
       <svg
         viewBox={`0 0 ${size} ${size}`}
         width={size}
@@ -128,7 +126,7 @@ export function VisualFieldMap({
 
         {/* Meridian lines */}
         {meridians.map(deg => {
-          const [x, y] = polarToXY(maxEccentricity, deg, center, scale)
+          const [x, y] = polarToXY(effectiveMaxEcc, deg, center, scale)
           return (
             <line key={`m-${deg}`} x1={center} y1={center} x2={x} y2={y} stroke="#334155" strokeWidth={0.5} />
           )
@@ -298,8 +296,8 @@ export function VisualFieldMap({
 
       {/* Legend */}
       {showLabels && (
-        <div className="text-xs text-gray-400 flex gap-3 flex-wrap justify-center">
-          <span className="text-gray-500">{formatEyeLabelForResult(eye)}</span>
+        <div className="text-xs text-body flex gap-3 flex-wrap justify-center">
+          <span className="text-muted">{formatEyeLabelForResult(eye)}</span>
           {ISOPTER_ORDER.map(key => {
             if (!grouped[key]?.some(p => p.detected)) return null
             return (
@@ -318,6 +316,21 @@ export function VisualFieldMap({
             </span>
           )}
         </div>
+      )}
+
+      {/* Prominent 1:1 verify control — sits directly under the legend, styled
+          like the "Compare with clinical scenarios" button, so the at-true-scale
+          check is discoverable rather than hidden behind a small map-corner icon. */}
+      {enableVerify && calibration && (
+        <button
+          onClick={() => setVerifyOpen(true)}
+          className="w-full py-3 bg-surface hover:bg-subtle rounded-xl font-medium transition-colors border border-line hover:border-accent/50 text-sm text-body"
+        >
+          <svg className="inline w-4 h-4 mr-1.5 -mt-0.5 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+            <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+          </svg>
+          Verify at 1:1 scale
+        </button>
       )}
 
       {verifyOpen && calibration && (

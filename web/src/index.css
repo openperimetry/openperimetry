@@ -1,30 +1,99 @@
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=Outfit:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 @import 'tailwindcss';
 
-/* ── Design tokens ── */
+/* ── Design tokens — light, clinical ──
+   The product reads as a medical-grade screening tool, not a luxury
+   gadget: a calm cool-white canvas, white "report" surfaces, slate
+   ink, and a clinical-blue primary with teal as the secondary / data
+   accent. The dim test surface (perimetry needs controlled luminance)
+   is handled by the test components, not these page tokens. */
 @theme {
-  --color-base: #08080d;
-  --color-surface: #111118;
-  --color-elevated: #1a1a22;
-  --color-overlay: #222230;
-  --color-accent: #c8902a;
-  --color-accent-light: #dba540;
+  /* Surfaces */
+  --color-canvas: #f4f7fb;     /* page background */
+  --color-base: #f4f7fb;       /* alias: keeps `bg-base` flipping with the theme */
+  --color-surface: #ffffff;    /* cards / report panels */
+  --color-elevated: #ffffff;
+  --color-overlay: #ffffff;
+
+  /* Ink */
+  --color-ink: #0f172a;        /* headings (slate-900) */
+  --color-body: #334155;       /* body copy (slate-700) — AA+ on white */
+  --color-muted: #64748b;      /* captions (slate-500) — AA on white */
+  --color-line: #e2e8f0;       /* hairline borders (slate-200) */
+  --color-line-strong: #cbd5e1;
+  --color-subtle: #f8fafc;     /* slate-50 — subtle section fill */
+  --color-subtle-2: #f1f5f9;   /* slate-100 — hover / zebra fill */
+
+  /* Accents */
+  --color-accent: #0a6cc9;       /* clinical blue — primary action + brand */
+  --color-accent-light: #2f89e0; /* lighter blue for hover lifts */
+  --color-accent-dark: #08529c;  /* pressed / hover-down */
+  --color-accent-tint: #e8f1fb;  /* selected-state fills */
+  --color-teal: #0d9488;         /* secondary / data accent (teal-600) */
+  --color-teal-tint: #e6f5f3;
+
+  /* Semantic — results & status */
+  --color-normal: #16a34a;
+  --color-caution: #d97706;
+  --color-abnormal: #dc2626;
+
+  --font-family-heading: 'Inter', system-ui, sans-serif;
+  --font-family-body: 'Inter', system-ui, sans-serif;
+}
+
+/* Enables `dark:` utility variants, keyed off the resolved data-theme. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* ── Dark theme token overrides ──
+   theme.ts resolves the user's preference (system|light|dark) to a concrete
+   light|dark value and writes it to <html data-theme>. Overriding the design
+   tokens here flips every token-based utility (bg-base, text-ink, bg-surface,
+   card, btn-primary, …) automatically. The perimetry test surfaces stay dim
+   in both modes and are handled by their own components. */
+:root[data-theme="dark"] {
+  /* Surfaces */
+  --color-canvas: #0b1220;
+  --color-base: #0b1220;
+  --color-surface: #111a2b;
+  --color-elevated: #16233a;
+  --color-overlay: #16233a;
+
+  /* Ink */
+  --color-ink: #f1f5f9;        /* headings — slate-100 */
+  --color-body: #cbd5e1;       /* body — slate-300 */
+  --color-muted: #94a3b8;      /* captions — slate-400 */
+  --color-line: #25324a;       /* hairline borders */
+  --color-line-strong: #34425e;
+
+  /* Accents — brighter blue/teal for contrast on dark */
+  --color-accent: #3b8eea;
+  --color-accent-light: #5aa3f0;
+  --color-accent-dark: #2f7fd6;
+  --color-accent-tint: #15294a;  /* selected-state fills on dark */
   --color-teal: #2dd4bf;
-  --font-family-heading: 'Syne', system-ui, sans-serif;
-  --font-family-body: 'Outfit', system-ui, sans-serif;
+  --color-teal-tint: #0f2e2b;
+
+  /* Semantic — results & status (lightened for dark bg) */
+  --color-normal: #22c55e;
+  --color-caution: #f59e0b;
+  --color-abnormal: #f87171;
+
+  /* Subtle fills */
+  --color-subtle: #16233a;
+  --color-subtle-2: #1d2c45;
+
+  color-scheme: dark;
 }
 
 :root {
   font-family: var(--font-family-body);
   font-size: 16px;
   font-kerning: normal;
-  color-scheme: dark;
+  color-scheme: light;
 }
 
-/* Paint the whole page dark — including iOS safe areas (notch, home indicator)
-   so the body gradient never fades into white at the edges. */
 html {
-  background: var(--color-base);
+  background: var(--color-canvas);
   min-height: 100%;
 }
 
@@ -32,18 +101,25 @@ body {
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background: radial-gradient(ellipse at 50% 40%, #0c0c14, var(--color-base) 60%);
+  background: radial-gradient(ellipse at 50% -10%, var(--color-surface), var(--color-canvas) 55%);
+  background: radial-gradient(ellipse at 50% -10%, color-mix(in srgb, var(--color-surface) 70%, var(--color-canvas)), var(--color-canvas) 55%);
   background-attachment: fixed;
-  color: #ededf0;
-  /* Ensure body extends into iOS safe areas so the dark gradient covers edge-to-edge. */
+  color: var(--color-body);
   min-height: 100vh;
   min-height: 100dvh;
 }
 
-/* Prevent overscroll during test — and make the overscroll area dark instead of white */
 html, body {
   overscroll-behavior: none;
-  background-color: var(--color-base);
+  background-color: var(--color-canvas);
+}
+
+/* Headings carry a touch more weight + tighter tracking for an
+   instrument-label feel, while staying in the Inter family. */
+h1, h2, h3, h4 {
+  font-family: var(--font-family-heading);
+  letter-spacing: -0.01em;
+  color: var(--color-ink);
 }
 
 /* Respect reduced motion preference */
@@ -54,6 +130,13 @@ html, body {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* Tabular figures for clinical data (dB, distance, durations, dates)
+   so readouts align like an instrument display. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
 }
 
 /* Screen-reader only utility */
@@ -71,29 +154,45 @@ html, body {
 
 /* ── Buttons ── */
 .btn-primary {
-  background: linear-gradient(135deg, var(--color-accent) 0%, #a57420 100%);
-  box-shadow: 0 1px 3px rgba(200, 144, 42, 0.2), 0 1px 2px rgba(0, 0, 0, 0.3);
-  transition: all 0.2s ease;
+  background: var(--color-accent);
+  color: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+  transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
 }
 .btn-primary:hover {
-  background: linear-gradient(135deg, var(--color-accent-light) 0%, var(--color-accent) 100%);
-  box-shadow: 0 4px 20px rgba(200, 144, 42, 0.25), 0 2px 4px rgba(0, 0, 0, 0.3);
+  background: var(--color-accent-dark);
+  box-shadow: 0 6px 18px rgba(10, 108, 201, 0.28), 0 1px 2px rgba(15, 23, 42, 0.12);
   transform: translateY(-1px);
 }
 .btn-primary:active {
   transform: translateY(0);
-  box-shadow: 0 1px 3px rgba(200, 144, 42, 0.2), 0 1px 2px rgba(0, 0, 0, 0.3);
+  background: var(--color-accent-dark);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+}
+.btn-primary:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(10, 108, 201, 0.35);
 }
 .btn-primary:disabled {
-  background: linear-gradient(135deg, #6b5a2a 0%, #504420 100%);
-  opacity: 0.5;
+  background: var(--color-line-strong);
+  color: #ffffff;
   box-shadow: none;
   transform: none;
+  cursor: not-allowed;
 }
 
-/* ── Page background (backward compat for test components) ── */
+/* ── Card / panel helper ── */
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: 1rem;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+/* Page background (backward compat for the dark test surfaces — these
+   intentionally stay dim; perimetry needs controlled luminance). */
 .bg-page {
-  background: var(--color-base);
+  background: #0b0f14;
 }
 
 /* ── iOS safe area utilities ── */
@@ -138,6 +237,15 @@ html, body {
   50% { opacity: 1; transform: scale(1.02); }
 }
 
+/* Inward sweep for the interstitial stimulus-preview dot: travels from the
+   right edge toward the fixation centre and loops, mirroring the kinetic
+   stimulus motion. Animates position only so the dot keeps its true
+   (size/brightness-accurate) appearance. */
+@keyframes vfc-demo-sweep {
+  from { left: 88%; }
+  to { left: 4%; }
+}
+
 /* Staggered reveal utilities */
 .fade-up {
   opacity: 0;
@@ -161,73 +269,37 @@ html, body {
   100% { right: 50%; opacity: 0; }
 }
 
-/* ── Grain texture overlay ── */
-.grain::after {
-  content: '';
-  position: fixed;
-  inset: 0;
-  opacity: 0.008;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  background-size: 256px 256px;
-  pointer-events: none;
-  z-index: 9999;
-  mix-blend-mode: overlay;
-}
-
-/* ── Scope-bezel card ──
-   Three concentric gold ring outlines stacked around the card edge,
-   echoing the perimetry scope inside it. Achieved via layered
-   box-shadows: each gold ring is paired with a transparent spacer
-   one pixel inside it, so the spacer punches a "gap" through the
-   gold layers beneath, leaving only the rim visible. Transparent
-   spacers (vs. a solid color) let the page background gradient show
-   through the gaps, so the rings read as floating rather than as a
-   solid frame.
-   - 1 px tight rim at the card edge (0.30 alpha).
-   - 1 px ring 9 px out (0.16 alpha).
-   - 1 px ring 22 px out (0.08 alpha).
-   - Plus the original drop shadow.
-   Layered with rounded-[2.5rem] on the card so the rings follow the
-   same curvature as the card border. */
-.scope-bezel {
-  box-shadow:
-    0 0 0 1px rgba(200, 144, 42, 0.30),
-    0 0 0 9px transparent,
-    0 0 0 10px rgba(200, 144, 42, 0.16),
-    0 0 0 22px transparent,
-    0 0 0 23px rgba(200, 144, 42, 0.08),
-    0 18px 60px rgba(0, 0, 0, 0.45);
-}
-
-/* ── Glow effects ── */
+/* ── Glow / hover lift for interactive cards ── */
 .glow-card {
-  transition: all 0.3s ease;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
 }
 .glow-card:hover {
-  box-shadow: 0 0 0 1px rgba(200, 144, 42, 0.12),
-              0 8px 32px rgba(200, 144, 42, 0.06);
+  border-color: rgba(10, 108, 201, 0.35);
+  box-shadow: 0 8px 24px rgba(10, 108, 201, 0.12);
 }
 
 /* ── Custom scrollbar ── */
-::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar { width: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.16); }
+::-webkit-scrollbar-thumb { background: rgba(15, 23, 42, 0.18); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(15, 23, 42, 0.3); }
+:root[data-theme="dark"] ::-webkit-scrollbar-thumb { background: rgba(203, 213, 225, 0.18); }
+:root[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: rgba(203, 213, 225, 0.3); }
 
 /* ── Form inputs ── */
 .input-field {
   background: var(--color-surface);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--color-line);
   border-radius: 12px;
   padding: 0.65rem 0.85rem;
-  color: #ededf0;
+  color: var(--color-ink);
   font-size: 0.875rem;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
   width: 100%;
 }
-.input-field::placeholder { color: #4a4a58; }
+.input-field::placeholder { color: var(--color-muted); }
 .input-field:focus {
   outline: none;
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px rgba(200, 144, 42, 0.1);
+  box-shadow: 0 0 0 3px rgba(10, 108, 201, 0.15);
 }

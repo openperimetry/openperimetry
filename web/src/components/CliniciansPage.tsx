@@ -59,18 +59,18 @@ const CLINICIAN_REASONS = [
 
 export function CliniciansPage({ onBack, onContact }: Props) {
   return (
-    <main className="min-h-[100dvh] bg-base text-white safe-pad p-6 animate-page-in">
+    <main className="min-h-[100dvh] bg-base text-ink safe-pad p-6 animate-page-in">
       <div className="mx-auto max-w-3xl space-y-10 pb-12">
-        <div className="flex items-center justify-between gap-4 border-b border-white/[0.06] pb-5">
+        <div className="flex items-center justify-between gap-4 border-b border-line pb-5">
           <h1 className="text-3xl font-heading font-bold">For clinicians</h1>
           <BackButton onClick={onBack} label="Home" />
         </div>
 
         <section className="space-y-4">
-          <p className="text-lg leading-relaxed text-zinc-200">
+          <p className="text-lg leading-relaxed text-body">
             OpenPerimetry is looking for clinicians and vision researchers who can help validate this tool against clinical perimetry.
           </p>
-          <p className="text-sm leading-relaxed text-zinc-400">
+          <p className="text-sm leading-relaxed text-muted">
             The app is still a screen-based self-check, not a diagnostic device. Clinician collaboration is needed to measure agreement, repeatability, failure modes, and what kinds of reports are actually useful in practice.
           </p>
           <div className="flex flex-col gap-3 sm:flex-row">
@@ -82,7 +82,7 @@ export function CliniciansPage({ onBack, onContact }: Props) {
             </button>
             <button
               onClick={onBack}
-              className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 text-sm font-medium text-zinc-200 hover:bg-white/[0.06] hover:text-white"
+              className="rounded-xl border border-line bg-subtle px-4 py-3 text-sm font-medium text-body hover:bg-subtle-2 hover:text-ink"
             >
               Back to test
             </button>
@@ -91,11 +91,11 @@ export function CliniciansPage({ onBack, onContact }: Props) {
 
         <section className="space-y-4">
           <h2 className="text-xl font-heading font-bold">How to request access</h2>
-          <div className="rounded-2xl border border-white/[0.06] bg-surface/60 p-5 text-sm leading-relaxed text-zinc-300">
+          <div className="rounded-2xl border border-line bg-surface p-5 text-sm leading-relaxed text-body">
             <p>
               Use the contact form and mention that you are requesting a clinician account. Include your name, institution or clinic, role, and a short note about how you would like to evaluate or use the tool.
             </p>
-            <p className="mt-3 text-zinc-400">
+            <p className="mt-3 text-muted">
               Clinician accounts are manually enabled so the portal stays limited to validation, research, and supervised clinical workflows.
             </p>
           </div>
@@ -105,9 +105,9 @@ export function CliniciansPage({ onBack, onContact }: Props) {
           <h2 className="text-xl font-heading font-bold">Why participate?</h2>
           <div className="grid gap-3 sm:grid-cols-2">
             {CLINICIAN_REASONS.map(reason => (
-              <div key={reason.title} className="rounded-2xl border border-white/[0.06] bg-surface/60 p-4">
-                <h3 className="text-sm font-semibold text-zinc-100">{reason.title}</h3>
-                <p className="mt-2 text-sm leading-relaxed text-zinc-400">{reason.body}</p>
+              <div key={reason.title} className="rounded-2xl border border-line bg-surface p-4">
+                <h3 className="text-sm font-semibold text-ink">{reason.title}</h3>
+                <p className="mt-2 text-sm leading-relaxed text-muted">{reason.body}</p>
               </div>
             ))}
           </div>
@@ -117,9 +117,9 @@ export function CliniciansPage({ onBack, onContact }: Props) {
           <h2 className="text-xl font-heading font-bold">Clinician portal features</h2>
           <div className="grid gap-3 sm:grid-cols-2">
             {PORTAL_FEATURES.map(feature => (
-              <div key={feature.title} className="rounded-2xl border border-white/[0.06] bg-surface/60 p-4">
-                <h3 className="text-sm font-semibold text-zinc-100">{feature.title}</h3>
-                <p className="mt-2 text-sm leading-relaxed text-zinc-400">{feature.body}</p>
+              <div key={feature.title} className="rounded-2xl border border-line bg-surface p-4">
+                <h3 className="text-sm font-semibold text-ink">{feature.title}</h3>
+                <p className="mt-2 text-sm leading-relaxed text-muted">{feature.body}</p>
               </div>
             ))}
           </div>
@@ -127,7 +127,7 @@ export function CliniciansPage({ onBack, onContact }: Props) {
 
         <section className="space-y-4">
           <h2 className="text-xl font-heading font-bold">Validation priorities</h2>
-          <ul className="space-y-3 text-sm leading-relaxed text-zinc-300">
+          <ul className="space-y-3 text-sm leading-relaxed text-body">
             {VALIDATION_HELP.map(item => (
               <li key={item} className="flex gap-3">
                 <span className="mt-2 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-accent" aria-hidden="true" />

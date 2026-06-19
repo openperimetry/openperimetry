@@ -9,7 +9,8 @@
     "start": "node dist/server.js",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "seed": "tsx scripts/seed.ts"
+    "seed": "tsx scripts/seed.ts",
+    "backfill:events-gsi": "tsx scripts/backfill-events-gsi.ts"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.985.0",

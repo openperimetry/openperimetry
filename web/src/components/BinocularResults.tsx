@@ -5,6 +5,7 @@ import { STIMULI, ISOPTER_ORDER } from '../types'
 import { VisualFieldMap } from './VisualFieldMap'
 import { SensitivityMap } from './SensitivityMap'
 import { calcIsopterAreas } from '../isopterCalc'
+import { vrPlotExtentDeg } from '../isopterRender'
 import { Interpretation } from './Interpretation'
 import { saveResult, saveSurvey, hasSurveyForResult, hasBeenPromptedForFeedback, markFeedbackPrompted } from '../storage'
 import { exportTrackedResultPDF } from '../pdfExportTracking'
@@ -84,6 +85,7 @@ export function BinocularResults({
 }: Props) {
   const isGoldmann = testMode === 'goldmann'
   const { user, syncResults } = useAuth()
+  const canViewReliability = user?.isAdmin === true || user?.isClinician === true
   const advanced = useAdvancedSettings()
   const studyMode = useStudyMode()
   const [tab, setTab] = useState<'combined' | 'right' | 'left'>('combined')
@@ -244,7 +246,7 @@ export function BinocularResults({
   const mapSize = Math.min(600, window.innerWidth - 48)
 
   return (
-    <div className="min-h-[100dvh] bg-base text-white safe-pad p-6 overflow-y-auto animate-page-in">
+    <div className="min-h-[100dvh] bg-base text-body safe-pad p-6 overflow-y-auto animate-page-in">
       <div className="max-w-lg mx-auto space-y-6 pb-12">
         <h2 className="text-2xl font-heading font-bold text-center">Binocular Results</h2>
 
@@ -253,7 +255,7 @@ export function BinocularResults({
         <ClinicalDisclaimer variant="results" />
 
         {/* Tab switcher */}
-        <div className="flex bg-surface rounded-2xl p-1 gap-1 border border-white/[0.04]">
+        <div className="flex bg-subtle-2 rounded-2xl p-1 gap-1 border border-line">
           {(['combined', 'right', 'left'] as const).map(t => (
             <button
               key={t}
@@ -261,7 +263,7 @@ export function BinocularResults({
               className={`flex-1 py-2 rounded-xl text-sm font-medium transition-all ${
                 tab === t
                   ? 'btn-primary text-white'
-                  : 'text-zinc-400 hover:text-white hover:bg-elevated'
+                  : 'text-muted hover:text-ink hover:bg-surface'
               }`}
             >
               {t === 'combined' ? 'Both eyes' : t === 'right' ? 'OD (Right)' : 'OS (Left)'}
@@ -278,11 +280,12 @@ export function BinocularResults({
                 points={combinedStandard}
                 eye="right"
                 maxEccentricity={maxEccentricity}
+                plotExtentDeg={vrPlotExtentDeg(combinedStandard, combinedCalibration, maxEccentricity)}
                 size={mapSize}
                 calibration={combinedCalibration}
                 enableVerify
               />
-              <p className="text-center text-xs text-zinc-500 mt-1">
+              <p className="text-center text-xs text-muted mt-1">
                 Combined field — best response from either eye at each direction
               </p>
             </div>
@@ -291,6 +294,7 @@ export function BinocularResults({
               points={activePoints}
               eye={activeEye}
               maxEccentricity={maxEccentricity}
+              plotExtentDeg={vrPlotExtentDeg(activePoints, calibration, maxEccentricity)}
               size={mapSize}
               calibration={calibration}
               enableVerify
@@ -301,7 +305,7 @@ export function BinocularResults({
         {/* Area comparison table */}
         {tab === 'combined' ? (
           <div className="space-y-2">
-            <div className="grid grid-cols-4 gap-2 text-xs text-zinc-500 px-1">
+            <div className="grid grid-cols-4 gap-2 text-xs text-muted px-1">
               <span>Isopter</span>
               <span className="text-center">OD</span>
               <span className="text-center">OS</span>
@@ -315,16 +319,16 @@ export function BinocularResults({
               return (
                 <div
                   key={key}
-                  className="grid grid-cols-4 gap-2 bg-surface rounded-xl px-3 py-2 items-center text-sm border border-white/[0.06]"
+                  className="grid grid-cols-4 gap-2 bg-surface rounded-xl px-3 py-2 items-center text-sm border border-line"
                 >
                   <span className="flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full" style={{ backgroundColor: STIMULI[key].color }} />
                     {STIMULI[key].label}
                   </span>
-                  <span className="text-center font-mono text-zinc-300">
+                  <span className="text-center font-mono text-ink">
                     {r != null ? `${r.toFixed(0)}°²` : '—'}
                   </span>
-                  <span className="text-center font-mono text-zinc-300">
+                  <span className="text-center font-mono text-ink">
                     {l != null ? `${l.toFixed(0)}°²` : '—'}
                   </span>
                   <span className="text-center font-mono text-accent">
@@ -336,7 +340,7 @@ export function BinocularResults({
           </div>
         ) : (
           <div className="space-y-2">
-            <div className="grid grid-cols-2 gap-2 text-xs text-zinc-500 px-1">
+            <div className="grid grid-cols-2 gap-2 text-xs text-muted px-1">
               <span>Isopter</span>
               <span className="text-center">{formatEyeLabel(tab as 'right' | 'left')}</span>
             </div>
@@ -346,13 +350,13 @@ export function BinocularResults({
               return (
                 <div
                   key={key}
-                  className="grid grid-cols-2 gap-2 bg-surface rounded-xl px-3 py-2 items-center text-sm border border-white/[0.06]"
+                  className="grid grid-cols-2 gap-2 bg-surface rounded-xl px-3 py-2 items-center text-sm border border-line"
                 >
                   <span className="flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full" style={{ backgroundColor: STIMULI[key].color }} />
                     {STIMULI[key].label}
                   </span>
-                  <span className="text-center font-mono text-zinc-300">
+                  <span className="text-center font-mono text-ink">
                     {`${area.toFixed(0)}°²`}
                   </span>
                 </div>
@@ -390,10 +394,13 @@ export function BinocularResults({
           points={activePoints}
           areas={tab === 'combined' ? combinedAreas : tab === 'right' ? rightAreas : leftAreas}
           maxEccentricityDeg={maxEccentricity}
-          calibration={calibration}
+          // Use the same calibration the combined-tab ScenarioOverlay scores on,
+          // so the headline stage and the closest stage can't drift apart.
+          calibration={tab === 'combined' ? combinedCalibration : calibration}
+          showReliability={canViewReliability}
         />
         {tab === 'combined' && (
-          <ScenarioOverlay userPoints={combinedStandard} userAreas={combinedAreas} maxEccentricity={maxEccentricity} />
+          <ScenarioOverlay userPoints={combinedStandard} userAreas={combinedAreas} maxEccentricity={maxEccentricity} calibration={combinedCalibration} />
         )}
 
         {/* Vision simulation disabled for now — see comment in
@@ -423,6 +430,7 @@ export function BinocularResults({
                 binocular: true,
                 rightEyePoints: rightPoints,
                 leftEyePoints: leftPoints,
+                includeReliabilityDetails: canViewReliability,
               }, 'binocular_results')
               if (shouldPromptForFeedback()) openFeedbackPrompt('pdf')
             }}
@@ -444,7 +452,7 @@ export function BinocularResults({
 
       {feedbackTrigger && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
           role="dialog"
           aria-modal="true"
           aria-label="Quick feedback"

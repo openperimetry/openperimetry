@@ -102,7 +102,7 @@ export function SensitivityMap({
 
   return (
     <div className="mx-auto" style={{ width: size }}>
-      <div className="text-xs text-zinc-300 mb-1">
+      <div className="text-xs text-body mb-1">
         {formatEyeLabelForResult(eye)} — Measured sensitivity (dB)
       </div>
       <div className="relative" style={{ width: size, height: size }}>
@@ -197,7 +197,7 @@ export function SensitivityMap({
           ))}
         </svg>
       </div>
-      <div className="mt-2 text-[10px] text-zinc-400">
+      <div className="mt-2 text-[10px] text-muted">
         <div className="flex items-center gap-2">
           <span>{DB_MIN} dB (insensitive)</span>
           {/* Bar wrapped in `relative` so the mean-dB tick can be
@@ -227,7 +227,7 @@ export function SensitivityMap({
           <span>{effectiveCeiling} dB{effectiveCeiling === DB_MAX ? ' (sensitive)' : ''}</span>
         </div>
         {meanDb !== null && (
-          <p className="mt-1 text-center text-zinc-500">
+          <p className="mt-1 text-center text-muted">
             <span className="text-accent">▌</span>{' '}mean {meanDb.toFixed(1)} dB
           </p>
         )}

@@ -1,13 +1,15 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, type CSSProperties } from 'react'
 import type { CalibrationData, ResultQualityMetrics, StoredEye, TestPoint, TestResult, StimulusKey } from '../types'
 import { STIMULI, ISOPTER_ORDER } from '../types'
 import { VisualFieldMap } from './VisualFieldMap'
 import { calcIsopterAreas } from '../isopterCalc'
+import { vrPlotExtentDeg } from '../isopterRender'
 import { detectTruncatedIsopters } from '../goldmannCoverage'
 import { Interpretation } from './Interpretation'
 import { saveResult, saveSurvey, hasSurveyForResult, hasBeenPromptedForFeedback, markFeedbackPrompted, getDeviceId, getDeviceInfo } from '../storage'
 import { useAuth } from '../AuthContext'
 import { trackEvent, trackEventBeacon } from '../api'
+import { useActiveTestGuards, pageLeaveMeta, type PageLeaveInfo } from '../testLifecycle'
 import { exportTrackedResultPDF } from '../pdfExportTracking'
 import { ScenarioOverlay } from './ScenarioOverlay'
 import { PostTestSurvey } from './PostTestSurvey'
@@ -16,13 +18,23 @@ import { ClinicalDisclaimer } from './ClinicalDisclaimer'
 import { PauseScreen } from './PauseScreen'
 import { SavePrompt } from './SavePrompt'
 import { GOLDMANN } from '../constants'
-import { degToPx } from '../geometry'
+import { degToPx, pxToDeg, reprojectPolar } from '../geometry'
+import {
+  computeVrViewport,
+  vrCenterBounds,
+  fullScreenCenterBounds,
+  rayToBoundsPx,
+  type CenterBounds,
+} from '../vrGeometry'
+import { VrTestSurface } from './VrTestSurface'
 import { stimulusDisplayColor } from '../stimulusDisplay'
+import { isPracticeDone, markPracticeDone } from '../testResume'
 import { blindspotLocation } from '../blindspot'
 import { useAdvancedSettings } from '../advancedSettings'
 import { PositionCheckOverlay } from './PositionCheckOverlay'
 import { useStudyMode } from '../studyMode'
 import { isPhoneLikeDevice } from '../deviceMode'
+import { useRemoteInput, REMOTE_RESPONSE_KEYS } from '../remoteInput'
 import {
   buildNativeProvenance,
   buildProtocolSnapshot,
@@ -68,13 +80,25 @@ const SPEED_PRESETS = {
   },
 } as const
 
+// The dimmest isopter (I2e) is the smallest, hardest-to-see stimulus, and on
+// a phone's limited field its sweep is short — at normal pace the dot can
+// cross the whole plausible boundary zone before the patient reacts. Give it
+// a dedicated crawl in the central few degrees: once inside this eccentricity
+// it holds the slow-mode speed regardless of the selected pace, and the ramp
+// is arranged to finish decelerating by the time it gets there.
+const DIM_ISOPTER: StimulusKey = 'I2e'
+const DIM_ISOPTER_SLOW_ZONE_DEG = 5
+const DIM_ISOPTER_SLOW_SPEED = SPEED_PRESETS.slow.slow // 1.5 deg/s
+
 const { MIN_RESPONSE_MS, BOUNDARY_OFFSET_DEG, ADAPTIVE_THRESHOLD_DEG, OUTLIER_FACTOR } = GOLDMANN
 
-// 'position-check' is a one-shot pre-flight fired on the first countdown
-// request (see startCountdown + positionCheckDoneRef). It's not reached on
-// later interstitials; after the patient passes it, we drop into 'countdown'
-// and the rest of the state machine proceeds normally.
-type Phase = 'position-check' | 'countdown' | 'interstitial' | 'wait' | 'moving' | 'paused' | 'results'
+// 'position-check' is the one-shot pre-flight the test opens on (HeadGuide +
+// "I'm ready", optional blindspot check). Pass it once and we drop into the
+// first-block 'interstitial'; it's not revisited on later blocks. Phone-VR
+// skips it (and the 'countdown') entirely — see showPrePhase / startCountdown —
+// so VR shows a single interstitial crosshair, then runs straight into the test.
+type Phase = 'position-check' | 'countdown' | 'interstitial' | 'wait' | 'moving' | 'paused' | 'vr-complete' | 'results'
+
 
 interface TestTask {
   meridianDeg: number
@@ -94,7 +118,14 @@ interface PhaseBlock {
   description: string
   tasks: TestTask[]
   fixation?: FixationOffset // if set, fixation moves from center
+  /** Unscored warm-up block run before the real test (prepended once per
+   *  device). Its presentations don't enter the results or the progress count. */
+  isPractice?: boolean
 }
+
+/** A couple of easy, central V4e sweeps so a first-timer learns "press the
+ *  moment you see the moving dot" before any scored trial. */
+const PRACTICE_MERIDIANS = [0, 135, 240]
 
 export type SpeedMode = 'slow' | 'normal' | 'quick'
 
@@ -228,7 +259,14 @@ function findOutliers(points: TestPoint[], stimulus: StimulusKey): TestTask[] {
     const next = detected[(i + 1) % detected.length]
     const neighborAvg = (prev.eccentricityDeg + next.eccentricityDeg) / 2
     const deviation = Math.abs(curr.eccentricityDeg - neighborAvg)
-    const threshold = Math.max(4, neighborAvg * OUTLIER_FACTOR)
+    // Absolute floor kept low (2°) so inward spikes on the SMALL inner isopters
+    // (III2e / I-sizes, whole isopter only ~3-5°) are caught and retested — a
+    // 4° floor exceeded those isopters' entire radius, so a "pac-man" notch
+    // (e.g. a 0.8° point among ~3.5° neighbours) was never flagged. On the
+    // large outer isopters the relative term (neighborAvg·0.40) dominates, so
+    // the lower floor doesn't change their behaviour. Retests only confirm, so
+    // erring toward catching is cheap.
+    const threshold = Math.max(2, neighborAvg * OUTLIER_FACTOR)
 
     if (deviation > threshold) {
       tasks.push({ meridianDeg: curr.meridianDeg, stimulus })
@@ -329,17 +367,47 @@ function stimulusOpacity(intensityFrac: number, brightnessFloor: number): number
   return minUsable + (1.0 - minUsable) * intensityFrac
 }
 
-/** Build extended-field phase blocks. Only up/down passes are needed since
- *  the fixation is already offset horizontally (toward the nose) to maximize
- *  temporal field coverage on the screen. */
+/** Build extended-field phase blocks. Four passes — up, down, left, right —
+ *  each shifting fixation to the opposite edge so the field on the far side
+ *  reaches well past what the centered main test can cover. The up/down passes
+ *  keep the main test's horizontal nose offset; the left/right passes override
+ *  it to park fixation at a side edge.
+ *
+ *  Phone-VR: pass `vr` so the edges and fixation are clamped to the ACTIVE LENS
+ *  HALF (and the perpendicular axis is centered on the lens optical center)
+ *  instead of the full screen — otherwise the shifted fixation lands in the
+ *  dark/occluded half and neither the fixation dot nor the stimuli are
+ *  visible through the lens. */
 function buildExtendedBlocks(
   pxPerDeg: number,
-  _screenW: number,
+  screenW: number,
   screenH: number,
   fixationOffsetPx: number,
+  vr?: { bounds: CenterBounds; centerX: number; centerY: number },
 ): PhaseBlock[] {
   const margin = 40 // px from edge
   const halfH = screenH / 2
+  const halfW = screenW / 2
+
+  // Bounds the fixation can be parked within, and the on-axis center for the
+  // perpendicular dimension. Full screen for standard mode; the lens half for
+  // phone-VR.
+  const bounds: CenterBounds = vr
+    ? vr.bounds
+    : { left: -halfW, right: halfW, top: -halfH, bottom: halfH }
+  const cx = vr ? vr.centerX : fixationOffsetPx
+  const cy = vr ? vr.centerY : 0
+
+  // Where to park fixation along an axis. Standard mode goes flush to the
+  // screen edge (the whole screen is visible). Phone-VR parks only PARTWAY to
+  // the lens-half edge: the very edge sits in the lens periphery, where the
+  // fixation dot is hard to see or falls outside the visible view (the patient
+  // can't fixate a point they can't see). Pulling it to ~60% keeps the dot
+  // clearly visible while still shifting fixation enough that the stimulus
+  // sweep reaches the far periphery.
+  const VR_FIX_PULL = 0.6
+  const park = (center: number, edge: number) =>
+    vr ? center + VR_FIX_PULL * (edge - center) : edge
 
   const configs: {
     label: string
@@ -350,34 +418,62 @@ function buildExtendedBlocks(
   }[] = [
     {
       label: 'Extended — upper field',
-      desc: 'Fixation at bottom edge. Testing upper visual field.',
-      fx: fixationOffsetPx, // keep same horizontal offset as main test
-      fy: halfH - margin,
+      desc: 'Look at the dot near the bottom. Testing the upper field.',
+      fx: cx, // keep the on-axis horizontal position
+      fy: park(cy, bounds.bottom - margin),
       meridians: [60, 75, 90, 105, 120],
     },
     {
       label: 'Extended — lower field',
-      desc: 'Fixation at top edge. Testing lower visual field.',
-      fx: fixationOffsetPx,
-      fy: -(halfH - margin),
+      desc: 'Look at the dot near the top. Testing the lower field.',
+      fx: cx,
+      fy: park(cy, bounds.top + margin),
       meridians: [240, 255, 270, 285, 300],
+    },
+    {
+      label: 'Extended — right field',
+      desc: 'Look at the dot on the left. Testing the right field.',
+      fx: park(cx, bounds.left + margin),
+      fy: cy,
+      meridians: [330, 345, 0, 15, 30],
+    },
+    {
+      label: 'Extended — left field',
+      desc: 'Look at the dot on the right. Testing the left field.',
+      fx: park(cx, bounds.right - margin),
+      fy: cy,
+      meridians: [150, 165, 180, 195, 210],
     },
   ]
 
   return configs.map(cfg => {
-    // Max eccentricity: distance from fixation to far edge
-    const maxDown = halfH + cfg.fy - margin
-    const maxUp = halfH - cfg.fy - margin
-    const maxPx = Math.max(maxDown, maxUp)
-    const maxEccDeg = Math.floor(maxPx / pxPerDeg)
+    // Max eccentricity: farthest reachable distance from this fixation to the
+    // bounds edge across the meridians this pass exercises.
+    let maxPx = 0
+    for (const m of cfg.meridians) {
+      maxPx = Math.max(maxPx, rayToBoundsPx(m, cfg.fx, cfg.fy, bounds))
+    }
+    // VR uses the focal-length px/deg with the tangent projection (matching
+    // degToPx) so the sweep starts exactly at the lens edge; standard mode is
+    // near enough linear over its smaller angles.
+    const maxEccDeg = vr
+      ? Math.max(1, Math.floor((Math.atan((maxPx * Math.PI) / (pxPerDeg * 180)) * 180) / Math.PI))
+      : Math.max(1, Math.floor(maxPx / pxPerDeg))
 
     return {
       label: cfg.label,
       description: cfg.desc,
-      fixation: { x: cfg.fx, y: cfg.fy, maxEccDeg },
+      fixation: { x: Math.round(cfg.fx), y: Math.round(cfg.fy), maxEccDeg },
+      // Extended (peripheral) passes sweep V4e, not III4e. Clinically the far
+      // periphery is mapped with the largest/brightest target — a small III4e is
+      // not resolvable out there (in a normal eye it doesn't even reach), so
+      // III4e extended probes mostly missed and the few reprojected hits made
+      // the central III4e isopter spiky. V4e here extends the V4e isopter into
+      // the true periphery (it merges with the centred-pass V4e points, keyed by
+      // stimulus) and leaves III4e as a clean central scan.
       tasks: shuffle(cfg.meridians).map(m => ({
         meridianDeg: m,
-        stimulus: 'III4e' as const,
+        stimulus: 'V4e' as const,
       })),
     }
   })
@@ -442,27 +538,18 @@ function edgeEccentricityDeg(
   meridianDeg: number,
   fixationOffsetX: number,
   fixationOffsetY: number,
-  pixelsPerDegree: number,
+  calib: CalibrationData,
+  bounds?: CenterBounds,
 ): number {
-  const rad = (meridianDeg * Math.PI) / 180
-  const cos = Math.cos(rad)
-  const sin = -Math.sin(rad) // screen Y is inverted
-
-  const halfW = window.innerWidth / 2
-  const halfH = window.innerHeight / 2
-  // fixation is at screen center + offset
-  const fxFromCenter = fixationOffsetX
-  const fyFromCenter = fixationOffsetY
-
-  // Distance along the ray to each edge (only consider edges the ray points toward)
-  let tMin = Infinity
-  if (cos > 0.001) tMin = Math.min(tMin, (halfW - fxFromCenter) / cos)
-  if (cos < -0.001) tMin = Math.min(tMin, (-halfW - fxFromCenter) / cos)
-  if (sin > 0.001) tMin = Math.min(tMin, (halfH - fyFromCenter) / sin)
-  if (sin < -0.001) tMin = Math.min(tMin, (-halfH - fyFromCenter) / sin)
-
-  if (!isFinite(tMin) || tMin <= 0) tMin = halfW // fallback
-  return tMin / pixelsPerDegree
+  // Standard mode clamps to the full screen; VR mode passes the active
+  // lens-half bounds so stimuli never sweep across the center divider
+  // into the untested eye's half.
+  const b = bounds ?? fullScreenCenterBounds(window.innerWidth, window.innerHeight)
+  // Convert the edge distance (px) to degrees with the SAME projection
+  // degToPx uses (pxToDeg), not a linear px/ppd shortcut — otherwise the start
+  // eccentricity (and the RT-compensation cap) is over-estimated in VR, placing
+  // the sweep start off-screen and inflating recorded eccentricities/area.
+  return pxToDeg(rayToBoundsPx(meridianDeg, fixationOffsetX, fixationOffsetY, b), calib)
 }
 
 // Mobile keyboard-less devices have no Space/Esc key, so those copy
@@ -473,6 +560,7 @@ const isMobileDevice = isPhoneLikeDevice()
 
 export function GoldmannTest({ eye, calibration, extendedField, onDone, onComplete, speedMode: initialSpeedMode = 'normal' }: Props) {
   const { user, syncResults } = useAuth()
+  const canViewReliability = user?.isAdmin === true || user?.isClinician === true
   // Local mirror of the speedMode prop so the patient can switch between
   // normal/fast mid-test from the pause screen. Only affects values read
   // dynamically each render — preDelay range + outer-isopter sweep speed.
@@ -495,9 +583,16 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     if (!currentTaskHasBakedSpeedRef.current) {
       const newSp = SPEED_PRESETS[speedMode]
       currentSpeedRef.current = newSp.stimulus
-      currentSlowSpeedRef.current = currentTaskIsExtendedBlockRef.current
-        ? newSp.stimulus
-        : Math.max(newSp.slow, newSp.stimulus * 0.5)
+      if (currentTaskIsExtendedBlockRef.current) {
+        currentSlowSpeedRef.current = newSp.stimulus
+      } else if (currentTaskIsDimIsopterRef.current) {
+        currentSlowSpeedRef.current = Math.min(
+          Math.max(newSp.slow, newSp.stimulus * 0.5),
+          DIM_ISOPTER_SLOW_SPEED,
+        )
+      } else {
+        currentSlowSpeedRef.current = Math.max(newSp.slow, newSp.stimulus * 0.5)
+      }
     }
   }, [speedMode])
   // Advanced settings — user-adjustable overrides. Kinetic tests only use a
@@ -518,7 +613,14 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // the first-block interstitial ("Ready to map III4e…"). Either
   // `showPositionGuide` or `initialBlindspotCheck` opens this phase;
   // when both are off we jump straight to the interstitial.
-  const showPrePhase = advanced.showPositionGuide || advanced.initialBlindspotCheck
+  //
+  // Phone-VR skips it entirely: in a headset the position-guide silhouette
+  // is a second crosshair screen the patient can't act on, so VR opens
+  // directly on the single interstitial crosshair (press the remote to
+  // begin). The blindspot self-check isn't reachable through the lenses
+  // either; fixation loss is still caught in-test via Heijl-Krakau trials.
+  const showPrePhase = !calibration.vr?.enabled
+    && (advanced.showPositionGuide || advanced.initialBlindspotCheck)
   const [phase, setPhase] = useState<Phase>(
     showPrePhase ? 'position-check' : 'interstitial',
   )
@@ -529,6 +631,9 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // persistence if the user signs in *after* finishing the test. The
   // initial saveResult call will have no-op'd for anonymous users.
   const lastResultRef = useRef<TestResult | null>(null)
+  // Guards handleSave so it persists exactly once, no matter how many callers
+  // (the finish-screen effect, the results render) invoke it.
+  const savedRef = useRef(false)
   const [surveyDone, setSurveyDone] = useState(false)
   // Active-prompt feedback modal — fires once per device, on either
   // Done or Export PDF, whichever they hit first. `'done'` also runs
@@ -546,11 +651,67 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // Current stimulus info
   const [, setCurrentStimLabel] = useState('')
 
-  // Current fixation offset — defaults to the eye-specific horizontal offset
-  const defaultFixation = { x: calibration.fixationOffsetPx, y: 0 }
+  // Phone-in-headset (`phone-vr`): the active lens half. `eye` is always
+  // a single side here (`both` runs are split into a left and a right run
+  // upstream), so it maps straight to the active lens. Used to clamp
+  // stimulus sweeps to the lens half and to mask the inactive half.
+  const vr = calibration.vr?.enabled ? calibration.vr : null
+  // Stimulus rendering size. VR renders at the TRUE angular size (no inflating
+  // floor) so isopter areas are clinically accurate — V at its real 1.73°
+  // (~8px) and III at 0.43° (~2px). The dots look small, but that's honest; any
+  // uniform up-scale would inflate every isopter (the "too large" artifact). The
+  // size-I targets (0.11°, sub-pixel here) stay dropped from the VR plan since
+  // they can't render distinctly. Standard mode keeps a 4px floor so small
+  // targets stay visible on a far screen.
+  const stimMinPx = vr ? 1 : 4
+  // Where a finished test lands. In VR we first show a "take off the headset"
+  // confirmation so the patient isn't dumped straight onto the results screen
+  // they can't comfortably read through the lenses. Skipped when `onComplete`
+  // is set (binocular mode hands off to the parent, which sequences eyes and
+  // owns the end-of-session screen) and in standard mode.
+  const vrFinishPhase: Phase = vr && !onComplete ? 'vr-complete' : 'results'
+  const activeEye: 'left' | 'right' = eye === 'left' ? 'left' : 'right'
+  // Live active-lens bounds (read window each call so orientation changes
+  // mid-test don't strand the geometry). Returns undefined in standard
+  // mode, which edgeEccentricityDeg reads as "clamp to full screen".
+  const vrLensBounds = useCallback((): CenterBounds | undefined => {
+    if (!vr) return undefined
+    const vp = computeVrViewport(window.innerWidth, window.innerHeight, activeEye, vr)
+    return vrCenterBounds(vp, window.innerWidth, window.innerHeight)
+  }, [vr, activeEye])
+
+  // Current fixation offset. In VR, derive this from the active eye and the
+  // live lens geometry instead of trusting the stored offset, which is emitted
+  // from the right-eye calibration pass and may be mirrored by callers.
+  const defaultFixation = (() => {
+    if (!vr) return { x: calibration.fixationOffsetPx, y: 0 }
+    const vp = computeVrViewport(window.innerWidth, window.innerHeight, activeEye, vr)
+    return {
+      x: Math.round(vp.fixationXFromScreenCenter),
+      y: Math.round(vp.fixationYFromScreenCenter),
+    }
+  })()
+  // Active-lens bounds + on-axis center for the extended-field passes, so VR
+  // parks fixation at the lens-half edges (not the full-screen edges, which
+  // land in the dark half). Undefined in standard mode → full-screen edges.
+  const vrExtendedBounds = (): { bounds: CenterBounds; centerX: number; centerY: number } | undefined => {
+    if (!vr) return undefined
+    const vp = computeVrViewport(window.innerWidth, window.innerHeight, activeEye, vr)
+    return {
+      bounds: vrCenterBounds(vp, window.innerWidth, window.innerHeight),
+      centerX: Math.round(vp.fixationXFromScreenCenter),
+      centerY: Math.round(vp.fixationYFromScreenCenter),
+    }
+  }
   const [fixationXY, setFixationXY] = useState(defaultFixation)
   const [prevFixationXY, setPrevFixationXY] = useState<{ x: number; y: number } | null>(null)
   const fixationRef = useRef(defaultFixation)
+  // The CENTERED (main-test) fixation, kept in a ref so recordPoint can
+  // reproject extended-field detections — recorded relative to a shifted
+  // fixation — back into this canonical frame before they enter the isopter.
+  // Mirrors the derived defaultFixation each render (orientation-safe).
+  const centeredFixationRef = useRef(defaultFixation)
+  centeredFixationRef.current = defaultFixation
   const blockMaxEccRef = useRef(0)
 
   // Refs for animation
@@ -566,6 +727,9 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   const resultsRef = useRef<TestPoint[]>([])
   const blocksRef = useRef<PhaseBlock[]>([])
   const blockIdxRef = useRef(0)
+  // Whether the unscored warm-up has already been done on this device — if so we
+  // don't prepend it again.
+  const practiceDoneRef = useRef(isPracticeDone())
   const taskIdxRef = useRef(0)
   const movingStartRef = useRef(0) // timestamp when stimulus started moving
   const currentSpeedRef = useRef<number>(sp.stimulus)
@@ -577,11 +741,17 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // the plausible boundary region the user actually needs time to react in.
   const currentRampStartRef = useRef(0)
   const currentSlowSpeedRef = useRef<number>(sp.slow)
+  // Eccentricity below which the dot holds a constant slow speed (no further
+  // ramp). 0 for most tasks (pure linear ramp); set for the dimmest isopter so
+  // its central few degrees crawl. See DIM_ISOPTER_SLOW_ZONE_DEG.
+  const currentSlowZoneRef = useRef(0)
   // Track whether the running task used a preset-driven speed (vs a baked
-  // per-task override) and whether it's an extended block, so that a
-  // pause-screen speed toggle can update the live refs immediately.
+  // per-task override), whether it's an extended block, and whether it's the
+  // dimmest isopter, so that a pause-screen speed toggle can update the live
+  // refs immediately while preserving the dim-isopter crawl.
   const currentTaskHasBakedSpeedRef = useRef(false)
   const currentTaskIsExtendedBlockRef = useRef(false)
+  const currentTaskIsDimIsopterRef = useRef(false)
 
   // Catch-trial + reliability-index tracking. Every Nth real-task start the
   // loop flashes a static V4e stimulus at the anatomical blindspot — a
@@ -607,6 +777,13 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   const [showFixationLossAlert, setShowFixationLossAlert] = useState(false)
 
   const { pixelsPerDegree, maxEccentricityDeg, brightnessFloor, reactionTimeMs } = calibration
+  // Keep only points within the testable field (small +2° margin). Extended
+  // passes are reprojected into the centered frame in recordPoint, so any point
+  // still beyond the field edge here is an artifact and must be excluded from
+  // BOTH the displayed and the saved/exported isopter areas (previously the save
+  // path used the unfiltered set, inflating the persisted areas).
+  const inField = (pts: TestPoint[]): TestPoint[] =>
+    pts.filter(p => p.eccentricityDeg <= maxEccentricityDeg + 2)
   const fixDotSize = 'w-3 h-3'
   const fixDotOffset = -6
   const fixDotRestPx = 8
@@ -634,7 +811,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // (post-phase-1 adaptive/boundary/outlier blocks would otherwise
   // remain spliced into `blocksRef` from the previous attempt). Reads
   // `speedMode`, `extendedField`, `sp.medium`, `pixelsPerDegree`,
-  // `calibration.fixationOffsetPx` from closure — values that match
+  // `defaultFixation` from closure — values that match
   // whatever the user has selected at restart time (e.g. the speed
   // toggle inside the pause menu).
   const buildInitialBlocks = (): PhaseBlock[] => {
@@ -660,7 +837,8 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
           pixelsPerDegree,
           window.innerWidth,
           window.innerHeight,
-          calibration.fixationOffsetPx,
+          defaultFixation.x,
+          vrExtendedBounds(),
         )]
       }
       return blocks
@@ -710,9 +888,16 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       })),
     }
     // Slow: ~84 stimuli, ~15 min. Normal: ~60 stimuli + higher speed + shorter delay -> ~5 min.
-    let allBlocks = speedMode === 'slow'
-      ? [phase1, phase3, phase4, phase5, phase6]
-      : [phase1, phase3, phase4, phase5, phase6Fast]
+    // Phone-VR drops the size-I passes (phase5 I4e, phase6/phase6Fast I2e): at
+    // the headset's focal-length px/deg a 0.11° target is sub-pixel and clamps
+    // to the same dot as the 0.43° size-III target, so an "I" isopter there is
+    // just a noisy duplicate of the III isopter (and inverts the ordering). Keep
+    // the size-V and size-III passes, which render at true, distinct sizes.
+    let allBlocks = vr
+      ? [phase1, phase3, phase4]
+      : speedMode === 'slow'
+        ? [phase1, phase3, phase4, phase5, phase6]
+        : [phase1, phase3, phase4, phase5, phase6Fast]
 
     // Append extended-field passes if enabled
     if (extendedField) {
@@ -720,7 +905,8 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
         pixelsPerDegree,
         window.innerWidth,
         window.innerHeight,
-        calibration.fixationOffsetPx,
+        defaultFixation.x,
+        vrExtendedBounds(),
       )
       allBlocks = [...allBlocks, ...extBlocks]
     }
@@ -728,10 +914,21 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   }
 
   useEffect(() => {
-    const allBlocks = buildInitialBlocks()
+    const built = buildInitialBlocks()
+    // Prepend an unscored warm-up (once per device) so first-timers learn the
+    // press-when-seen mechanic on easy central V4e sweeps before any scored
+    // trial. The interstitial shows the stimulus preview; recordPoint skips
+    // saving practice presentations; the block advance marks practice done.
+    const practiceBlock: PhaseBlock = {
+      label: 'Practice',
+      description: 'Warm-up — press the button the moment you see the moving dot. This one isn’t scored.',
+      isPractice: true,
+      tasks: PRACTICE_MERIDIANS.map(m => ({ meridianDeg: m, stimulus: 'V4e' as const })),
+    }
+    const allBlocks = practiceDoneRef.current ? built : [practiceBlock, ...built]
     setBlocks(allBlocks)
     blocksRef.current = allBlocks
-    setTotalTasks(allBlocks.reduce((s, b) => s + b.tasks.length, 0))
+    setTotalTasks(allBlocks.reduce((s, b) => s + (b.isPractice ? 0 : b.tasks.length), 0))
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -747,7 +944,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     const block = blocksRef.current[blockIdxRef.current]
     if (!block) {
       exitFullscreen()
-      setPhase('results')
+      setPhase(vrFinishPhase)
       return
     }
 
@@ -762,6 +959,13 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       const justFinished = blocksRef.current[blockIdxRef.current]
       const insertBlocks: PhaseBlock[] = []
 
+      // Leaving the unscored warm-up: remember it's done so it isn't shown
+      // again, and skip all scoring/refinement analysis below for it.
+      if (justFinished?.isPractice) {
+        markPracticeDone()
+        practiceDoneRef.current = true
+      }
+
       // After phase 1 (III4e scan): add adaptive refinement + boundary
       // tracing. Skipped in quick mode — the whole point of quick is "one
       // sweep, then results". Adaptive + boundary together can add another
@@ -771,7 +975,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       // through; it's a cheap reliability guard (max one extra block at
       // a small handful of meridians) and is the same machinery clinicians
       // would expect for retest-on-disagreement.
-      if (blockIdxRef.current === 0 && speedModeRef.current !== 'quick') {
+      if (justFinished?.label === 'Initial scan' && speedModeRef.current !== 'quick') {
         const adaptiveTasks = buildAdaptiveTasks(resultsRef.current)
         if (adaptiveTasks.length > 0) {
           insertBlocks.push({
@@ -794,7 +998,8 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       // After any primary block: check for outliers AND cross-isopter
       // nesting violations, and re-test them. Skip for verification /
       // adaptive / boundary blocks to avoid infinite loops.
-      const isRecheck = justFinished?.label.startsWith('Verification')
+      const isRecheck = justFinished?.isPractice
+        || justFinished?.label.startsWith('Verification')
         || justFinished?.label.startsWith('Adaptive')
         || justFinished?.label.startsWith('Boundary')
         || justFinished?.label.startsWith('Extended')
@@ -846,7 +1051,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       const nextBlockIdx = blockIdxRef.current + 1
       if (nextBlockIdx >= blocksRef.current.length) {
         exitFullscreen()
-      setPhase('results')
+        setPhase(vrFinishPhase)
         return
       }
 
@@ -860,7 +1065,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       const nextBlock = blocksRef.current[nextBlockIdx]
       const newFix = nextBlock?.fixation
         ? { x: nextBlock.fixation.x, y: nextBlock.fixation.y }
-        : { x: calibration.fixationOffsetPx, y: 0 }
+        : defaultFixation
 
       // Only show arrow if fixation actually moved significantly (>20px)
       const dist = Math.sqrt((newFix.x - oldFix.x) ** 2 + (newFix.y - oldFix.y) ** 2)
@@ -885,6 +1090,27 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Effective stimulus speed at a given eccentricity, mirroring the
+  // animation-loop ramp: constant fast outside `rampStart`, linear decel
+  // toward `slowSpeed` across the ramp, and a constant crawl inside the slow
+  // zone (dimmest isopter). Used by both the animation and RT compensation so
+  // the boundary correction reflects how fast the dot was actually moving when
+  // the patient pressed — critical inside the slow zone where fast-speed
+  // compensation would push the recorded boundary several degrees too far out.
+  const effectiveSpeedAt = useCallback((ecc: number) => {
+    const fastSpeed = currentSpeedRef.current
+    const slowSpeedVal = currentSlowSpeedRef.current
+    const rampStart = currentRampStartRef.current
+    const slowZone = currentSlowZoneRef.current
+    if (ecc < slowZone) return slowSpeedVal
+    if (rampStart > 0 && ecc < rampStart) {
+      const span = rampStart - slowZone
+      const frac = span > 0 ? Math.max(0, (ecc - slowZone) / span) : 0
+      return slowSpeedVal + (fastSpeed - slowSpeedVal) * frac
+    }
+    return fastSpeed
+  }, [])
+
   // ---------- record result ----------
   const recordPoint = useCallback(
     (detected: boolean, ecc: number) => {
@@ -893,25 +1119,55 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
         stimulusRef.current.style.opacity = '0'
       }
 
+      // Warm-up presentations aren't scored — the press feedback already fired
+      // in handleResponse; just move on without recording or counting them.
+      if (blocksRef.current[blockIdxRef.current]?.isPractice) {
+        setTimeout(() => advance(), 300)
+        return
+      }
+
       // Apply RT compensation: when user pressed, stimulus was actually
-      // further out by speed × reactionTime (use current task's speed)
+      // further out by speed × reactionTime. Use the dot's effective speed at
+      // the detection eccentricity, not the nominal fast speed, so a slow
+      // crawl (dimmest isopter, central zone) isn't over-compensated.
       const rawEcc = detected ? ecc : 0
-      const rtComp = (currentSpeedRef.current * reactionTimeMs) / 1000
+      const rtComp = (effectiveSpeedAt(rawEcc) * reactionTimeMs) / 1000
       // Cap at screen edge for this meridian so compensation can't exceed visible area
       const edgeCap = edgeEccentricityDeg(
         currentMeridianRef.current,
         fixationRef.current.x,
         fixationRef.current.y,
-        pixelsPerDegree,
+        calibration,
+        vrLensBounds(),
       )
       const compensatedEcc = detected
         ? Math.min(rawEcc + rtComp, edgeCap)
         : 0
 
+      // Extended-field passes park fixation at a shifted (lens-half-edge)
+      // position; eccentricityDeg above is measured from THAT fixation. The
+      // isopter/field map are drawn from the CENTERED fixation, so reproject
+      // detected points back into the centered frame before storing — otherwise
+      // a shifted-frame radius lands at the wrong place and inflates the
+      // isopter. Main-test blocks fixate at the centered position (sameFix), so
+      // they're stored verbatim (reprojection would be the identity anyway).
+      const recFix = fixationRef.current
+      const ctrFix = centeredFixationRef.current
+      const sameFix = recFix.x === ctrFix.x && recFix.y === ctrFix.y
+      let storedMeridian = currentMeridianRef.current
+      let storedEcc = compensatedEcc
+      let storedRaw = rawEcc
+      if (detected && !sameFix) {
+        const comp = reprojectPolar(currentMeridianRef.current, compensatedEcc, recFix, ctrFix, calibration)
+        storedMeridian = comp.meridianDeg
+        storedEcc = comp.eccentricityDeg
+        storedRaw = reprojectPolar(currentMeridianRef.current, rawEcc, recFix, ctrFix, calibration).eccentricityDeg
+      }
+
       const point: TestPoint = {
-        meridianDeg: currentMeridianRef.current,
-        eccentricityDeg: compensatedEcc,
-        rawEccentricityDeg: rawEcc,
+        meridianDeg: storedMeridian,
+        eccentricityDeg: storedEcc,
+        rawEccentricityDeg: storedRaw,
         detected,
         stimulus: currentStimulusRef.current,
       }
@@ -922,7 +1178,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
 
       setTimeout(() => advance(), 300)
     },
-    [advance, pixelsPerDegree, reactionTimeMs],
+    [advance, calibration, reactionTimeMs, vrLensBounds, effectiveSpeedAt],
   )
 
   // ---------- animation loop ----------
@@ -933,19 +1189,13 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       const dt = lastTimeRef.current ? (now - lastTimeRef.current) / 1000 : 0
       lastTimeRef.current = now
       // Effective speed: nominal until eccentricity drops into the ramp
-      // zone, then linearly decelerate toward slowSpeed. For inner isopters
-      // (I2e, I4e, III2e) the nominal speed is set by the task and the
-      // ramp kicks in just below the adaptive start, so the dot traverses
-      // the known-invisible outer band fast and slows as it enters the
-      // plausible boundary zone where the user needs reaction time.
-      const fastSpeed = currentSpeedRef.current
-      const slowSpeedVal = currentSlowSpeedRef.current
-      const rampStart = currentRampStartRef.current
-      let effectiveSpeed = fastSpeed
-      if (rampStart > 0 && eccRef.current < rampStart) {
-        const frac = Math.max(0, eccRef.current / rampStart)
-        effectiveSpeed = slowSpeedVal + (fastSpeed - slowSpeedVal) * frac
-      }
+      // zone, then linearly decelerate toward slowSpeed, holding a constant
+      // crawl inside the slow zone (dimmest isopter). For inner isopters
+      // (I2e, I4e, III2e) the nominal speed is set by the task and the ramp
+      // kicks in just below the adaptive start, so the dot traverses the
+      // known-invisible outer band fast and slows as it enters the plausible
+      // boundary zone where the user needs reaction time.
+      const effectiveSpeed = effectiveSpeedAt(eccRef.current)
       eccRef.current -= effectiveSpeed * dt
 
       if (eccRef.current <= 0) {
@@ -962,7 +1212,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
         const x = fx + r * Math.cos(rad)
         const y = fy + -r * Math.sin(rad)
         const stim = STIMULI[currentStimulusRef.current]
-        const sizePx = Math.max(4, Math.round(degToPx(stim.sizeDeg, calibration)))
+        const sizePx = Math.max(stimMinPx, Math.round(degToPx(stim.sizeDeg, calibration)))
         const half = sizePx / 2
         stimulusRef.current.style.width = `${sizePx}px`
         stimulusRef.current.style.height = `${sizePx}px`
@@ -977,7 +1227,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     },
     // `calibration` is passed whole to degToPx so sphericityCorrection is
     // respected; `pixelsPerDegree` would be redundant alongside it.
-    [brightnessFloor, recordPoint, calibration],
+    [brightnessFloor, recordPoint, calibration, effectiveSpeedAt, stimMinPx],
   )
 
   // ---------- present blindspot catch trial ----------
@@ -998,7 +1248,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     const yPx = fixationRef.current.y - degToPx(yDeg, calibration)
 
     const stim = STIMULI.V4e
-    const sizePx = Math.max(4, Math.round(degToPx(stim.sizeDeg, calibration)))
+    const sizePx = Math.max(stimMinPx, Math.round(degToPx(stim.sizeDeg, calibration)))
     const half = sizePx / 2
 
     isCatchTrialRef.current = true
@@ -1072,7 +1322,8 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       task.meridianDeg,
       fixationRef.current.x,
       fixationRef.current.y,
-      pixelsPerDegree,
+      calibration,
+      vrLensBounds(),
     )
     // Priority for start eccentricity:
     //   1. task.startEccentricity if explicitly set (adaptive refinement,
@@ -1112,19 +1363,34 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     //
     // Extended-field blocks skip the ramp — they're a small additional
     // pass and the constant speed keeps timing predictable.
+    const isDimIsopter = task.stimulus === DIM_ISOPTER
+    currentTaskIsDimIsopterRef.current = isDimIsopter
     if (!isExtendedBlock) {
       // Ramp starts at 85% of the sweep start. Fast outer 15%, decelerating
       // inner 85%. Slightly tighter floor of 4° so tasks that already start
       // close to centre still spend most of their distance decelerating.
-      const rampStart = Math.max(4, currentStartEccRef.current * 0.85)
-      currentRampStartRef.current = rampStart
+      let rampStart = Math.max(4, currentStartEccRef.current * 0.85)
       // Slow target: the preset slow speed, bounded below by half the fast
       // speed so we never crawl to the point of timing out normal-field
       // users.
-      currentSlowSpeedRef.current = Math.max(sp.slow, currentSpeedRef.current * 0.5)
+      let slowSpeed = Math.max(sp.slow, currentSpeedRef.current * 0.5)
+      let slowZone = 0
+      if (isDimIsopter) {
+        // Dimmest isopter: crawl the central few degrees at the slow-mode
+        // speed (overriding the half-fast floor), and push the ramp out so it
+        // has finished decelerating by the time it reaches that zone — on a
+        // phone's short sweep the linear ramp alone leaves it too fast here.
+        slowZone = DIM_ISOPTER_SLOW_ZONE_DEG
+        slowSpeed = Math.min(slowSpeed, DIM_ISOPTER_SLOW_SPEED)
+        rampStart = Math.max(rampStart, slowZone + 2)
+      }
+      currentRampStartRef.current = rampStart
+      currentSlowSpeedRef.current = slowSpeed
+      currentSlowZoneRef.current = slowZone
     } else {
       currentRampStartRef.current = 0
       currentSlowSpeedRef.current = currentSpeedRef.current
+      currentSlowZoneRef.current = 0
     }
 
     setCurrentStimLabel(STIMULI[task.stimulus].label)
@@ -1204,8 +1470,10 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     const elapsed = performance.now() - movingStartRef.current
 
     if (elapsed < MIN_RESPONSE_MS) {
-      // False start — too fast to be real perception
-      flashFixation('#ef4444', 300) // red flash = rejected
+      // False start — too fast to be real perception. Neutral slate cue, not
+      // red: a genuine early "I saw it" that lands a hair too soon shouldn't
+      // be met with the only alarm colour in the run.
+      flashFixation('#94a3b8', 300)
       cancelAnimationFrame(rafRef.current)
       if (stimulusRef.current) stimulusRef.current.style.opacity = '0'
       requeueCurrent()
@@ -1214,7 +1482,10 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     }
 
     flashFixation('#3b82f6', 150) // blue flash = confirmed
-    truePositivesRef.current += 1
+    // Don't let unscored warm-up presses inflate the reliability metric.
+    if (!blocksRef.current[blockIdxRef.current]?.isPractice) {
+      truePositivesRef.current += 1
+    }
     recordPoint(true, eccRef.current)
   // flashFixation reads refs/current DOM state and is intentionally not a
   // dependency; including it would recreate this hot response handler every
@@ -1224,6 +1495,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
 
   // ---------- pointer handler (wraps handleResponse with ISI false-positive gate) ----------
   const handlePointerDown = useCallback(() => {
+    beep()
     // Tap during the inter-stimulus gap (wait phase, no stimulus on screen) is
     // a false-positive press — feeds FPRR. Mirrors the keyboard handler.
     if (isiActiveRef.current && !isCatchTrialRef.current) {
@@ -1231,6 +1503,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       return
     }
     handleResponse()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [handleResponse])
 
   // ---------- pause / resume ----------
@@ -1360,6 +1633,59 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [maxEccentricityDeg])
 
+  // The single "advance / I see it" action, shared by the keyboard, screen
+  // taps, and the Bluetooth VR remote. Phase-aware: resumes from pause,
+  // advances an interstitial into the countdown, gates false-positive presses
+  // during the inter-stimulus gap, and otherwise records a response.
+  const handleAdvanceButton = () => {
+    if (phaseRef.current === 'paused') {
+      resume()
+    } else if (phaseRef.current === 'interstitial') {
+      // Continue from interstitial → countdown → start
+      startCountdown()
+    } else {
+      // Any press during the test gets the perimeter-style confirmation tone,
+      // so a patient in a headset hears that the button registered.
+      beep()
+      // Keypress during the inter-stimulus gap (wait phase, no stimulus
+      // on screen) is a false-positive press — feeds FPRR.
+      if (isiActiveRef.current && !isCatchTrialRef.current) {
+        fpIsiPressesRef.current += 1
+        return
+      }
+      handleResponse()
+    }
+  }
+
+  // VR/Bluetooth remote + controller support. Headset clickers and gamepads
+  // (e.g. an SC-803's trigger, rocker, A/B/X/Y) reach us via media keys (the
+  // confirm button's Play/Pause, claimed through the MediaSession) or the
+  // Gamepad API rather than as keydowns; the hook routes any of them to the
+  // same advance action and provides the press-confirmation beep. `armRemote`
+  // must run inside a user gesture — see enterFullscreen, which fires on the
+  // start tap.
+  const { arm: armRemote, beep, disarm: disarmRemote } = useRemoteInput(handleAdvanceButton)
+
+  // Once the test is over (results screen), release the remote capture so its
+  // button stops owning the phone's media session and swallowing taps — e.g.
+  // the results-screen "Sign in" button. The remote is still needed on the
+  // 'vr-complete' "take the headset off" screen, so only disarm at 'results'.
+  useEffect(() => {
+    if (phase === 'results') disarmRemote()
+  }, [phase, disarmRemote])
+
+  // Phone-VR: this test mounts by auto-advancing out of calibration (a remote
+  // press / skipped position check), so there's no fresh tap here to arm the
+  // controller from — yet the very first screen (the "Ready to map…"
+  // interstitial) already needs the remote. The previous screen's useRemoteInput
+  // unmounted with it, releasing the media session, so re-claim it on mount.
+  // The page already engaged audio during calibration, so the silent keep-alive
+  // resumes without a new gesture; the interstitial's countdown (below) is the
+  // fallback for remotes the media path can't reach.
+  useEffect(() => {
+    if (vr) armRemote()
+  }, [vr, armRemote])
+
   // ---------- keyboard listener ----------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1372,22 +1698,13 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
         }
         return
       }
-      if (e.code === 'Space' || e.code === 'Enter') {
+      if (
+        e.code === 'Space' ||
+        e.code === 'Enter' ||
+        REMOTE_RESPONSE_KEYS.has(e.key)
+      ) {
         e.preventDefault()
-        if (phaseRef.current === 'paused') {
-          resume()
-        } else if (phaseRef.current === 'interstitial') {
-          // Continue from interstitial → countdown → start
-          startCountdown()
-        } else {
-          // Keypress during the inter-stimulus gap (wait phase, no stimulus
-          // on screen) is a false-positive press — feeds FPRR.
-          if (isiActiveRef.current && !isCatchTrialRef.current) {
-            fpIsiPressesRef.current += 1
-            return
-          }
-          handleResponse()
-        }
+        handleAdvanceButton()
       }
     }
     window.addEventListener('keydown', onKey)
@@ -1399,6 +1716,21 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   const handleDone = () => {
     exitFullscreen()
     onDone()
+  }
+
+  // Deliberate quit from the pause menu — logged as abortVia:'user_quit' (the
+  // real abandonment signal, distinct from React teardown). Setting the
+  // dedupe flag first stops the unmount cleanup from firing a second abort.
+  const handleQuit = () => {
+    if (
+      startedTrackedRef.current
+      && !completedTrackedRef.current
+      && !abortDispatchedRef.current
+    ) {
+      abortDispatchedRef.current = true
+      trackEvent('test_aborted', getDeviceId(), buildAbortMeta('user_quit')).catch(() => {})
+    }
+    handleDone()
   }
 
   // Done button on the post-test results screen — if the user hasn't
@@ -1418,7 +1750,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // PDF export wrapped with the same one-shot prompt. PDF still
   // downloads immediately; modal pops after so the user isn't blocked.
   const exportPdfAndMaybePrompt = (result: TestResult) => {
-    exportTrackedResultPDF(result)
+    exportTrackedResultPDF(result, { includeReliabilityDetails: canViewReliability })
     if (savedId && !surveyDone && !hasSurveyForResult(savedId) && !hasBeenPromptedForFeedback()) {
       markFeedbackPrompted()
       setFeedbackTrigger('pdf')
@@ -1446,6 +1778,9 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // landscape. Users who install as a PWA get the fullest experience thanks
   // to the apple-mobile-web-app-capable meta tag in index.html.
   const enterFullscreen = () => {
+    // Claim the media session from inside this gesture so the VR remote's
+    // button reaches us instead of the user's background music app.
+    armRemote()
     try {
       const el = document.documentElement as HTMLElement & {
         webkitRequestFullscreen?: () => Promise<void>
@@ -1475,8 +1810,20 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   }
 
   // ---------- countdown ----------
+  // Begin the current block from the interstitial confirm press. enterFullscreen
+  // arms the VR remote inside the user gesture, so it must run on every path.
+  //
+  // Phone-VR has no 3-2-1: the interstitial is the single confirm crosshair, and
+  // a counting screen the patient can't dismiss just delays the test and adds a
+  // second crosshair view. Go straight into the first stimulus (startCurrentTask
+  // drops to 'wait', which keeps the same fixation crosshair on screen through
+  // the pre-stimulus delay, so there's no blank gap). Non-VR keeps the countdown.
   const startCountdown = () => {
     enterFullscreen()
+    if (vr) {
+      startCurrentTask()
+      return
+    }
     setPhase('countdown')
     setCountdown(3)
   }
@@ -1507,7 +1854,15 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // for one session.
   const abortDispatchedRef = useRef(false)
 
-  const buildAbortMeta = useCallback((via: 'unmount' | 'pagehide'): Record<string, string> => {
+  // `abortVia` separates the three teardown sources so the abort metric is
+  // readable: `user_quit` = deliberate pause-menu quit (real abandonment),
+  // `pagehide` = page teardown (bfcache already filtered out upstream),
+  // `unmount` = in-SPA navigation. `leave` enriches pagehide aborts with the
+  // bfcache / visibility classification for downstream de-noising.
+  const buildAbortMeta = useCallback((
+    via: 'unmount' | 'pagehide' | 'user_quit',
+    leave?: PageLeaveInfo,
+  ): Record<string, string> => {
     const consolidated = consolidatePoints(resultsRef.current)
     const durationSeconds = getTestDurationSeconds()
     const catchTrials = catchTrialRef.current
@@ -1522,26 +1877,33 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       falsePositiveIsiPresses: String(fpIsiPressesRef.current),
       truePositiveResponses: String(truePositivesRef.current),
       abortVia: via,
+      ...(leave ? pageLeaveMeta(leave) : {}),
       ...getDeviceInfo(),
       ...buildStudyEventMeta(studyMode),
       ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
     }
   }, [eye, extendedField, getTestDurationSeconds, studyMode])
 
-  // pagehide fires on tab close, hard navigation away, and bfcache eviction
-  // — none of which trigger React unmount. Without this listener those
-  // sessions would never produce a test_aborted event. Beacon delivery via
-  // fetch+keepalive so the request survives the tearing-down document.
-  useEffect(() => {
-    const onPageHide = () => {
+  // All accidental-teardown guards, centralised (see testLifecycle) so this
+  // matches StaticTest exactly: pagehide → abort beacon with bfcache skipped
+  // (a tab-switch / mobile app-switch that returns isn't mis-counted); tab
+  // hidden or fullscreen exited mid-sweep → clean auto-pause; beforeunload →
+  // confirm before a reflexive reload nukes the run.
+  useActiveTestGuards({
+    isRunActive: () =>
+      startedTrackedRef.current && !completedTrackedRef.current && !abortDispatchedRef.current,
+    isPresenting: () =>
+      phaseRef.current === 'wait'
+      || phaseRef.current === 'moving'
+      || phaseRef.current === 'interstitial',
+    onTeardown: (info) => {
       if (abortDispatchedRef.current) return
       if (!startedTrackedRef.current || completedTrackedRef.current) return
       abortDispatchedRef.current = true
-      trackEventBeacon('test_aborted', getDeviceId(), buildAbortMeta('pagehide'))
-    }
-    window.addEventListener('pagehide', onPageHide)
-    return () => window.removeEventListener('pagehide', onPageHide)
-  }, [buildAbortMeta])
+      trackEventBeacon('test_aborted', getDeviceId(), buildAbortMeta('pagehide', info))
+    },
+    onAutoPause: () => pause(),
+  })
 
   // ---------- cleanup ----------
   // All refs read in this cleanup (catchTrialRef, resultsRef, phaseRef,
@@ -1561,7 +1923,6 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
         && !abortDispatchedRef.current
       ) {
         abortDispatchedRef.current = true
-        // eslint-disable-next-line react-hooks/exhaustive-deps
         trackEvent('test_aborted', getDeviceId(), buildAbortMeta('unmount')).catch(() => {})
       }
     }
@@ -1594,6 +1955,8 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
 
   // ---------- save ----------
   const handleSave = () => {
+    if (savedRef.current) return
+    savedRef.current = true
     const consolidated = consolidatePoints(results)
     const catchTrials = catchTrialRef.current
     const reliabilityIndices = {
@@ -1613,7 +1976,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
       eye,
       date: new Date().toISOString(),
       points: consolidated,
-      isopterAreas: calcIsopterAreas(consolidated),
+      isopterAreas: calcIsopterAreas(inField(consolidated)),
       calibration,
       testType: 'goldmann',
       durationSeconds: getTestDurationSeconds(),
@@ -1624,6 +1987,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
         testMode: 'suprathreshold',
         speedMode,
         extendedField,
+        ...(vr ? { presentationMode: 'phone-vr' as const, vrHeadsetPreset: vr.headsetPreset } : {}),
         advancedSettings: advanced,
       }),
       ...(buildStudyMetadata(studyMode) ? { study: buildStudyMetadata(studyMode) } : {}),
@@ -1635,6 +1999,21 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     saveResult(result)
     setSavedId(result.id)
   }
+
+  // Persist the moment the test finishes — when the "test complete" (VR) or the
+  // results screen first appears — NOT only when the user taps "View results".
+  // In VR the patient takes the headset off between those screens and can
+  // navigate away (or tap Back) before reaching results; saving on phase entry
+  // means a completed run is never lost. Binocular per-eye runs (onComplete)
+  // hand off to the parent, which saves the combined result, so they skip this.
+  // handleSave is ref-guarded, so this and the results-render call save once.
+  useEffect(() => {
+    if (onComplete) return
+    if (phase !== 'results' && phase !== 'vr-complete') return
+    if (resultsRef.current.length === 0) return
+    handleSave()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase])
 
   // If the user signs in after finishing the test (via the SavePrompt on
   // the results screen), retry persistence so the just-completed run ends
@@ -1699,7 +2078,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   if (phase === 'countdown') {
     return (
       <div
-        className={`min-h-screen ${bgClass} text-white select-none cursor-none relative overflow-hidden`}
+        className={`h-[100dvh] ${bgClass} text-white select-none cursor-none relative overflow-hidden`}
         onTouchStart={e => e.preventDefault()}
       >
         {/* Fixation dot at real position */}
@@ -1725,6 +2104,13 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
         >
           {countdown || 'Go'}
         </div>
+        {vr && (
+          <VrTestSurface
+            viewport={computeVrViewport(window.innerWidth, window.innerHeight, activeEye, vr)}
+            innerWidth={window.innerWidth}
+            showDivider
+          />
+        )}
       </div>
     )
   }
@@ -1779,9 +2165,9 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
         onRestart={handleRestart}
         onStop={() => {
           exitFullscreen()
-          setPhase('results')
+          setPhase(vrFinishPhase)
         }}
-        onQuit={handleDone}
+        onQuit={handleQuit}
         extra={speedToggle}
       />
     )
@@ -1790,11 +2176,52 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   if (phase === 'interstitial') {
     const block = blocks[currentBlockIdx]
     // Fixation position for this block
-    const fx = block?.fixation ? block.fixation.x : calibration.fixationOffsetPx
-    const fy = block?.fixation ? block.fixation.y : 0
+    const fx = block?.fixation ? block.fixation.x : defaultFixation.x
+    const fy = block?.fixation ? block.fixation.y : defaultFixation.y
+    // Phone-VR: anchor the info text in the ACTIVE LENS HALF, on the side
+    // OPPOSITE the new fixation, so the box never sits on top of the fixation
+    // dot / guide arrow. The upper-field pass parks fixation low in the lens, so
+    // a bottom-anchored box hid its dot + arrow (the "no arrow on the upper
+    // pass" report). When fixation is in the lower half (fy > ~40px below the
+    // lens centre) the box moves to the top; otherwise it stays at the bottom.
+    // zIndex 10 keeps the opaque box above the arrow (zIndex 5) so the dotted
+    // "move eyes" line never runs through the text.
+    const interVp = vr ? computeVrViewport(window.innerWidth, window.innerHeight, activeEye, vr) : null
+    const interActiveCenterX = interVp ? interVp.originX + interVp.width / 2 : 0
+    const interBoxAtTop = fy > 40
+    const infoBoxStyle: CSSProperties = interVp
+      ? {
+          position: 'absolute',
+          left: interActiveCenterX,
+          ...(interBoxAtTop ? { top: 28 } : { bottom: 28 }),
+          transform: 'translateX(-50%)',
+          width: interVp.width - 32,
+          maxWidth: 280,
+          zIndex: 10,
+          backgroundColor: 'rgba(8, 8, 13, 0.95)',
+          color: '#ededf0',
+          borderRadius: 12,
+          padding: '12px 18px',
+          border: '1px solid rgba(255, 255, 255, 0.08)',
+        }
+      : {
+          position: 'absolute',
+          left: '50%',
+          top: '50%',
+          transform: 'translate(-50%, -100%)',
+          marginLeft: fx,
+          marginTop: -30 + fy,
+          maxWidth: 280,
+          zIndex: 10,
+          backgroundColor: 'rgba(8, 8, 13, 0.95)',
+          color: '#ededf0',
+          borderRadius: 12,
+          padding: '12px 20px',
+          border: '1px solid rgba(255, 255, 255, 0.08)',
+        }
     return (
       <div
-        className={`min-h-screen ${bgClass} text-white select-none cursor-pointer relative overflow-hidden`}
+        className={`h-[100dvh] ${bgClass} text-white select-none cursor-pointer relative overflow-hidden`}
         onPointerDown={() => startCountdown()}
       >
         {/* Arrow from previous fixation to new fixation */}
@@ -1835,9 +2262,9 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
                   x={window.innerWidth / 2 + prevFixationXY.x}
                   y={window.innerHeight / 2 + prevFixationXY.y + 20}
                   fill="#fbbf24"
-                  fontSize={12}
+                  fontSize={13}
                   textAnchor="middle"
-                  opacity={0.6}
+                  opacity={0.9}
                 >
                   move eyes {arrow}
                 </text>
@@ -1850,9 +2277,9 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
               x2={window.innerWidth / 2 + fx}
               y2={window.innerHeight / 2 + fy}
               stroke="#fbbf24"
-              strokeWidth={2}
+              strokeWidth={2.5}
               strokeDasharray="6,4"
-              opacity={0.4}
+              opacity={0.75}
               markerEnd="url(#arrowhead)"
             />
           </svg>
@@ -1953,44 +2380,127 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
             so the solid dark background renders consistently regardless of
             Tailwind JIT / cache state — and no backdrop-blur, which Safari
             washes out with a light saturation. */}
-        <div
-          className="absolute text-center pointer-events-none"
-          style={{
-            left: '50%',
-            top: '50%',
-            transform: 'translate(-50%, -100%)',
-            marginLeft: fx,
-            marginTop: -30 + fy,
-            maxWidth: 280,
-            backgroundColor: 'rgba(8, 8, 13, 0.95)',
-            color: '#ededf0',
-            borderRadius: 12,
-            padding: '12px 20px',
-            border: '1px solid rgba(255, 255, 255, 0.08)',
-          }}
-        >
-          <p style={{ fontSize: 11, color: '#a1a1aa', marginBottom: 4 }}>
-            {currentBlockIdx + 1}/{blocks.length} — {completedTasks}/{totalTasks} pts
-            {' · '}
-            <span style={{ color: speedMode === 'slow' ? '#a1a1aa' : '#c8902a' }}>
-              {speedMode === 'slow' ? 'Slow' : 'Normal'} speed
-            </span>
-          </p>
+        <div className="text-center pointer-events-none" style={infoBoxStyle}>
+          {/* Detailed progress + speed is noise on the small lens view, so VR
+              shows only the warm-up tag (when practising) and nothing else here;
+              non-VR keeps the full block/points/speed readout. */}
+          {(block?.isPractice || !vr) && (
+            <p style={{ fontSize: 11, color: '#a1a1aa', marginBottom: 4 }}>
+              {block?.isPractice ? (
+                <span style={{ color: '#2dd4bf' }}>Warm-up · not scored</span>
+              ) : (
+                <>
+                  {currentBlockIdx + 1}/{blocks.length} — {completedTasks}/{totalTasks} pts
+                  {' · '}
+                  <span style={{ color: speedMode === "slow" ? "#a1a1aa" : "#2dd4bf" }}>
+                    {speedMode === 'slow' ? 'Slow' : 'Normal'} speed
+                  </span>
+                </>
+              )}
+            </p>
+          )}
           <h2 style={{ fontSize: 14, fontWeight: 500, color: '#ffffff' }} aria-live="polite">{block?.label}</h2>
-          <p style={{ color: '#d4d4d8', fontSize: 12, marginTop: 4 }}>{block?.description}</p>
-          <p style={{ color: '#a1a1aa', fontSize: 11, marginTop: 12 }}>
-            {isMobileDevice
-              ? 'Tap when you see the stimulus'
-              : <>Press <kbd style={{ padding: '2px 6px', background: '#27272a', color: '#e4e4e7', borderRadius: 4, fontSize: 11 }}>Space</kbd> or tap</>
-            }
-          </p>
-          <p style={{ color: '#71717a', fontSize: 10, marginTop: 8 }}>
-            {isMobileDevice
-              ? <>Tap the <span style={{ color: '#fbbf24' }}>yellow dot</span> to pause</>
-              : <>Press <kbd style={{ padding: '1px 5px', background: '#27272a', color: '#e4e4e7', borderRadius: 4, fontSize: 10 }}>Esc</kbd> to pause</>
-            }
-          </p>
+          {/* The per-block description is the longest text; through the lenses it
+              overflows the readable area. Keep it for non-VR, and for the VR
+              warm-up (where it teaches the press-when-seen mechanic), but drop it
+              on the repeated VR scoring blocks. */}
+          {(!vr || block?.isPractice) && (
+            <p style={{ color: '#d4d4d8', fontSize: 12, marginTop: 4 }}>{block?.description}</p>
+          )}
+          {/* Preview of THIS block's stimulus — true size + brightness, sweeping
+              inward — so the patient knows what (and how small/dim) to look for. */}
+          {(() => {
+            const demoStim = block?.tasks?.[0]?.stimulus
+            if (!demoStim) return null
+            const s = STIMULI[demoStim]
+            const dotPx = Math.max(stimMinPx, Math.round(degToPx(s.sizeDeg, calibration)))
+            return (
+              <div style={{ position: 'relative', height: Math.max(18, dotPx + 8), width: '82%', margin: '8px auto 0', overflow: 'hidden', borderRadius: 6, background: 'rgba(255,255,255,0.04)' }}>
+                <div style={{
+                  position: 'absolute', top: '50%', left: '88%', width: dotPx, height: dotPx, borderRadius: '50%',
+                  backgroundColor: stimulusDisplayColor(demoStim),
+                  opacity: stimulusOpacity(s.intensityFrac, brightnessFloor),
+                  transform: 'translateY(-50%)',
+                  animation: 'vfc-demo-sweep 2.6s linear infinite',
+                }} />
+              </div>
+            )
+          })()}
+          {/* VR collapses to a single action line — the demo dot above already
+              shows what to look for, and the warm-up taught the mechanic, so two
+              "press the button…" prompts were redundant on the small lens view.
+              "Look at the dot" keeps fixation; "press to begin" is the action. */}
+          {vr ? (
+            <p style={{ color: '#2dd4bf', fontSize: 12, marginTop: 10 }}>
+              Look at the dot · press to begin
+            </p>
+          ) : (
+            <>
+              <p style={{ color: '#a1a1aa', fontSize: 11, marginTop: 12 }}>
+                {isMobileDevice
+                  ? 'Tap when you see the stimulus'
+                  : <>Press <kbd style={{ padding: '2px 6px', background: '#27272a', color: '#e4e4e7', borderRadius: 4, fontSize: 11 }}>Space</kbd> or tap</>
+                }
+              </p>
+              <p style={{ color: '#71717a', fontSize: 10, marginTop: 8 }}>
+                {isMobileDevice
+                  ? <>Tap the <span style={{ color: '#fbbf24' }}>yellow dot</span> to pause</>
+                  : <>Press <kbd style={{ padding: '1px 5px', background: '#27272a', color: '#e4e4e7', borderRadius: 4, fontSize: 10 }}>Esc</kbd> to pause</>
+                }
+              </p>
+            </>
+          )}
         </div>
+        {vr && (
+          <VrTestSurface
+            viewport={computeVrViewport(window.innerWidth, window.innerHeight, activeEye, vr)}
+            innerWidth={window.innerWidth}
+            showDivider
+          />
+        )}
+      </div>
+    )
+  }
+
+  if (phase === 'vr-complete') {
+    // Only entered in VR (see vrFinishPhase). Render the "take the headset off"
+    // message inside the ACTIVE lens half so it's legible through the lens —
+    // full-screen-centered text lands on the nose bridge and is unreadable. The
+    // inactive half is masked by VrTestSurface, matching the in-test screens.
+    const innerW = typeof window !== 'undefined' ? window.innerWidth : 812
+    const innerH = typeof window !== 'undefined' ? window.innerHeight : 375
+    const vp = vr ? computeVrViewport(innerW, innerH, activeEye, vr) : null
+    const activeCenterX = vp ? vp.originX + vp.width / 2 : innerW / 2
+    const contentW = vp ? Math.min(vp.width - 32, 320) : 320
+    return (
+      <div
+        className="fixed inset-0 bg-black z-50 text-white select-none"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Test complete"
+      >
+        <div
+          className="absolute text-center px-2"
+          style={{ left: activeCenterX, top: '50%', transform: 'translate(-50%, -50%)', width: contentW, zIndex: 22 }}
+        >
+          <div className="w-12 h-12 mx-auto rounded-full bg-teal/10 flex items-center justify-center border border-teal/20">
+            <svg viewBox="0 0 24 24" className="w-6 h-6 text-teal" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+              <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </div>
+          <h2 className="mt-3 text-base font-semibold">Test complete</h2>
+          <p className="mt-1 text-[11px] text-zinc-300 leading-snug">
+            You can take the headset off now. Your results are ready on the
+            next screen.
+          </p>
+          <button
+            onClick={() => setPhase('results')}
+            className="mt-3 w-full py-2 btn-primary rounded-lg text-sm font-medium text-white"
+          >
+            View results
+          </button>
+        </div>
+        {vp && <VrTestSurface viewport={vp} innerWidth={innerW} showDivider={false} />}
       </div>
     )
   }
@@ -1998,16 +2508,18 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   if (phase === 'results') {
     const consolidated = consolidatePoints(results)
 
-    // In binocular mode, hand results back to parent instead of showing results screen
+    // In binocular mode, hand results back to parent instead of showing results
+    // screen. Hand off in-field points so the combined binocular areas use the
+    // same testable-field cap as the single-eye display/save.
     if (onComplete) {
-      onComplete(consolidated)
+      onComplete(inField(consolidated))
       return null
     }
 
     // Separate standard-field points from extended-field points.
     // Extended tests use a shifted fixation and can produce eccentricities
     // far beyond maxEccentricityDeg — these shouldn't distort the main isopter.
-    const standardPoints = consolidated.filter(p => p.eccentricityDeg <= maxEccentricityDeg + 2)
+    const standardPoints = inField(consolidated)
     const areas = calcIsopterAreas(standardPoints)
     // Auto-save on first render of results
     if (!savedId && consolidated.length > 0) {
@@ -2018,15 +2530,15 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     // dedicated empty state rather than a blank field map.
     if (consolidated.length === 0) {
       return (
-        <div className={`min-h-screen ${bgClass} text-white p-6 overflow-y-auto`}>
+        <div className={`min-h-screen bg-base text-body p-6 overflow-y-auto`}>
           <main className="max-w-lg mx-auto space-y-6 pb-12 text-center">
             <h1 className="text-2xl font-semibold">Results</h1>
-            <p className="text-sm text-gray-400">
+            <p className="text-sm text-muted">
               Goldmann kinetic perimetry · {eye === 'right' ? <abbr title="Oculus Dexter">OD</abbr> : <abbr title="Oculus Sinister">OS</abbr>}
             </p>
-            <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-4 text-sm text-zinc-300 space-y-2 text-left">
-              <p className="font-medium text-zinc-100">No measurements yet</p>
-              <p className="text-zinc-400 leading-relaxed">
+            <div className="rounded-lg border border-line bg-surface p-4 text-sm text-body space-y-2 text-left">
+              <p className="font-medium text-ink">No measurements yet</p>
+              <p className="text-muted leading-relaxed">
                 You stopped the test before any moving stimulus was
                 detected, so there's nothing to plot. Restart the test and
                 {isMobileDevice ? ' tap' : ' press Space (or tap)'} as soon as the stimulus appears.
@@ -2044,15 +2556,16 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
     }
 
     return (
-      <div className={`min-h-screen ${bgClass} text-white p-6 overflow-y-auto`}>
+      <div className={`min-h-screen bg-base text-body p-6 overflow-y-auto`}>
         <main className="max-w-lg mx-auto space-y-6 pb-12">
           <h1 className="text-2xl font-semibold text-center">Results</h1>
-          <p className="text-center text-xs text-gray-500">Goldmann kinetic perimetry · {eye === 'right' ? <abbr title="Oculus Dexter">OD</abbr> : <abbr title="Oculus Sinister">OS</abbr>}</p>
+          <p className="text-center text-xs text-muted">Goldmann kinetic perimetry · {eye === 'right' ? <abbr title="Oculus Dexter">OD</abbr> : <abbr title="Oculus Sinister">OS</abbr>}</p>
           {savedId && <SavePrompt />}
           <VisualFieldMap
             points={standardPoints}
             eye={eye}
             maxEccentricity={maxEccentricityDeg}
+            plotExtentDeg={vrPlotExtentDeg(standardPoints, calibration, maxEccentricityDeg)}
             size={Math.min(600, window.innerWidth - 48)}
             calibration={calibration}
             enableVerify
@@ -2061,9 +2574,9 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
             const truncated = detectTruncatedIsopters(standardPoints, maxEccentricityDeg)
             if (truncated.length === 0) return null
             return (
-              <div className="text-xs text-amber-400 space-y-1">
+              <div className="text-xs text-amber-700 space-y-1">
                 <p className="font-medium">Some isopter boundaries were not reached</p>
-                <ul className="list-disc list-inside space-y-0.5 text-amber-300/80">
+                <ul className="list-disc list-inside space-y-0.5 text-amber-600">
                   {truncated.map(t => (
                     <li key={t.stimulus}>
                       {t.stimulus}: extends to <strong>at least {t.maxEccentricityReached.toFixed(0)}°</strong>{' '}
@@ -2072,7 +2585,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
                     </li>
                   ))}
                 </ul>
-                <p className="text-amber-300/70">
+                <p className="text-amber-600">
                   Sit closer to the screen (and recalibrate) to assess the full field.
                 </p>
               </div>
@@ -2084,10 +2597,10 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
               const area = areas[key]
               if (area == null) return null
               return (
-                <div key={key} className="bg-gray-900 rounded-lg px-3 py-2 flex items-center gap-2">
+                <div key={key} className="bg-surface border border-line rounded-lg px-3 py-2 flex items-center gap-2">
                   <span className="w-2 h-2 rounded-full" style={{ backgroundColor: STIMULI[key].color }} />
-                  <span className="text-gray-400">{STIMULI[key].label}</span>
-                  <span className="ml-auto font-mono text-white">{area.toFixed(0)} deg²</span>
+                  <span className="text-muted">{STIMULI[key].label}</span>
+                  <span className="ml-auto font-mono text-ink">{area.toFixed(0)} deg²</span>
                 </div>
               )
             })}
@@ -2098,6 +2611,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
             areas={areas}
             maxEccentricityDeg={maxEccentricityDeg}
             calibration={calibration}
+            showReliability={canViewReliability}
             reliabilityIndices={{
               catchTrialsPresented: catchTrialRef.current.length,
               catchTrialsFalsePositive: catchTrialRef.current.filter(c => c.detected).length,
@@ -2105,12 +2619,12 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
               truePositiveResponses: truePositivesRef.current,
             }}
           />
-          <ScenarioOverlay userPoints={standardPoints} userAreas={areas} maxEccentricity={maxEccentricityDeg} />
+          <ScenarioOverlay userPoints={standardPoints} userAreas={areas} maxEccentricity={maxEccentricityDeg} calibration={calibration} />
           {/* Vision simulation disabled for now — see comment in
               StaticTest.tsx. VisionSimulator file is preserved so the
               feature can be re-enabled in place. */}
           {surveyDone && (
-            <p className="text-center text-green-400 text-xs">Thank you for your feedback!</p>
+            <p className="text-center text-green-600 text-xs">Thank you for your feedback!</p>
           )}
 
           <div className="flex gap-3">
@@ -2165,7 +2679,7 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
   // Active test (wait + moving phases)
   return (
     <div
-      className={`min-h-screen ${bgClass} select-none cursor-none relative overflow-hidden`}
+      className={`h-[100dvh] ${bgClass} select-none cursor-none relative overflow-hidden`}
       onPointerDown={handlePointerDown}
       role="application"
       aria-label="Visual field test in progress — press Space or tap when you see the stimulus"
@@ -2273,6 +2787,16 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
         >
           {advanced.fixationAlertMessage}
         </div>
+      )}
+
+      {/* Inactive-lens mask. Divider hidden during the active sweep — a line
+          near the meridian would distract from the stimulus. */}
+      {vr && (
+        <VrTestSurface
+          viewport={computeVrViewport(window.innerWidth, window.innerHeight, activeEye, vr)}
+          innerWidth={window.innerWidth}
+          showDivider={false}
+        />
       )}
     </div>
   )

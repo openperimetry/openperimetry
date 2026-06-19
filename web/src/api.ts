@@ -169,11 +169,11 @@ export interface VFResultRecord {
 }
 
 export async function listVFResults() {
-  return request<{ results: VFResultRecord[] }>('/api/users/me/vf-results')
+  return request<{ results: VFResultRecord[]; deletedIds: string[] }>('/api/users/me/vf-results')
 }
 
 export async function syncVFResults(results: VFResultRecord[]) {
-  return request<{ results: VFResultRecord[]; added: number }>('/api/users/me/vf-results/sync', {
+  return request<{ results: VFResultRecord[]; added: number; deletedIds: string[] }>('/api/users/me/vf-results/sync', {
     method: 'POST',
     body: JSON.stringify(results),
   })
@@ -206,8 +206,8 @@ export interface AdminSurveyRecord {
   resultId: string
   date: string
   deviceId: string
-  perceivedAccuracy: number
-  easeOfUse: number
+  perceivedAccuracy: number | null
+  easeOfUse: number | null
   instructionsClarity: number | null
   comparedToClinical: string | null
   freeformFeedback: string
@@ -376,10 +376,24 @@ export interface AdminEventRecord {
   meta: Record<string, string>
 }
 
-export async function getAdminEvents() {
-  return request<{ events: AdminEventRecord[] }>('/api/admin/events')
+export interface AdminEventPage {
+  events: AdminEventRecord[]
+  /** Opaque cursor for the next (older) page, or null when no more remain. */
+  nextCursor: string | null
+}
+
+export async function getAdminEvents(opts?: { cursor?: string; limit?: number }): Promise<AdminEventPage> {
+  const params = new URLSearchParams()
+  if (opts?.limit) params.set('limit', String(opts.limit))
+  if (opts?.cursor) params.set('cursor', opts.cursor)
+  const qs = params.toString()
+  return request<AdminEventPage>(`/api/admin/events${qs ? `?${qs}` : ''}`)
 }
 
 export async function getAdminSurveys() {
   return request<{ surveys: AdminSurveyRecord[] }>('/api/admin/surveys')
+}
+
+export async function deleteAdminSurvey(id: string) {
+  return request<void>(`/api/admin/surveys/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }

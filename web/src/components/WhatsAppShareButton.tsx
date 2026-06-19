@@ -39,7 +39,7 @@ export function WhatsAppShareButton({ message, url = DEFAULT_URL }: Props) {
         href={href}
         target="_blank"
         rel="noopener noreferrer"
-        className="inline-flex items-center gap-1.5 text-xs text-zinc-500 hover:text-[#25D366] transition-colors py-1"
+        className="inline-flex items-center gap-1.5 text-xs text-muted hover:text-[#25D366] transition-colors py-1"
         aria-label="Share on WhatsApp"
       >
         <svg

@@ -27,6 +27,27 @@ export function polarToXY(
   return [center + r * Math.cos(theta), center - r * Math.sin(theta)]
 }
 
+/**
+ * Plotted radar extent in degrees for a result. Phone-VR fits the rings/scale
+ * to the measured data (a small buffer past the outermost point) so a ~32°
+ * field isn't drawn as a tiny isopter inside the ~44° screen-edge halo that
+ * `maxEccentricityDeg` represents in VR. Returns `undefined` for non-VR (and
+ * when there's no usable data) so callers pass nothing and the radar renders
+ * exactly as before. Render-only — never feeds areas or classification.
+ */
+export function vrPlotExtentDeg(
+  points: TestPoint[],
+  calibration: CalibrationData | undefined,
+  maxEccentricityDeg: number,
+): number | undefined {
+  if (!calibration?.vr?.enabled) return undefined
+  let dataMax = 0
+  for (const p of points) if (p.eccentricityDeg > dataMax) dataMax = p.eccentricityDeg
+  if (dataMax <= 0) return undefined
+  // Cap at the true testable extent so a genuinely wide field is never clipped.
+  return Math.min(maxEccentricityDeg, dataMax * 1.15)
+}
+
 /** Catmull-Rom smooth closed path through a cyclic list of pixel points. */
 export function smoothClosedPath(pts: [number, number][]): string {
   const n = pts.length

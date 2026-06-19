@@ -12,7 +12,7 @@ export function BackButton({ onClick, label = 'Back' }: BackButtonProps) {
   return (
     <button
       onClick={onClick}
-      className="inline-flex items-center gap-2 px-4 py-2.5 min-h-[44px] text-sm font-medium text-zinc-300 hover:text-white bg-surface hover:bg-elevated rounded-xl transition-all border border-white/[0.06] hover:border-white/[0.12] focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base"
+      className="inline-flex items-center gap-2 px-4 py-2.5 min-h-[44px] text-sm font-medium text-body hover:text-ink bg-surface hover:bg-subtle-2 rounded-xl transition-all border border-line hover:border-line-strong focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-base"
       aria-label={label}
     >
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">

@@ -59,17 +59,31 @@ import { STATIC_TEST } from '../constants'
 import { formatEyeLabel } from '../eyeLabels'
 import { HeadGuide } from './HeadGuide'
 import { degToPx } from '../geometry'
+import { computeVrViewport } from '../vrGeometry'
+import { VrTestSurface } from './VrTestSurface'
 import { stimulusDisplayColor } from '../stimulusDisplay'
 import { SPEED_PRESETS } from '../testDefaults'
 import { useAdvancedSettings } from '../advancedSettings'
 import { useStudyMode } from '../studyMode'
 import { isPhoneLikeDevice } from '../deviceMode'
+import { useRemoteInput, REMOTE_RESPONSE_KEYS } from '../remoteInput'
 import {
   getStaticGrid,
   type GridPoint,
   type StaticGridPattern,
 } from '../grids'
 import { summarizeThresholdPoints, thresholdSummaryToMeta } from '../thresholdSummary'
+import { useActiveTestGuards, pageLeaveMeta, type PageLeaveInfo } from '../testLifecycle'
+import {
+  saveResumeSnapshot,
+  loadResumeSnapshot,
+  clearResumeSnapshot,
+  serializeStaircases,
+  deserializeStaircases,
+  resumeKey,
+  isPracticeDone,
+  markPracticeDone,
+} from '../testResume'
 import { PositionCheckOverlay } from './PositionCheckOverlay'
 import {
   buildNativeProvenance,
@@ -93,7 +107,43 @@ const PRIOR_DB = 0
 // instructions (HeadGuide + "cover your X eye, sit at Y cm"), so the
 // check runs without any additional navigation and a pass lands them
 // straight in the countdown.
-type Phase = 'instructions' | 'position-check' | 'countdown' | 'testing' | 'paused' | 'results'
+type Phase = 'instructions' | 'position-check' | 'practice' | 'countdown' | 'testing' | 'paused' | 'results'
+
+/** Number of unscored practice presentations before the real test, so the
+ *  user learns the press-when-seen mechanic on guaranteed-visible dots
+ *  instead of during scored trials. */
+const PRACTICE_TRIALS = 3
+/** Easy, central, definitely-on-screen positions for the practice dots
+ *  (V4e, full brightness). Kept inside ±6° so they render at any
+ *  reasonable calibration without falling off the viewport. */
+const PRACTICE_POSITIONS: Array<{ xDeg: number; yDeg: number }> = [
+  { xDeg: -6, yDeg: 3 },
+  { xDeg: 6, yDeg: 3 },
+  { xDeg: 0, yDeg: -6 },
+]
+/** Neutral cue colour for a too-fast / false-positive press. Replaces the
+ *  alarming red (#ef4444) — red was the only red in the run and read as
+ *  "you did it wrong" to a user whose genuine early "I saw it" press just
+ *  landed a hair too soon. Slate-400 is visible on the dark field without
+ *  signalling alarm. */
+const NEUTRAL_FLASH = '#94a3b8'
+
+/** Serialisable in-progress snapshot for cross-reload resume. */
+interface StaticResumePayload {
+  calibrationKey: string
+  gridPattern: string
+  speedMode: string
+  startedAt: number | null
+  grid: GridPoint[]
+  queue: GridPoint[]
+  staircases: Array<[string, StaircaseState]>
+  thresholdResults: TestPoint[]
+  totalPoints: number
+  trialsDone: number
+  consecutiveMisses: number
+  rescueFired: number
+  fpIsiPresses: number
+}
 
 // Mobile keyboard-less devices don't have a Space key, so the
 // "press Space" copy in the instructions and pause screens is just
@@ -125,7 +175,8 @@ interface Props {
 
 export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = 'normal' }: Props) {
   const { user, syncResults } = useAuth()
-  const { pixelsPerDegree, maxEccentricityDeg, fixationOffsetPx } = calibration
+  const canViewReliability = user?.isAdmin === true || user?.isClinician === true
+  const { pixelsPerDegree, maxEccentricityDeg } = calibration
   // `presetKey` resolves the SPEED_PRESETS lookup. Quick uses the
   // same per-trial timings + reversal count as Normal; the time
   // savings come from running fewer locations (10-2 instead of 24-2),
@@ -178,7 +229,19 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
       }
     : SPEED_PRESETS[presetKey]
 
-  const fixationXY = { x: fixationOffsetPx, y: 0 }
+  // Phone-in-headset (`phone-vr`): the active lens half. `eye` is a single
+  // side here; `both` runs are split upstream. The vertical lens-center
+  // offset only applies in VR — standard mode keeps fixation on the midline.
+  const vr = calibration.vr?.enabled ? calibration.vr : null
+  const activeEye: 'left' | 'right' = eye === 'left' ? 'left' : 'right'
+  const fixationXY = (() => {
+    if (!vr) return { x: calibration.fixationOffsetPx, y: 0 }
+    const vp = computeVrViewport(window.innerWidth, window.innerHeight, activeEye, vr)
+    return {
+      x: Math.round(vp.fixationXFromScreenCenter),
+      y: Math.round(vp.fixationYFromScreenCenter),
+    }
+  })()
 
   // ---------- grid coverage ----------
   // The HFA grids are defined in visual-angle degrees (±27° for 24-2,
@@ -224,12 +287,18 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
       eye,
       gridPattern === 'custom' ? customGrid : undefined,
     )
+    // In VR, locations must fall inside the active lens half (not the whole
+    // screen) so nothing renders in the untested eye's half. Standard mode
+    // clamps to the full viewport.
+    const vp = vr ? computeVrViewport(screenW, screenH, activeEye, vr) : null
+    const minX = vp ? vp.originX : 0
+    const maxX = vp ? vp.originX + vp.width : screenW
     const fitting = fullGrid.filter(p => {
       const offsetXPx = degToPx(p.xDeg, calibration)
       const offsetYPx = degToPx(p.yDeg, calibration)
-      const absX = screenW / 2 + fixationOffsetPx + offsetXPx
-      const absY = screenH / 2 - offsetYPx
-      return absX >= 0 && absX <= screenW
+      const absX = screenW / 2 + fixationXY.x + offsetXPx
+      const absY = screenH / 2 + fixationXY.y - offsetYPx
+      return absX >= minX && absX <= maxX
         && absY >= 0 && absY <= screenH
     })
     return {
@@ -237,7 +306,7 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
       grid: fitting,
       dropped: fullGrid.length - fitting.length,
     }
-  }, [gridPattern, eye, customGrid, calibration, fixationOffsetPx, viewportTick])
+  }, [gridPattern, eye, customGrid, calibration, vr, activeEye, fixationXY.x, fixationXY.y, viewportTick])
 
   // ---------- phase ----------
   const [phase, setPhase] = useState<Phase>('instructions')
@@ -297,6 +366,35 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
   // closes the modal in place so the user keeps seeing the results.
   const [feedbackTrigger, setFeedbackTrigger] = useState<'done' | 'pdf' | null>(null)
 
+  // ---------- practice (unscored warm-up) ----------
+  // First-timers learn "press the instant you see the dot" on big, bright,
+  // central dots that don't touch any staircase, instead of fumbling the
+  // mechanic during scored trials (the detected:0 / quit-then-retry-44/44
+  // abort signature). Skipped once learned on this device.
+  const practiceDoneRef = useRef<boolean>(isPracticeDone())
+  const practiceSeenRef = useRef(0)
+  const practiceStimVisibleRef = useRef(false)
+  const [practiceIdx, setPracticeIdx] = useState(0)
+
+  // ---------- resume (cross-reload recovery) ----------
+  // A stable fingerprint of the calibration + run config; a snapshot only
+  // restores if it still matches, so a recalibration or settings change
+  // can't resurrect a now-invalid run.
+  const calibrationKey = useMemo(
+    () => [
+      Math.round(pixelsPerDegree * 100),
+      Math.round((calibration.viewingDistanceCm ?? 0) * 10),
+      Math.round((calibration.brightnessFloor ?? 0) * 1000),
+      Math.round(maxEccentricityDeg ?? 0),
+      Math.round(calibration.fixationOffsetPx ?? 0),
+      vr ? 'vr' : 'std',
+      eye,
+    ].join('|'),
+    [pixelsPerDegree, calibration, maxEccentricityDeg, vr, eye],
+  )
+  const resumeKeyStr = useMemo(() => resumeKey('static', eye), [eye])
+  const trialsDoneRef = useRef(0)
+
   // ---------- tracking ----------
   const startedTrackedRef = useRef(false)
   const completedTrackedRef = useRef(false)
@@ -312,6 +410,30 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
     clearTimeout(hideTimeoutRef.current)
     clearTimeout(responseTimeoutRef.current)
   }, [])
+
+  // Write a resume snapshot from the live refs. Called once per presentation
+  // and on teardown, so a reload/discard mid-run can be recovered instead of
+  // throwing away 7–8 minutes. No-op outside an active scored run.
+  const persistSnapshot = useCallback(() => {
+    if (!startedTrackedRef.current || completedTrackedRef.current) return
+    if (phaseRef.current !== 'testing' && phaseRef.current !== 'paused') return
+    const payload: StaticResumePayload = {
+      calibrationKey,
+      gridPattern: gridPatternRef.current,
+      speedMode,
+      startedAt: testStartedAtRef.current,
+      grid: gridRef.current,
+      queue: queueRef.current,
+      staircases: serializeStaircases(staircasesRef.current),
+      thresholdResults: thresholdResultsRef.current,
+      totalPoints: gridRef.current.length,
+      trialsDone: trialsDoneRef.current,
+      consecutiveMisses: consecutiveMissesRef.current,
+      rescueFired: rescueFiredRef.current,
+      fpIsiPresses: fpIsiPressesRef.current,
+    }
+    saveResumeSnapshot(resumeKeyStr, payload)
+  }, [calibrationKey, speedMode, resumeKeyStr])
 
   /** Show a stimulus at (xDeg, yDeg) with the given size (in degrees) and
    *  opacity. Size is used directly rather than via a STIMULI key because
@@ -388,7 +510,49 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
   }, [])
 
   // ---------- fullscreen ----------
+  // The single "advance / I see it" action, shared by the keyboard, screen
+  // taps, and the Bluetooth VR remote. Phase-aware: resumes from pause, gates
+  // false-positive presses during the inter-stimulus gap, otherwise records a
+  // response. (Static has no interstitial phase — countdown runs straight into
+  // testing — so there's no interstitial branch here.)
+  const handleAdvanceButton = () => {
+    if (phaseRef.current === 'paused') {
+      resume()
+    } else if (phaseRef.current === 'practice') {
+      beep()
+      handlePracticeResponse()
+    } else {
+      // Any press during the test gets the perimeter-style confirmation tone,
+      // so a patient in a headset hears that the button registered.
+      beep()
+      if (isiActiveRef.current) {
+        fpIsiPressesRef.current += 1
+        return
+      }
+      handleResponse()
+    }
+  }
+
+  // VR/Bluetooth remote + controller support. Headset clickers and gamepads
+  // (e.g. an SC-803's trigger, rocker, A/B/X/Y) reach us via media keys (the
+  // confirm button's Play/Pause, claimed through the MediaSession) or the
+  // Gamepad API rather than as keydowns; the hook routes any of them to the
+  // same advance action and provides the press-confirmation beep. `armRemote`
+  // must run inside a user gesture — see enterFullscreen, which fires on the
+  // start/resume tap.
+  const { arm: armRemote, beep, disarm: disarmRemote } = useRemoteInput(handleAdvanceButton)
+
+  // Release the remote capture once the test is over (results screen) so its
+  // button stops owning the phone's media session and swallowing taps like the
+  // results-screen "Sign in" button.
+  useEffect(() => {
+    if (phase === 'results') disarmRemote()
+  }, [phase, disarmRemote])
+
   const enterFullscreen = useCallback(() => {
+    // Claim the media session from inside this gesture so the VR remote's
+    // button reaches us instead of the user's background music app.
+    armRemote()
     try {
       const el = document.documentElement as HTMLElement & {
         webkitRequestFullscreen?: () => Promise<void>
@@ -397,7 +561,7 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
       else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen()
     } catch { /* not supported */ }
     if (typeof window !== 'undefined') window.scrollTo(0, 1)
-  }, [])
+  }, [armRemote])
 
   const exitFullscreen = useCallback(() => {
     try {
@@ -501,7 +665,11 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
       isiActiveRef.current = false
       showStimulus(thePoint.xDeg, thePoint.yDeg, theSize, theOpacity)
       stimulusStartRef.current = performance.now()
+      trialsDoneRef.current += 1
       setTrialsDone(n => n + 1)
+      // Checkpoint for cross-reload resume: by now the previous trial's
+      // staircase update has been applied, so this captures cumulative state.
+      persistSnapshot()
       hideTimeoutRef.current = setTimeout(() => hideStimulus(), sp.stimulusMs)
       responseTimeoutRef.current = setTimeout(() => {
         if (!respondedRef.current && currentStaircaseKeyRef.current === thePoint.key) {
@@ -541,6 +709,7 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
     hideStimulus,
     recordThresholdPoint,
     countPendingStaircases,
+    persistSnapshot,
     sp.gapMaxMs,
     sp.gapMinMs,
     sp.responseMs,
@@ -560,8 +729,10 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
     if (elapsed < MIN_RESPONSE_MS) {
       // Too fast — likely a false positive. Count it, ignore, don't step
       // the staircase, don't reset the rescue counter (the trial didn't
-      // complete normally).
-      flashFixation('#ef4444', 300)
+      // complete normally). Neutral cue (not red): a genuine early "I saw
+      // it" that lands a hair too soon shouldn't be met with the only
+      // alarm colour in the run.
+      flashFixation(NEUTRAL_FLASH, 300)
       clearAllTimeouts()
       hideStimulus()
       fpIsiPressesRef.current += 1
@@ -611,9 +782,12 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
       pausedPhaseRef.current = phaseRef.current
       clearAllTimeouts()
       hideStimulus()
+      // Checkpoint while phaseRef is still 'testing' so a reload from the
+      // pause screen can resume.
+      persistSnapshot()
       setPhase('paused')
     }
-  }, [clearAllTimeouts, hideStimulus])
+  }, [clearAllTimeouts, hideStimulus, persistSnapshot])
 
   const resume = useCallback(() => {
     const resumePhase = pausedPhaseRef.current
@@ -623,6 +797,72 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
     setTimeout(() => presentNext(), 1000)
   }, [presentNext, enterFullscreen])
 
+  // ---------- practice (unscored warm-up) ----------
+  const finishPractice = useCallback(() => {
+    clearAllTimeouts()
+    hideStimulus()
+    practiceStimVisibleRef.current = false
+    if (!practiceDoneRef.current) {
+      markPracticeDone()
+      practiceDoneRef.current = true
+    }
+    setPhase('countdown')
+    phaseRef.current = 'countdown'
+    setCountdown(3)
+  }, [clearAllTimeouts, hideStimulus])
+
+  const presentPractice = useCallback(() => {
+    if (phaseRef.current !== 'practice') return
+    const pos = PRACTICE_POSITIONS[practiceSeenRef.current % PRACTICE_POSITIONS.length]
+    clearAllTimeouts()
+    practiceStimVisibleRef.current = false
+    delayTimeoutRef.current = setTimeout(() => {
+      if (phaseRef.current !== 'practice') return
+      showStimulus(pos.xDeg, pos.yDeg, STIMULI['V4e'].sizeDeg, 1)
+      practiceStimVisibleRef.current = true
+      hideTimeoutRef.current = setTimeout(() => hideStimulus(), 900)
+      responseTimeoutRef.current = setTimeout(() => {
+        if (phaseRef.current !== 'practice') return
+        // Missed in practice — no penalty, just show it again.
+        practiceStimVisibleRef.current = false
+        hideStimulus()
+        delayTimeoutRef.current = setTimeout(() => presentPractice(), 600)
+      }, 1600)
+    }, 600)
+    // self-reference is intentional; the recursive call uses the closure var.
+  }, [clearAllTimeouts, showStimulus, hideStimulus])
+
+  const handlePracticeResponse = useCallback(() => {
+    if (phaseRef.current !== 'practice') return
+    if (!practiceStimVisibleRef.current) return // press in the gap — ignore
+    practiceStimVisibleRef.current = false
+    clearAllTimeouts()
+    hideStimulus()
+    flashFixation('#22c55e', 200)
+    practiceSeenRef.current += 1
+    setPracticeIdx(practiceSeenRef.current)
+    if (practiceSeenRef.current >= PRACTICE_TRIALS) {
+      responseTimeoutRef.current = setTimeout(() => finishPractice(), 500)
+    } else {
+      responseTimeoutRef.current = setTimeout(() => presentPractice(), 700)
+    }
+  }, [clearAllTimeouts, hideStimulus, flashFixation, presentPractice, finishPractice])
+
+  // Setup gate: after instructions (and the optional position check), run the
+  // one-time practice warm-up, otherwise go straight to the countdown.
+  const beginAfterChecks = useCallback(() => {
+    if (!practiceDoneRef.current) {
+      practiceSeenRef.current = 0
+      setPracticeIdx(0)
+      setPhase('practice')
+      phaseRef.current = 'practice'
+      presentPractice()
+    } else {
+      setPhase('countdown')
+      setCountdown(3)
+    }
+  }, [presentPractice])
+
   // ---------- keyboard + pointer ----------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -631,34 +871,33 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
         else if (phaseRef.current === 'paused') resume()
         return
       }
-      if (e.key === ' ' || e.key === 'Enter') {
+      if (e.key === ' ' || e.key === 'Enter' || REMOTE_RESPONSE_KEYS.has(e.key)) {
         e.preventDefault()
-        if (phaseRef.current === 'paused') {
-          resume()
-        } else {
-          if (isiActiveRef.current) {
-            fpIsiPressesRef.current += 1
-            return
-          }
-          handleResponse()
-        }
+        handleAdvanceButton()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
+  // handleAdvanceButton is a fresh closure each render but only reads refs +
+  // the listed callbacks, so re-subscribing on those is sufficient.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [handleResponse, resume, pauseTest])
 
   const handlePointerDown = useCallback(() => {
+    beep()
     if (isiActiveRef.current) {
       fpIsiPressesRef.current += 1
       return
     }
     handleResponse()
-  }, [handleResponse])
+  }, [handleResponse, beep])
 
   // ---------- start test ----------
   const startTest = useCallback(() => {
     enterFullscreen()
+    // Cold start of a fresh run — discard any stale resume snapshot for this
+    // eye so a later reload doesn't offer to resume the abandoned attempt.
+    clearResumeSnapshot(resumeKeyStr)
     staircasesRef.current.clear()
     thresholdResultsRef.current = []
     consecutiveMissesRef.current = 0
@@ -666,6 +905,7 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
     rescueFiredRef.current = 0
     fpIsiPressesRef.current = 0
     isiActiveRef.current = false
+    trialsDoneRef.current = 0
     setTrialsDone(0)
 
     // Use the coverage-filtered grid — points outside the calibrated
@@ -693,15 +933,13 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
     if (advanced.initialBlindspotCheck) {
       setPhase('position-check')
     } else {
-      setPhase('countdown')
-      setCountdown(3)
+      beginAfterChecks()
     }
-  }, [enterFullscreen, gridCoverage, sp.reversalsRequired, advanced.initialBlindspotCheck])
+  }, [enterFullscreen, gridCoverage, sp.reversalsRequired, advanced.initialBlindspotCheck, beginAfterChecks, resumeKeyStr])
 
   const handlePositionCheckPass = useCallback(() => {
-    setPhase('countdown')
-    setCountdown(3)
-  }, [])
+    beginAfterChecks()
+  }, [beginAfterChecks])
 
   // ---------- restart ----------
   // "Restart from the beginning" out of the pause menu. Crucially this
@@ -750,7 +988,17 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
   // ensures only one test_aborted goes out per session.
   const abortDispatchedRef = useRef(false)
 
-  const buildAbortMeta = useCallback((via: 'unmount' | 'pagehide'): Record<string, string> => {
+  // `abortVia` distinguishes the three teardown sources so the abort metric
+  // can be read honestly: `user_quit` is a deliberate quit from the pause
+  // menu (real abandonment), `pagehide` is a page teardown (close / hard
+  // nav — bfcache is already filtered out before we get here), `unmount` is
+  // in-SPA navigation. `leave` enriches pagehide aborts with the bfcache /
+  // visibility / nav classification so benign teardown can be excluded
+  // downstream.
+  const buildAbortMeta = useCallback((
+    via: 'unmount' | 'pagehide' | 'user_quit',
+    leave?: PageLeaveInfo,
+  ): Record<string, string> => {
     const durationSeconds = getTestDurationSeconds()
     const summaryMeta = thresholdSummaryToMeta(
       summarizeThresholdPoints(thresholdResultsRef.current),
@@ -765,6 +1013,7 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
       rescueFired: String(rescueFiredRef.current),
       fpIsiPresses: String(fpIsiPressesRef.current),
       abortVia: via,
+      ...(leave ? pageLeaveMeta(leave) : {}),
       ...getDeviceInfo(),
       ...buildStudyEventMeta(studyMode),
       ...summaryMeta,
@@ -772,19 +1021,28 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
     }
   }, [eye, getTestDurationSeconds, speedMode, studyMode])
 
-  // pagehide-driven abort: catches tab close / navigate-away that React
-  // unmount cleanup misses (those tear down the runtime before the cleanup
-  // effect ever runs). Beacon uses fetch+keepalive for survivability.
-  useEffect(() => {
-    const onPageHide = () => {
+  // All accidental-teardown guards, centralised so Static and Goldmann
+  // behave identically (see testLifecycle):
+  //  - pagehide → abort beacon, but bfcache backgrounding is skipped so a
+  //    tab-switch / mobile app-switch that later returns isn't mis-counted;
+  //  - tab hidden or fullscreen exited mid-presentation → clean auto-pause
+  //    (so the reflexive Esc that the browser eats to leave fullscreen lands
+  //    the user on the pause screen instead of a still-running broken test);
+  //  - beforeunload → confirm before a reflexive Cmd+R nukes the run.
+  useActiveTestGuards({
+    isRunActive: () =>
+      startedTrackedRef.current && !completedTrackedRef.current && !abortDispatchedRef.current,
+    isPresenting: () => phaseRef.current === 'testing' || phaseRef.current === 'practice',
+    onTeardown: (info) => {
       if (abortDispatchedRef.current) return
       if (!startedTrackedRef.current || completedTrackedRef.current) return
+      // Capture the very latest state for resume before the page goes.
+      persistSnapshot()
       abortDispatchedRef.current = true
-      trackEventBeacon('test_aborted', getDeviceId(), buildAbortMeta('pagehide'))
-    }
-    window.addEventListener('pagehide', onPageHide)
-    return () => window.removeEventListener('pagehide', onPageHide)
-  }, [buildAbortMeta])
+      trackEventBeacon('test_aborted', getDeviceId(), buildAbortMeta('pagehide', info))
+    },
+    onAutoPause: () => pauseTest(),
+  })
 
   // ---------- unmount / completion tracking ----------
   useEffect(() => {
@@ -804,6 +1062,8 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
   useEffect(() => {
     if (phase === 'results' && startedTrackedRef.current && !completedTrackedRef.current) {
       completedTrackedRef.current = true
+      // Run finished — the resume snapshot is no longer needed.
+      clearResumeSnapshot(resumeKeyStr)
       const durationSeconds = getTestDurationSeconds()
       const summaryMeta = thresholdSummaryToMeta(summarizeThresholdPoints(results))
       trackEvent('test_completed', getDeviceId(), {
@@ -820,12 +1080,81 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
         ...(durationSeconds != null ? { durationSeconds: String(durationSeconds) } : {}),
       }).catch(() => {})
     }
-  }, [phase, eye, results, getTestDurationSeconds, speedMode, studyMode])
+  }, [phase, eye, results, getTestDurationSeconds, speedMode, studyMode, resumeKeyStr])
 
   const handleDone = () => {
     exitFullscreen()
     onDone()
   }
+
+  // Deliberate quit from the pause menu. Unlike an in-SPA unmount this is a
+  // clear "I give up", so it's logged with abortVia:'user_quit' — the real
+  // abandonment signal, distinct from React teardown. Setting the dedupe
+  // flag first keeps the unmount cleanup from firing a second abort.
+  const handleQuit = () => {
+    if (
+      startedTrackedRef.current
+      && !completedTrackedRef.current
+      && !abortDispatchedRef.current
+    ) {
+      abortDispatchedRef.current = true
+      trackEvent('test_aborted', getDeviceId(), buildAbortMeta('user_quit')).catch(() => {})
+    }
+    clearResumeSnapshot(resumeKeyStr)
+    handleDone()
+  }
+
+  // ---------- resume (cross-reload recovery) ----------
+  const [resumeOffer, setResumeOffer] = useState<StaticResumePayload | null>(null)
+
+  // Detect a fresh, matching snapshot on mount and offer to resume.
+  useEffect(() => {
+    const snap = loadResumeSnapshot<StaticResumePayload>(resumeKeyStr)
+    if (
+      snap
+      && snap.calibrationKey === calibrationKey
+      && snap.gridPattern === gridPatternRef.current
+      && snap.speedMode === speedMode
+      && Array.isArray(snap.staircases)
+      && snap.staircases.some(([, s]) => !s.done)
+    ) {
+      setResumeOffer(snap)
+    }
+    // Mount-only check — the relevant inputs are fixed for a given mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const resumeFromSnapshot = useCallback((snap: StaticResumePayload) => {
+    enterFullscreen()
+    gridRef.current = snap.grid
+    queueRef.current = snap.queue
+    staircasesRef.current = deserializeStaircases(snap.staircases)
+    thresholdResultsRef.current = snap.thresholdResults
+    consecutiveMissesRef.current = snap.consecutiveMisses
+    rescueFiredRef.current = snap.rescueFired
+    fpIsiPressesRef.current = snap.fpIsiPresses
+    rescueTrialRef.current = false
+    isiActiveRef.current = false
+    trialsDoneRef.current = snap.trialsDone
+    setTrialsDone(snap.trialsDone)
+    setTotalPoints(snap.totalPoints || snap.grid.length)
+    setRemainingCount(countPendingStaircases())
+    // Continuation, not a new run: keep the original start time and do NOT
+    // re-fire test_started (the countdown effect is gated on this ref).
+    testStartedAtRef.current = snap.startedAt ?? Date.now()
+    startedTrackedRef.current = true
+    completedTrackedRef.current = false
+    abortDispatchedRef.current = false
+    setResumeOffer(null)
+    // Re-centre the patient with a fresh countdown before resuming stimuli.
+    setPhase('countdown')
+    setCountdown(3)
+  }, [enterFullscreen, countPendingStaircases])
+
+  const declineResume = useCallback(() => {
+    clearResumeSnapshot(resumeKeyStr)
+    setResumeOffer(null)
+  }, [resumeKeyStr])
 
   // Done from the post-test results screen — show the one-shot
   // feedback modal first if we haven't asked on this device yet.
@@ -839,7 +1168,7 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
   }
 
   const exportPdfAndMaybePrompt = (result: TestResult) => {
-    exportTrackedResultPDF(result)
+    exportTrackedResultPDF(result, { includeReliabilityDetails: canViewReliability })
     if (savedId && !surveyDone && !hasSurveyForResult(savedId) && !hasBeenPromptedForFeedback()) {
       markFeedbackPrompted()
       setFeedbackTrigger('pdf')
@@ -891,6 +1220,7 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
         testMode: 'threshold',
         speedMode,
         staticGridPattern: gridPattern,
+        ...(vr ? { presentationMode: 'phone-vr' as const, vrHeadsetPreset: vr.headsetPreset } : {}),
         advancedSettings: advanced,
       }),
       ...(buildStudyMetadata(studyMode) ? { study: buildStudyMetadata(studyMode) } : {}),
@@ -922,6 +1252,92 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
 
   // ==================== RENDER ====================
 
+  // Resume offer takes precedence over the instructions screen: a returning
+  // reload should recover the in-progress run, not silently restart it.
+  if (resumeOffer && phase === 'instructions') {
+    const done = resumeOffer.thresholdResults.length
+    const total = resumeOffer.totalPoints || resumeOffer.grid.length
+    return (
+      <div className={`min-h-screen ${bgClass} text-white flex items-center justify-center p-6`}>
+        <main className="max-w-md w-full space-y-6 text-center">
+          <h1 className="text-2xl font-semibold">Resume your test?</h1>
+          <p className="text-gray-300">
+            We found an unfinished {eye === 'right' ? 'right' : 'left'} eye test on this device
+            — you'd measured <strong>{done}</strong> of {total} points. Pick up where you
+            left off, or start fresh.
+          </p>
+          <div className="space-y-3 pt-2">
+            <button
+              onClick={() => resumeFromSnapshot(resumeOffer)}
+              className="w-full py-3 btn-primary rounded-xl text-lg font-medium text-white"
+            >
+              Resume test
+            </button>
+            <button
+              onClick={declineResume}
+              className="w-full py-3 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm text-gray-300 transition-colors"
+            >
+              Start fresh
+            </button>
+          </div>
+        </main>
+      </div>
+    )
+  }
+
+  if (phase === 'practice') {
+    const remaining = Math.max(0, PRACTICE_TRIALS - practiceIdx)
+    return (
+      <div
+        className={`h-[100dvh] ${bgClass} text-white select-none cursor-none relative overflow-hidden`}
+        role="application"
+        aria-label="Practice round. Press Space or tap when you see a dot."
+        onPointerDown={() => { beep(); handlePracticeResponse() }}
+      >
+        {/* Practice copy lives top-and-bottom, away from the central dots, so
+            it teaches the mechanic without sitting where stimuli appear. */}
+        <div className="absolute inset-x-0 top-0 pt-[max(1rem,env(safe-area-inset-top))] text-center px-6">
+          <p className="text-sm text-gray-300">
+            Practice — no score yet. {isMobileDevice ? 'Tap' : 'Press Space or tap'} the moment you see a dot.
+          </p>
+          <p className="text-xs text-gray-500 mt-1">{remaining} to go</p>
+        </div>
+
+        {/* Fixation dot (same ref the flash writes to). */}
+        <div
+          ref={fixationDotRef}
+          className="absolute rounded-full transition-colors duration-100"
+          style={{
+            top: '50%',
+            left: '50%',
+            width: fixDotRestPx,
+            height: fixDotRestPx,
+            backgroundColor: '#fbbf24',
+            marginLeft: fixDotRestOffset + fixationXY.x,
+            marginTop: fixDotRestOffset + fixationXY.y,
+            zIndex: 10,
+          }}
+        />
+
+        {/* Practice stimulus (same ref showStimulus writes to). */}
+        <div
+          ref={stimulusRef}
+          className="absolute rounded-full bg-white"
+          style={{ top: '50%', left: '50%', width: 6, height: 6, opacity: 0, willChange: 'transform', zIndex: 5 }}
+        />
+
+        <div className="absolute inset-x-0 bottom-0 pb-[max(1rem,env(safe-area-inset-bottom))] text-center px-6">
+          <button
+            onClick={(e) => { e.stopPropagation(); finishPractice() }}
+            className="text-xs text-gray-500 hover:text-gray-300 underline underline-offset-2"
+          >
+            Skip practice
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   if (phase === 'instructions') {
     return (
       <div className={`min-h-screen ${bgClass} text-white flex items-center justify-center p-6`}>
@@ -930,14 +1346,20 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
             {eye === 'right' ? 'Right' : 'Left'} eye — static test
           </h1>
 
-          <HeadGuide
-            eye={eye}
-            viewingDistanceCm={calibration.viewingDistanceCm}
-            mode={isMobileDevice ? 'phone' : 'desktop'}
-          />
+          {!vr && (
+            <HeadGuide
+              eye={eye}
+              viewingDistanceCm={calibration.viewingDistanceCm}
+              mode={isMobileDevice ? 'phone' : 'desktop'}
+            />
+          )}
 
           <div className="text-left space-y-3 text-gray-300">
-            <p>1. Cover your <strong>{eye === 'right' ? 'left' : 'right'} eye</strong></p>
+            <p>
+              1. {vr
+                ? <>Seat the phone in the headset and <strong>put the headset on</strong></>
+                : <>Cover your <strong>{eye === 'right' ? 'left' : 'right'} eye</strong></>}
+            </p>
             <p>2. Stare at the <span className="text-yellow-400">yellow dot</span> — don't look away</p>
             <p>3. Dots will <strong>flash briefly</strong> at known test positions</p>
             <p>
@@ -966,8 +1388,10 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
               <strong className="block mb-1">Grid not fully covered</strong>
               {gridCoverage.dropped} of {gridCoverage.totalLocations} locations in the{' '}
               {gridPattern === 'custom' ? 'custom' : `HFA ${gridPattern}`} pattern fall outside your
-              screen at this viewing distance and will be skipped. Sit closer to the screen
-              (and recalibrate) to cover more of the pattern.
+              {vr ? ' active lens half' : ' screen'} at this viewing distance and will be skipped.{' '}
+              {vr
+                ? 'A smaller grid (e.g. 10-2) fits the lens half better.'
+                : 'Sit closer to the screen (and recalibrate) to cover more of the pattern.'}
             </div>
           )}
 
@@ -999,7 +1423,7 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
   if (phase === 'countdown') {
     return (
       <div
-        className={`min-h-screen ${bgClass} text-white select-none cursor-none relative overflow-hidden`}
+        className={`h-[100dvh] ${bgClass} text-white select-none cursor-none relative overflow-hidden`}
         onTouchStart={e => e.preventDefault()}
       >
         <div
@@ -1023,6 +1447,13 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
         >
           {countdown || 'Go'}
         </div>
+        {vr && (
+          <VrTestSurface
+            viewport={computeVrViewport(window.innerWidth, window.innerHeight, activeEye, vr)}
+            innerWidth={window.innerWidth}
+            showDivider
+          />
+        )}
       </div>
     )
   }
@@ -1045,7 +1476,7 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
           setResults([...thresholdResultsRef.current])
           setPhase('results')
         }}
-        onQuit={handleDone}
+        onQuit={handleQuit}
       />
     )
   }
@@ -1073,15 +1504,15 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
     // and give them a clear path back to the home screen.
     if (measuredDbPoints.length === 0) {
       return (
-        <div className={`min-h-screen ${bgClass} text-white p-6 overflow-y-auto`}>
+        <div className={`min-h-screen bg-base text-body p-6 overflow-y-auto`}>
           <main className="max-w-lg mx-auto space-y-6 pb-12 text-center">
             <h1 className="text-2xl font-semibold">Results</h1>
-            <p className="text-sm text-gray-400">
+            <p className="text-sm text-muted">
               {gridPattern === 'custom' ? 'Custom' : `HFA ${gridPattern}`} · {formatEyeLabel(eye)}
             </p>
-            <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-4 text-sm text-zinc-300 space-y-2 text-left">
-              <p className="font-medium text-zinc-100">No measurements yet</p>
-              <p className="text-zinc-400 leading-relaxed">
+            <div className="rounded-lg border border-line bg-surface p-4 text-sm text-body space-y-2 text-left">
+              <p className="font-medium text-ink">No measurements yet</p>
+              <p className="text-muted leading-relaxed">
                 The static test needs several responses at each location
                 before it can estimate a threshold. You stopped the test
                 before any location finished, so there's nothing to plot.
@@ -1100,7 +1531,7 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
     }
 
     return (
-      <div className={`min-h-screen ${bgClass} text-white p-6 overflow-y-auto`}>
+      <div className={`min-h-screen bg-base text-body p-6 overflow-y-auto`}>
         <main className="max-w-lg mx-auto space-y-6 pb-12">
           {savedId && <SavePrompt />}
           {/* HFA-style result page — threshold map, greyscale plot,
@@ -1117,9 +1548,10 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
             maxEccentricityDeg={maxEccentricityDeg}
             fpIsiPresses={fpIsiPressesRef.current}
             truePositiveResponses={results.length}
+            showReliability={canViewReliability}
           />
           {gridCoverage.dropped > 0 && (
-            <p className="text-center text-xs text-amber-400">
+            <p className="text-center text-xs text-amber-700">
               Partial grid coverage: {gridCoverage.grid.length} of {gridCoverage.totalLocations} locations
               presented. Outer points fell outside your screen at this viewing distance.
             </p>
@@ -1130,7 +1562,7 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
               see commits e7fefa7 (scenario picker) and b8ec08f
               (vision simulator) for the rationale. */}
           {surveyDone && (
-            <p className="text-center text-green-400 text-xs">Thank you for your feedback!</p>
+            <p className="text-center text-green-600 text-xs">Thank you for your feedback!</p>
           )}
 
           <div className="flex gap-3">
@@ -1156,7 +1588,7 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
             </button>
             <button
               onClick={handleDoneFromResults}
-              className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 rounded-lg font-medium transition-colors"
+              className="flex-1 py-3 bg-white border border-line hover:bg-slate-50 text-body rounded-lg font-medium transition-colors"
             >
               Done
             </button>
@@ -1165,7 +1597,7 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
 
         {feedbackTrigger && (
           <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
             role="dialog"
             aria-modal="true"
             aria-label="Quick feedback"
@@ -1184,13 +1616,39 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
   }
 
   // ==================== ACTIVE TEST ====================
+  // First-minute confidence: a thin top-edge bar (far from the central
+  // fixation zone) that advances from the very first trial, plus a brief
+  // "working" line, so a dark, near-silent screen doesn't read as frozen
+  // and get tab-closed in the first ~40s (the early-abort signature).
+  const barExpectedTrialsPerPoint = sp.reversalsRequired + 2
+  const barProgress = totalPoints > 0
+    ? Math.min(1, trialsDone / Math.max(1, totalPoints * barExpectedTrialsPerPoint))
+    : 0
+  const showWorkingHint = trialsDone < 8
   return (
     <div
-      className={`min-h-screen ${bgClass} select-none cursor-none relative overflow-hidden`}
+      className={`h-[100dvh] ${bgClass} select-none cursor-none relative overflow-hidden`}
       role="application"
       aria-label={`Visual field test in progress for ${eye} eye. Press Space or tap when you see a dot.`}
       onPointerDown={handlePointerDown}
     >
+      {/* Top-edge progress + reassurance — non-VR only (VR has no spare
+          screen edge and its own surface treatment). */}
+      {!vr && (
+        <div className="absolute inset-x-0 top-0" style={{ zIndex: 8 }} aria-hidden="true">
+          <div className="h-1 w-full bg-white/10">
+            <div
+              className="h-full bg-teal transition-all duration-300"
+              style={{ width: `${Math.round(barProgress * 100)}%` }}
+            />
+          </div>
+          {showWorkingHint && (
+            <p className="text-center text-[11px] text-gray-500 mt-1">
+              Working — first results appear shortly
+            </p>
+          )}
+        </div>
+      )}
       {/* Fixation-ring progress — the RP user's only in-test UI, so it
           has to live right next to the fixation dot. We blend two
           signals so the ring moves from the very first trial instead
@@ -1300,6 +1758,15 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
         className="absolute rounded-full bg-white"
         style={{ top: '50%', left: '50%', width: 6, height: 6, opacity: 0, willChange: 'transform', zIndex: 5 }}
       />
+
+      {/* Inactive-lens mask — divider hidden during measurement. */}
+      {vr && (
+        <VrTestSurface
+          viewport={computeVrViewport(window.innerWidth, window.innerHeight, activeEye, vr)}
+          innerWidth={window.innerWidth}
+          showDivider={false}
+        />
+      )}
     </div>
   )
 }

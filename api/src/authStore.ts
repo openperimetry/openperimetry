@@ -26,6 +26,7 @@ export type {
   AdminSessionRecord,
   AdminVFResultRecord,
   AdminEventRecord,
+  EventPage,
 } from './ddbStore.js'
 
 type StoreModule = typeof SqliteStore
@@ -99,8 +100,10 @@ export const setActiveClinicScreen = forward('setActiveClinicScreen')
 export const addVFResult = forward('addVFResult')
 export const listVFResults = forward('listVFResults')
 export const deleteVFResult = forward('deleteVFResult')
+export const listDeletedVFResultIds = forward('listDeletedVFResultIds')
 export const addVFSurvey = forward('addVFSurvey')
 export const listVFSurveys = forward('listVFSurveys')
+export const deleteVFSurvey = forward('deleteVFSurvey')
 export const getAdminStats = forward('getAdminStats')
 export const listAllUsers = forward('listAllUsers')
 export const setUserClinicianRole = forward('setUserClinicianRole')
@@ -110,3 +113,4 @@ export const getAdminVFResultDetail = forward('getAdminVFResultDetail')
 export const listAllSurveys = forward('listAllSurveys')
 export const trackEvent = forward('trackEvent')
 export const listAllEvents = forward('listAllEvents')
+export const listEventsPage = forward('listEventsPage')

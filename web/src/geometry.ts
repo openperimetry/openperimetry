@@ -29,6 +29,22 @@ export function degToPx(deg: number, calib: CalibrationData): number {
   return cmOffset * pixelsPerCm(calib)
 }
 
+/** Convert a pixel offset from fixation back to a visual-angle eccentricity
+ *  (degrees) — the exact inverse of {@link degToPx}. Use this instead of a
+ *  plain `px / pixelsPerDegree` whenever a px distance must be reported as an
+ *  angle: that linear shortcut matches degToPx only near the axis and badly
+ *  over-estimates large angles, which in phone-VR (tiny focal-length px/deg,
+ *  edge angles of 40°+) inflates edge/eccentricity values relative to where
+ *  stimuli are actually drawn. */
+export function pxToDeg(px: number, calib: CalibrationData): number {
+  if (calib.sphericityCorrection === false) {
+    return px / calib.pixelsPerDegree
+  }
+  const cmOffset = px / pixelsPerCm(calib)
+  const rad = Math.atan(cmOffset / calib.viewingDistanceCm)
+  return (rad * 180) / Math.PI
+}
+
 /** Convert a (meridian°, eccentricity°) polar coordinate to (x, y) pixel
  *  offsets from the fixation point. Screen y-axis is inverted. */
 export function polarDegToXY(
@@ -42,4 +58,34 @@ export function polarDegToXY(
     x: r * Math.cos(rad),
     y: -r * Math.sin(rad),
   }
+}
+
+/**
+ * Re-express a polar point measured from one fixation origin as polar relative
+ * to a different fixation origin. Both origins are px offsets in the same
+ * screen-coordinate frame (y grows down; meridian 0° = right, 90° = up).
+ *
+ * Used by kinetic extended-field passes: a detection is recorded as
+ * (meridian, eccentricity) from the SHIFTED fixation the pass parks at, but the
+ * isopter and field map are drawn relative to the patient's CENTERED fixation.
+ * Merging the shifted-frame value straight in places the point at the wrong
+ * radius/direction (inflating the isopter); reprojecting first puts it at its
+ * true eccentricity from center. When `from` and `to` are equal this is the
+ * identity (the main test passes the centered fixation as both).
+ */
+export function reprojectPolar(
+  meridianDeg: number,
+  eccentricityDeg: number,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  calib: CalibrationData,
+): { meridianDeg: number; eccentricityDeg: number } {
+  const rad = (meridianDeg * Math.PI) / 180
+  const r = degToPx(eccentricityDeg, calib)
+  // Stimulus position in the shared screen frame, then offset from `to`.
+  const dx = from.x + r * Math.cos(rad) - to.x
+  const dy = from.y - r * Math.sin(rad) - to.y
+  let m = (Math.atan2(-dy, dx) * 180) / Math.PI
+  if (m < 0) m += 360
+  return { meridianDeg: m, eccentricityDeg: pxToDeg(Math.hypot(dx, dy), calib) }
 }

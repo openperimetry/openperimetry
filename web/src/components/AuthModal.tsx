@@ -122,7 +122,7 @@ export function AuthModal({ onClose, initialMode = 'register' }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4"
       onClick={onClose}
       role="presentation"
     >
@@ -131,16 +131,16 @@ export function AuthModal({ onClose, initialMode = 'register' }: Props) {
         role="dialog"
         aria-modal="true"
         aria-labelledby="auth-modal-title"
-        className="bg-surface border border-white/[0.08] rounded-2xl p-7 w-full max-w-sm space-y-5 shadow-2xl animate-page-in"
+        className="bg-surface border border-line rounded-2xl p-7 w-full max-w-sm space-y-5 shadow-2xl animate-page-in"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <h2 id="auth-modal-title" className="text-lg font-heading font-bold text-white">
+          <h2 id="auth-modal-title" className="text-lg font-heading font-bold text-ink">
             {title}
           </h2>
           <button
             onClick={onClose}
-            className="text-zinc-500 hover:text-white text-xl leading-none min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg hover:bg-elevated transition-colors"
+            className="text-muted hover:text-ink text-xl leading-none min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg hover:bg-elevated transition-colors"
             aria-label="Close dialog"
           >
             &times;
@@ -148,7 +148,7 @@ export function AuthModal({ onClose, initialMode = 'register' }: Props) {
         </div>
 
         {mode !== 'login' && (
-          <p className="text-zinc-400 text-sm">
+          <p className="text-muted text-sm">
             {mode === 'register' && 'Create a free account to view your results and track progress over time.'}
             {mode === 'forgot' && 'Enter your email and we\'ll send you a reset link.'}
             {mode === 'reset-sent' && 'If an account exists with that email, you\'ll receive a password reset link shortly. Check your inbox (and spam folder).'}
@@ -176,7 +176,7 @@ export function AuthModal({ onClose, initialMode = 'register' }: Props) {
           <form onSubmit={handleSubmit} className="space-y-4">
             {(mode === 'login' || mode === 'register' || mode === 'forgot') && (
               <div className="space-y-1.5">
-                <label htmlFor="auth-email" className="text-xs font-medium text-zinc-400">Email</label>
+                <label htmlFor="auth-email" className="text-xs font-medium text-muted">Email</label>
                 <input
                   id="auth-email"
                   type="email"
@@ -191,8 +191,8 @@ export function AuthModal({ onClose, initialMode = 'register' }: Props) {
             )}
             {mode === 'register' && (
               <div className="space-y-1.5">
-                <label htmlFor="auth-display-name" className="text-xs font-medium text-zinc-400">
-                  Display name <span className="text-zinc-600">(optional)</span>
+                <label htmlFor="auth-display-name" className="text-xs font-medium text-muted">
+                  Display name <span className="text-muted">(optional)</span>
                 </label>
                 <input
                   id="auth-display-name"
@@ -207,8 +207,8 @@ export function AuthModal({ onClose, initialMode = 'register' }: Props) {
             )}
             {(mode === 'login' || mode === 'register') && (
               <div className="space-y-1.5">
-                <label htmlFor="auth-password" className="text-xs font-medium text-zinc-400">
-                  Password {mode === 'register' && <span className="text-zinc-600">(min 8 characters)</span>}
+                <label htmlFor="auth-password" className="text-xs font-medium text-muted">
+                  Password {mode === 'register' && <span className="text-muted">(min 8 characters)</span>}
                 </label>
                 <input
                   id="auth-password"
@@ -225,8 +225,8 @@ export function AuthModal({ onClose, initialMode = 'register' }: Props) {
             )}
             {mode === 'reset-confirm' && (
               <div className="space-y-1.5">
-                <label htmlFor="auth-new-password" className="text-xs font-medium text-zinc-400">
-                  New password <span className="text-zinc-600">(min 8 characters)</span>
+                <label htmlFor="auth-new-password" className="text-xs font-medium text-muted">
+                  New password <span className="text-muted">(min 8 characters)</span>
                 </label>
                 <input
                   id="auth-new-password"
@@ -258,11 +258,11 @@ export function AuthModal({ onClose, initialMode = 'register' }: Props) {
           <div className="text-center space-y-2">
             <button
               onClick={() => { setMode('forgot'); setError('') }}
-              className="text-zinc-500 hover:text-zinc-300 text-xs transition-colors min-h-[44px] px-2"
+              className="text-muted hover:text-body text-xs transition-colors min-h-[44px] px-2"
             >
               Forgot password?
             </button>
-            <p className="text-zinc-500 text-xs">
+            <p className="text-muted text-xs">
               No account?{' '}
               <button onClick={() => { setMode('register'); setError('') }} className="text-accent hover:text-accent-light min-h-[44px] px-1">
                 Create one
@@ -272,7 +272,7 @@ export function AuthModal({ onClose, initialMode = 'register' }: Props) {
         )}
 
         {mode === 'register' && (
-          <p className="text-center text-zinc-500 text-xs">
+          <p className="text-center text-muted text-xs">
             Already have an account?{' '}
             <button onClick={() => { setMode('login'); setError('') }} className="text-accent hover:text-accent-light min-h-[44px] px-1">
               Sign in
@@ -281,7 +281,7 @@ export function AuthModal({ onClose, initialMode = 'register' }: Props) {
         )}
 
         {(mode === 'forgot' || mode === 'reset-confirm') && (
-          <p className="text-center text-zinc-500 text-xs">
+          <p className="text-center text-muted text-xs">
             <button onClick={() => { setMode('login'); setError('') }} className="text-accent hover:text-accent-light min-h-[44px] px-1">
               Back to sign in
             </button>

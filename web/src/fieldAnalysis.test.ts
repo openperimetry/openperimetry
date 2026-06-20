@@ -75,3 +75,31 @@ describe('detectAnomalies — sparse isopter ordering', () => {
     ).toBe(true)
   })
 })
+
+describe('detectAnomalies — very low detection rate excludes catch trials', () => {
+  it('does not let detected catch trials mask a genuinely low detection rate', () => {
+    // Six real III4e stimuli, NONE detected → true detection rate 0%, which
+    // must raise the "very low detection" flag. Two detected catch trials
+    // (blind-spot false positives) at the same stimulus level must NOT count
+    // as real detections — otherwise the apparent rate becomes 2/8 = 25% and
+    // silently suppresses the flag.
+    const real = Array.from({ length: 6 }, (_, i) => ({
+      stimulus: 'III4e' as StimulusKey,
+      meridianDeg: i * 30,
+      eccentricityDeg: 20,
+      rawEccentricityDeg: 20,
+      detected: false,
+    }))
+    const catchFalsePositives = [0, 0].map(m => ({
+      stimulus: 'III4e' as StimulusKey,
+      meridianDeg: m,
+      eccentricityDeg: 15,
+      rawEccentricityDeg: 15,
+      detected: true,
+      catchTrial: true,
+    }))
+    const points = [...real, ...catchFalsePositives] as TestPoint[]
+    const anomalies = detectAnomalies(points, {})
+    expect(anomalies.some(a => a.label.includes('Very low detection'))).toBe(true)
+  })
+})

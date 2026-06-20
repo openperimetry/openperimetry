@@ -57,7 +57,7 @@ export function computeReliability(
     factors.push({
       name: 'Isopter ordering',
       penalty,
-      detail: `${majorReversals} isopter pair(s) dramatically reversed (inner > 2× outer)`,
+      detail: `${majorReversals} isopter pair(s) dramatically reversed (inner > 3× outer)`,
     })
   }
   if (mildReversals > 0) {
@@ -98,6 +98,17 @@ export function computeReliability(
     const mean = rs.reduce((s, v) => s + v, 0) / n
     if (mean < 2) continue
     // Fourier coefficients up to 2nd harmonic (DC + 2 × {cos, sin}).
+    //
+    // ⚠ CAVEAT — these closed-form coefficients a_k = (2/n)·Σ r·cos(kθ) (and
+    // the unweighted mean) are the exact least-squares fit ONLY when the
+    // meridians θ are UNIFORMLY spaced around the circle (the cos/sin basis is
+    // orthogonal over the samples only then). Kinetic meridian samples are
+    // often clustered, which over-weights dense sectors and can manufacture a
+    // large residual on a perfectly smooth boundary (a smooth synthetic field
+    // can read ~100% residual under clustered sampling). A proper normal-
+    // equations solve, or resampling onto a uniform angular grid before
+    // fitting, would remove the bias. See docs/math/math-validation-report.md
+    // (C4). The downstream penalty is intentionally gentle to limit the damage.
     let a1 = 0, b1 = 0, a2 = 0, b2 = 0
     for (let i = 0; i < n; i++) {
       a1 += rs[i] * Math.cos(thetas[i])

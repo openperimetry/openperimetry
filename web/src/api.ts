@@ -223,6 +223,8 @@ export interface AdminStats {
   activeSessions: number
   totalVFResults: number
   totalSurveys: number
+  /** All-time count of completed tests (signed-in and anonymous). */
+  totalTestsCompleted: number
   resultsByDay: { date: string; count: number }[]
 }
 

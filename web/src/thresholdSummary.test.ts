@@ -53,7 +53,7 @@ describe('summarizeThresholdPoints', () => {
     expect(s.medianDb).toBe(25)
   })
 
-  it('bins dBs into [0,10), [10,20), [20,30), [30,35]', () => {
+  it('bins dBs into [0,10), [10,20), [20,30), [30,∞)', () => {
     const s = summarizeThresholdPoints([
       pt(0), pt(5), pt(9.9),
       pt(10), pt(15),

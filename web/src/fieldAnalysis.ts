@@ -511,9 +511,13 @@ export function detectAnomalies(
     }
   }
 
-  // 4. Very low detection rate for an isopter.
+  // 4. Very low detection rate for an isopter. Exclude catch trials: a
+  //    detected catch trial is a false positive, not a real detection, so
+  //    counting it would inflate the rate and mask a genuine low-detection
+  //    isopter (consistent with detectedCount above, which already filters
+  //    catch trials).
   for (const stim of ISOPTER_ORDER) {
-    const stimPoints = points.filter(p => p.stimulus === stim)
+    const stimPoints = points.filter(p => p.stimulus === stim && !p.catchTrial)
     if (stimPoints.length < 4) continue
     const detectedCount = stimPoints.filter(p => p.detected).length
     const rate = detectedCount / stimPoints.length

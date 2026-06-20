@@ -4,6 +4,7 @@ import {
   makeStaticThresholdPoints,
   getAllScenarios,
 } from './testFixtures'
+import { getGrid24_2 } from './grids'
 
 describe('makeStaticThresholdPoints', () => {
   it("returns one point per 24-2 grid location (54)", () => {
@@ -65,11 +66,11 @@ describe('makeStaticThresholdPoints', () => {
 })
 
 describe('ClinicalScenario.staticPoints', () => {
-  it('is populated on every scenario with a dense demo grid', () => {
+  it('is populated on every scenario with the 24-2 grid', () => {
+    const expectedLen = getGrid24_2('right').length
     for (const s of getAllScenarios()) {
       expect(s.staticPoints).toBeDefined()
-      // Demo uses a dense 2° grid (larger than the 54-point 24-2).
-      expect(s.staticPoints!.length).toBeGreaterThan(54)
+      expect(s.staticPoints!.length).toBe(expectedLen)
       for (const p of s.staticPoints!) {
         expect(p.thresholdDb).toBeDefined()
       }

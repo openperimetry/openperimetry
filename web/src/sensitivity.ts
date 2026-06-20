@@ -20,7 +20,17 @@ export const DB_MAX = 40
 
 /** Convert a stimulus opacity (0–1, with 1 = brightest) to dB using the
  *  psychophysics convention `dB = -10·log10(opacity)`. Matches SPECVIS's
- *  ThresholdDecibel axis: 0 dB = brightest, higher = dimmer = more sensitive. */
+ *  ThresholdDecibel axis: 0 dB = brightest, higher = dimmer = more sensitive.
+ *
+ *  ⚠ CAVEAT — opacity is NOT calibrated luminance. This formula equals the
+ *  clinical `10·log10(L_max/L)` only if emitted light is *linear* in opacity.
+ *  A real display applies sRGB gamma (emitted L ≈ opacity^~2.2) and a non-zero
+ *  black level, so equal dB steps here are not equal log-luminance steps and
+ *  the whole scale is compressed by roughly the gamma factor (e.g. opacity 0.5
+ *  reports 3.0 dB but emits ~0.22 of max → true ≈ 6.6 dB). Treat these dB as a
+ *  self-consistent *relative* index on one screen, NOT absolute clinical dB
+ *  comparable to a hospital perimeter, unless gamma + black level are
+ *  calibrated out first. See docs/math/math-validation-report.md (C1). */
 export function opacityToDb(opacity: number): number {
   if (opacity <= 0) return DB_MAX
   return -10 * Math.log10(opacity)

@@ -169,6 +169,13 @@ export function AdminPage({ onBack }: Props) {
             and the tab content below. */}
         {stats && (
           <>
+            {/* All-time completed-tests total. A single contextual figure rather
+                than a stat-tiles band (see the note above). */}
+            <div className="bg-surface rounded-xl border border-line p-4">
+              <p className="text-muted text-xs font-medium uppercase tracking-wider">Tests completed · all-time</p>
+              <p className="text-3xl font-semibold tabular-nums mt-1">{stats.totalTestsCompleted.toLocaleString()}</p>
+            </div>
+
             {/* Results over time chart */}
             {stats.resultsByDay.some(d => d.count > 0) && (
               <div className="bg-surface rounded-xl border border-line p-4 space-y-2">

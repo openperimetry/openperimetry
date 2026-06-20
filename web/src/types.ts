@@ -72,12 +72,17 @@ export interface CalibrationData {
   fixationOffsetPx: number  // horizontal fixation offset from screen center (positive = right)
   screenWidthPx?: number    // screen width at test time (for accurate boundary rendering)
   screenHeightPx?: number   // screen height at test time
-  /** Flat-screen sphericity correction: when unset or true, `degToPx`
-   *  uses `offset_cm = D * tan(θ)` so peripheral points project
-   *  accurately on a flat monitor. Set to `false` to opt into the
-   *  small-angle linear approximation (`deg * pixelsPerDegree`), which
-   *  matches SPECVIS's single-scalar px/deg but under-projects past
-   *  ~20° of eccentricity. */
+  /** Flat-screen tangent projection: when unset or true, `degToPx` uses
+   *  `offset_cm = D * tan(θ)` so peripheral points project accurately on a
+   *  flat monitor. Set to `false` to opt into the small-angle linear
+   *  approximation (`deg * pixelsPerDegree`), which matches SPECVIS's
+   *  single-scalar px/deg but under-projects past ~20° of eccentricity.
+   *
+   *  ⚠ CAVEAT — the name is a misnomer kept for back-compat. `D·tan(θ)` is the
+   *  flat-screen (gnomonic) projection — exactly correct *because* the screen
+   *  is flat. A genuine spherical/curved-screen correction would map equal
+   *  angles to equal ARC LENGTH (`s = D·θ`), which is the opposite of tan.
+   *  See docs/math/math-validation-report.md (C2). */
   sphericityCorrection?: boolean
   /** Phone-in-headset lens geometry. Present and `enabled` only on
    *  `phone-vr` runs; absent/undefined for standard runs (which keep

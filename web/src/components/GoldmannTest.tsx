@@ -1,20 +1,16 @@
 import { useState, useEffect, useRef, useCallback, type CSSProperties } from 'react'
 import type { CalibrationData, ResultQualityMetrics, StoredEye, TestPoint, TestResult, StimulusKey } from '../types'
 import { STIMULI, ISOPTER_ORDER } from '../types'
-import { VisualFieldMap } from './VisualFieldMap'
 import { calcIsopterAreas } from '../isopterCalc'
 import { vrPlotExtentDeg } from '../isopterRender'
-import { detectTruncatedIsopters } from '../goldmannCoverage'
-import { Interpretation } from './Interpretation'
 import { saveResult, saveSurvey, hasSurveyForResult, hasBeenPromptedForFeedback, markFeedbackPrompted, getDeviceId, getDeviceInfo } from '../storage'
 import { useAuth } from '../AuthContext'
 import { trackEvent, trackEventBeacon } from '../api'
 import { useActiveTestGuards, pageLeaveMeta, type PageLeaveInfo } from '../testLifecycle'
 import { exportTrackedResultPDF } from '../pdfExportTracking'
-import { ScenarioOverlay } from './ScenarioOverlay'
+import { GoldmannResults } from './GoldmannResults'
 import { PostTestSurvey } from './PostTestSurvey'
 import type { SurveyResponse } from './PostTestSurvey'
-import { ClinicalDisclaimer } from './ClinicalDisclaimer'
 import { PauseScreen } from './PauseScreen'
 import { SavePrompt } from './SavePrompt'
 import { GOLDMANN } from '../constants'
@@ -2557,104 +2553,57 @@ export function GoldmannTest({ eye, calibration, extendedField, onDone, onComple
 
     return (
       <div className={`min-h-screen bg-base text-body p-6 overflow-y-auto`}>
-        <main className="max-w-lg mx-auto space-y-6 pb-12">
-          <h1 className="text-2xl font-semibold text-center">Results</h1>
-          <p className="text-center text-xs text-muted">Goldmann kinetic perimetry · {eye === 'right' ? <abbr title="Oculus Dexter">OD</abbr> : <abbr title="Oculus Sinister">OS</abbr>}</p>
-          {savedId && <SavePrompt />}
-          <VisualFieldMap
-            points={standardPoints}
-            eye={eye}
-            maxEccentricity={maxEccentricityDeg}
-            plotExtentDeg={vrPlotExtentDeg(standardPoints, calibration, maxEccentricityDeg)}
-            size={Math.min(600, window.innerWidth - 48)}
-            calibration={calibration}
-            enableVerify
-          />
-          {(() => {
-            const truncated = detectTruncatedIsopters(standardPoints, maxEccentricityDeg)
-            if (truncated.length === 0) return null
-            return (
-              <div className="text-xs text-amber-700 space-y-1">
-                <p className="font-medium">Some isopter boundaries were not reached</p>
-                <ul className="list-disc list-inside space-y-0.5 text-amber-600">
-                  {truncated.map(t => (
-                    <li key={t.stimulus}>
-                      {t.stimulus}: extends to <strong>at least {t.maxEccentricityReached.toFixed(0)}°</strong>{' '}
-                      in {t.truncatedMeridianCount} meridian{t.truncatedMeridianCount === 1 ? '' : 's'} — true
-                      boundary lies beyond the screen.
-                    </li>
-                  ))}
-                </ul>
-                <p className="text-amber-600">
-                  Sit closer to the screen (and recalibrate) to assess the full field.
-                </p>
+        <GoldmannResults
+          points={standardPoints}
+          eye={eye}
+          maxEccentricityDeg={maxEccentricityDeg}
+          calibration={calibration}
+          mapCalibration={calibration}
+          mapPlotExtentDeg={vrPlotExtentDeg(standardPoints, calibration, maxEccentricityDeg)}
+          enableVerify
+          showReliability={canViewReliability}
+          reliabilityIndices={{
+            catchTrialsPresented: catchTrialRef.current.length,
+            catchTrialsFalsePositive: catchTrialRef.current.filter(c => c.detected).length,
+            falsePositiveIsiPresses: fpIsiPressesRef.current,
+            truePositiveResponses: truePositivesRef.current,
+          }}
+          beforeMap={savedId ? <SavePrompt /> : null}
+          footer={
+            <>
+              {surveyDone && (
+                <p className="text-center text-green-600 text-xs">Thank you for your feedback!</p>
+              )}
+              <div className="flex gap-3">
+                <button
+                  onClick={() => {
+                    if (!savedId) return
+                    const result: TestResult = {
+                      id: savedId,
+                      eye,
+                      date: new Date().toISOString(),
+                      points: consolidated,
+                      isopterAreas: areas,
+                      calibration,
+                      testType: 'goldmann',
+                      durationSeconds: getTestDurationSeconds(),
+                    }
+                    exportPdfAndMaybePrompt(result)
+                  }}
+                  className="flex-1 py-3 btn-primary rounded-xl font-medium text-white"
+                >
+                  Export PDF
+                </button>
+                <button
+                  onClick={handleDoneFromResults}
+                  className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 rounded-lg font-medium transition-colors"
+                >
+                  Done
+                </button>
               </div>
-            )
-          })()}
-          {/* Area summary */}
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            {ISOPTER_ORDER.map(key => {
-              const area = areas[key]
-              if (area == null) return null
-              return (
-                <div key={key} className="bg-surface border border-line rounded-lg px-3 py-2 flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: STIMULI[key].color }} />
-                  <span className="text-muted">{STIMULI[key].label}</span>
-                  <span className="ml-auto font-mono text-ink">{area.toFixed(0)} deg²</span>
-                </div>
-              )
-            })}
-          </div>
-          <ClinicalDisclaimer variant="results" />
-          <Interpretation
-            points={standardPoints}
-            areas={areas}
-            maxEccentricityDeg={maxEccentricityDeg}
-            calibration={calibration}
-            showReliability={canViewReliability}
-            reliabilityIndices={{
-              catchTrialsPresented: catchTrialRef.current.length,
-              catchTrialsFalsePositive: catchTrialRef.current.filter(c => c.detected).length,
-              falsePositiveIsiPresses: fpIsiPressesRef.current,
-              truePositiveResponses: truePositivesRef.current,
-            }}
-          />
-          <ScenarioOverlay userPoints={standardPoints} userAreas={areas} maxEccentricity={maxEccentricityDeg} calibration={calibration} />
-          {/* Vision simulation disabled for now — see comment in
-              StaticTest.tsx. VisionSimulator file is preserved so the
-              feature can be re-enabled in place. */}
-          {surveyDone && (
-            <p className="text-center text-green-600 text-xs">Thank you for your feedback!</p>
-          )}
-
-          <div className="flex gap-3">
-            <button
-              onClick={() => {
-                if (!savedId) return
-                const result: TestResult = {
-                  id: savedId,
-                  eye,
-                  date: new Date().toISOString(),
-                  points: consolidated,
-	                  isopterAreas: areas,
-	                  calibration,
-	                  testType: 'goldmann',
-	                  durationSeconds: getTestDurationSeconds(),
-	                }
-                exportPdfAndMaybePrompt(result)
-              }}
-              className="flex-1 py-3 btn-primary rounded-xl font-medium text-white"
-            >
-              Export PDF
-            </button>
-            <button
-              onClick={handleDoneFromResults}
-              className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 rounded-lg font-medium transition-colors"
-            >
-              Done
-            </button>
-          </div>
-        </main>
+            </>
+          }
+        />
 
         {feedbackTrigger && (
           <div

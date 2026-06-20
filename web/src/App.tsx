@@ -5,6 +5,7 @@ import { CalibrationScreen } from './components/CalibrationScreen'
 import { GoldmannTest, type SpeedMode } from './components/GoldmannTest'
 import { StaticTest } from './components/StaticTest'
 import { TestDemo } from './components/TestDemo'
+import { DemoResult } from './components/DemoResult'
 import { BinocularResults } from './components/BinocularResults'
 import { BinocularSwitch } from './components/BinocularSwitch'
 import { InfoButton } from './components/InfoButton'
@@ -26,13 +27,14 @@ import { getDeviceId, getResults } from './storage'
 import { APP_NAME, APP_TAGLINE, TITLE_SUFFIX, GITHUB_URL, HAS_GITHUB_LINK, whatsappShareUrl } from './branding'
 import { trackEvent } from './api'
 import { DEFAULT_STUDY_MODE_STATE, isStudyReady, useSetStudyMode, useStudyMode } from './studyMode'
+import { DEMO_HASH, splitHash, demoHash, demoTargetFromHash, type DemoMode } from './demoRoute'
 
 type Page = 'home' | 'calibration' | 'test' | 'static-test' | 'binocular-switch' | 'binocular-test-left' | 'binocular-results' | 'history' | 'demo' | 'science' | 'methods' | 'contact' | 'privacy' | 'admin' | 'clinician' | 'clinicians'
 type TestMode = 'goldmann' | 'static'
 
 const HASH_ROUTES: Partial<Record<Page, string>> = {
   home: '',
-  demo: 'demos',
+  demo: DEMO_HASH,
   science: 'references',
   methods: 'methods',
   contact: 'contact',
@@ -50,14 +52,14 @@ const PAGE_BY_HASH: Record<string, Page> = Object.entries(HASH_ROUTES).reduce<Re
 
 function pageFromHash(): Page {
   if (typeof window === 'undefined') return 'home'
-  const key = window.location.hash.replace(/^#\/?/, '').trim().toLowerCase()
-  return PAGE_BY_HASH[key] ?? 'home'
+  const { head } = splitHash(window.location.hash)
+  return PAGE_BY_HASH[head] ?? 'home'
 }
 
-function urlForPage(page: Page): string | null {
+function urlForPage(page: Page, demoScenarioId?: string | null, demoMode: DemoMode = 'goldmann'): string | null {
   if (typeof window === 'undefined') return null
   if (!(page in HASH_ROUTES)) return null
-  const hash = HASH_ROUTES[page]
+  const hash = page === 'demo' ? demoHash(demoScenarioId ?? null, demoMode) : HASH_ROUTES[page]
   return `${window.location.pathname}${window.location.search}${hash ? `#${hash}` : ''}`
 }
 
@@ -248,6 +250,12 @@ function durationFor(testMode: TestMode, speedMode: SpeedMode, binocular: boolea
 
 function App() {
   const [page, setPage] = useState<Page>(() => pageFromHash())
+  const [demoScenarioId, setDemoScenarioId] = useState<string | null>(() =>
+    typeof window !== 'undefined' ? demoTargetFromHash(window.location.hash).id : null,
+  )
+  const [demoMode, setDemoMode] = useState<DemoMode>(() =>
+    typeof window !== 'undefined' ? demoTargetFromHash(window.location.hash).mode : 'goldmann',
+  )
   const [eye, setEye] = useState<Eye>('right')
   const [calibration, setCalibration] = useState<CalibrationData | null>(null)
   const [extendedField, setExtendedField] = useState(false)
@@ -336,7 +344,12 @@ function App() {
   }, [authLoading, canUseStudyMode, studyMode.enabled, studyMode.profile, setStudyMode])
 
   useEffect(() => {
-    const handleLocationChange = () => setPage(pageFromHash())
+    const handleLocationChange = () => {
+      setPage(pageFromHash())
+      const t = demoTargetFromHash(window.location.hash)
+      setDemoScenarioId(t.id)
+      setDemoMode(t.mode)
+    }
     window.addEventListener('hashchange', handleLocationChange)
     window.addEventListener('popstate', handleLocationChange)
     return () => {
@@ -346,7 +359,7 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const nextUrl = urlForPage(page)
+    const nextUrl = urlForPage(page, demoScenarioId, demoMode)
     if (nextUrl) {
       const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`
       if (currentUrl !== nextUrl) {
@@ -358,7 +371,7 @@ function App() {
     if (window.location.hash) {
       window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
     }
-  }, [page])
+  }, [page, demoScenarioId, demoMode])
 
   // Update document title on page change and send a virtual pageview to
   // Umami. This is still a client-rendered SPA; hash URLs make public
@@ -681,7 +694,21 @@ function App() {
   }
 
   if (page === 'demo') {
-    return <TestDemo onBack={() => setPage('home')} />
+    return demoScenarioId
+      ? (
+        <DemoResult
+          scenarioId={demoScenarioId}
+          mode={demoMode}
+          onBack={() => { setDemoScenarioId(null); setDemoMode('goldmann') }}
+          onNavigate={(id, m) => { setDemoScenarioId(id); setDemoMode(m) }}
+        />
+      )
+      : (
+        <TestDemo
+          onBack={() => setPage('home')}
+          onSelectScenario={(id) => { setDemoScenarioId(id); setDemoMode('goldmann') }}
+        />
+      )
   }
 
   if (page === 'contact') {
@@ -1344,7 +1371,7 @@ function App() {
         {/* Footer navigation */}
         <nav aria-label="Site navigation" className="fade-up fade-up-8 pt-2 border-t border-line">
           <div className="flex flex-wrap justify-center gap-x-4 gap-y-1">
-            <button onClick={() => setPage('demo')} className="text-muted hover:text-ink text-xs transition-colors min-h-[44px] px-1">Demos</button>
+            <button onClick={() => { setPage('demo'); setDemoScenarioId(null); setDemoMode('goldmann') }} className="text-muted hover:text-ink text-xs transition-colors min-h-[44px] px-1">Demos</button>
             <button onClick={() => setPage('methods')} className="text-muted hover:text-ink text-xs transition-colors min-h-[44px] px-1">Methods</button>
             <button onClick={() => setPage('science')} className="text-muted hover:text-ink text-xs transition-colors min-h-[44px] px-1">References</button>
             <button onClick={() => setPage('clinicians')} className="text-muted hover:text-ink text-xs transition-colors min-h-[44px] px-1">Clinicians</button>

@@ -12,7 +12,11 @@ test('NORMAL_ISOPTER_AREA stays in sync with the normal fixture', () => {
   }
 })
 
-test('stage scenarios self-classify to their own stage', () => {
+test('stage scenarios self-classify to their own stage under their own calibration', () => {
+  // Score via each scenario's OWN calibration + maxEccentricity — the exact
+  // path the demo's Interpretation / ScenarioOverlay use. (A prior version
+  // scored uncapped with `999, undefined`, which hid that a small synthetic
+  // screen was capping every isopter and shifting each stage one band milder.)
   const expected: Record<string, string> = {
     'normal': 'normal',
     'early-rp': 'mild',
@@ -22,7 +26,7 @@ test('stage scenarios self-classify to their own stage', () => {
   }
   for (const s of getAllScenarios()) {
     if (!(s.id in expected)) continue
-    const fs = scoreField(calcIsopterAreas(s.points), 999, undefined)!
+    const fs = scoreField(calcIsopterAreas(s.points), s.maxEccentricity, s.calibration)!
     expect(fs.band.severity, s.id).toBe(expected[s.id])
   }
 })

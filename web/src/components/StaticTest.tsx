@@ -35,7 +35,7 @@
  *   fixation dot is the entire status UI during the run.
  */
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, type CSSProperties } from 'react'
 import type { CalibrationData, ResultQualityMetrics, RunSpeedMode, StoredEye, TestPoint, TestResult } from '../types'
 import { STIMULI } from '../types'
 import { HFAResultsView } from './HFAResultsView'
@@ -107,7 +107,7 @@ const PRIOR_DB = 0
 // instructions (HeadGuide + "cover your X eye, sit at Y cm"), so the
 // check runs without any additional navigation and a pass lands them
 // straight in the countdown.
-type Phase = 'instructions' | 'position-check' | 'practice' | 'countdown' | 'testing' | 'paused' | 'results'
+type Phase = 'instructions' | 'position-check' | 'practice' | 'interstitial' | 'countdown' | 'testing' | 'paused' | 'results'
 
 /** Number of unscored practice presentations before the real test, so the
  *  user learns the press-when-seen mechanic on guaranteed-visible dots
@@ -511,13 +511,15 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
 
   // ---------- fullscreen ----------
   // The single "advance / I see it" action, shared by the keyboard, screen
-  // taps, and the Bluetooth VR remote. Phase-aware: resumes from pause, gates
-  // false-positive presses during the inter-stimulus gap, otherwise records a
-  // response. (Static has no interstitial phase — countdown runs straight into
-  // testing — so there's no interstitial branch here.)
+  // taps, and the Bluetooth VR remote. Phase-aware: resumes from pause, advances
+  // the interstitial example into the countdown, gates false-positive presses
+  // during the inter-stimulus gap, otherwise records a response.
   const handleAdvanceButton = () => {
     if (phaseRef.current === 'paused') {
       resume()
+    } else if (phaseRef.current === 'interstitial') {
+      beep()
+      startCountdownFromInterstitial()
     } else if (phaseRef.current === 'practice') {
       beep()
       handlePracticeResponse()
@@ -806,9 +808,10 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
       markPracticeDone()
       practiceDoneRef.current = true
     }
-    setPhase('countdown')
-    phaseRef.current = 'countdown'
-    setCountdown(3)
+    // After the warm-up, land on the interstitial example (not straight into
+    // the countdown) so the get-ready primer is the last screen before testing.
+    setPhase('interstitial')
+    phaseRef.current = 'interstitial'
   }, [clearAllTimeouts, hideStimulus])
 
   const presentPractice = useCallback(() => {
@@ -858,10 +861,21 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
       phaseRef.current = 'practice'
       presentPractice()
     } else {
-      setPhase('countdown')
-      setCountdown(3)
+      // Repeat runs skip the practice warm-up, but still get the interstitial
+      // example so there's always a "this is what to look for" primer.
+      setPhase('interstitial')
+      phaseRef.current = 'interstitial'
     }
   }, [presentPractice])
+
+  // Advance from the interstitial example into the 3-2-1 countdown. Shared by
+  // the screen tap (render onPointerDown), the keyboard (Space/Enter), and the
+  // VR remote (handleAdvanceButton). Fullscreen is already entered in startTest.
+  const startCountdownFromInterstitial = useCallback(() => {
+    setPhase('countdown')
+    phaseRef.current = 'countdown'
+    setCountdown(3)
+  }, [])
 
   // ---------- keyboard + pointer ----------
   useEffect(() => {
@@ -1417,6 +1431,105 @@ export function StaticTest({ eye, calibration, onDone, onComplete, speedMode = '
         calibration={calibration}
         onPass={handlePositionCheckPass}
       />
+    )
+  }
+
+  if (phase === 'interstitial') {
+    // "Get ready" primer — the static counterpart to Goldmann's interstitial.
+    // The example dot FLASHES in place (static perimetry) rather than sweeping
+    // (kinetic). Shown every run, so repeat runs (which skip the first-run
+    // practice warm-up) still get a "this is what to look for" example. A
+    // press/tap/Space advances to the 3-2-1 countdown.
+    const exDotPx = Math.max(6, Math.round(degToPx(STIMULI['III4e'].sizeDeg, calibration)))
+    const interVp = vr ? computeVrViewport(window.innerWidth, window.innerHeight, activeEye, vr) : null
+    const copyBoxStyle: CSSProperties = interVp
+      ? {
+          position: 'absolute',
+          left: interVp.originX + interVp.width / 2,
+          bottom: 40,
+          transform: 'translateX(-50%)',
+          width: interVp.width - 32,
+          maxWidth: 300,
+        }
+      : {
+          position: 'absolute',
+          left: '50%',
+          bottom: '12%',
+          transform: 'translateX(-50%)',
+          maxWidth: 360,
+          width: '88%',
+        }
+    return (
+      <div
+        className={`h-[100dvh] ${bgClass} text-white select-none cursor-pointer relative overflow-hidden`}
+        onPointerDown={() => startCountdownFromInterstitial()}
+      >
+        {/* Fixation dot at its real position — primes where to look. */}
+        <div
+          className={`absolute ${fixDotSize} rounded-full bg-yellow-400`}
+          style={{
+            top: '50%',
+            left: '50%',
+            marginLeft: fixDotOffset + fixationXY.x,
+            marginTop: fixDotOffset + fixationXY.y,
+          }}
+        />
+        {/* Copy + flashing example preview, anchored toward the bottom so it
+            never sits on the fixation dot. In VR it rides in the active lens
+            half. pointer-events stay off so taps fall through to the screen. */}
+        <div className="text-center px-4 pointer-events-none" style={copyBoxStyle}>
+          <p className="text-sm text-gray-200">
+            Keep your eyes on the <span className="text-yellow-400">yellow dot</span> — don't look away.
+          </p>
+          <p className="text-sm text-gray-300 mt-3">
+            A dot will flash briefly, like this:
+          </p>
+          {/* Preview strip — real III4e size + colour at full visibility, in a
+              fixed box (Goldmann-style) so it never lands off-screen or outside
+              the VR lens half. The flash loop teaches the appear/disappear rhythm. */}
+          <div
+            style={{
+              position: 'relative',
+              height: Math.max(22, exDotPx + 12),
+              width: 132,
+              margin: '8px auto 0',
+              borderRadius: 6,
+              background: 'rgba(255,255,255,0.04)',
+            }}
+          >
+            <div
+              style={{
+                position: 'absolute',
+                top: '50%',
+                left: '50%',
+                width: exDotPx,
+                height: exDotPx,
+                borderRadius: '50%',
+                backgroundColor: stimulusDisplayColor('III4e'),
+                transform: 'translate(-50%, -50%)',
+                opacity: 0,
+                animation: 'vfc-demo-flash 2.6s ease-in-out infinite',
+              }}
+            />
+          </div>
+          <p className="text-sm text-gray-300 mt-3">
+            {isMobileDevice ? 'Tap' : 'Press Space or tap'} the moment you see one.
+          </p>
+          <p className="text-xs text-gray-500 mt-2">
+            Real flashes will be dimmer and easy to miss — that's normal.
+          </p>
+          <p className="text-sm text-teal-300 mt-5">
+            {isMobileDevice ? 'Tap to begin' : 'Press Space or tap to begin'}
+          </p>
+        </div>
+        {vr && (
+          <VrTestSurface
+            viewport={computeVrViewport(window.innerWidth, window.innerHeight, activeEye, vr)}
+            innerWidth={window.innerWidth}
+            showDivider
+          />
+        )}
+      </div>
     )
   }
 

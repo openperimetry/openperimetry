@@ -246,6 +246,15 @@ h1, h2, h3, h4 {
   to { left: 4%; }
 }
 
+/* Static interstitial example: a dot flashes ON briefly (~200ms of a 2.6s
+   loop) then OFF, teaching the static-perimetry "flash in place" rhythm —
+   the static counterpart to vfc-demo-sweep's kinetic sweep. */
+@keyframes vfc-demo-flash {
+  0%, 4% { opacity: 0; }
+  5%, 12% { opacity: 0.95; }
+  13%, 100% { opacity: 0; }
+}
+
 /* Staggered reveal utilities */
 .fade-up {
   opacity: 0;

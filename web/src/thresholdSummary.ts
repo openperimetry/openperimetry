@@ -28,7 +28,9 @@ export interface ThresholdSummary {
   bin10to20: number
   /** Count in [20, 30) dB. */
   bin20to30: number
-  /** Count in [30, 35] dB. */
+  /** Count in [30, ∞) dB — every threshold ≥ 30. (The staircase clamps to
+   *  ≤ 35 dB, so in normal runs the effective top of this bin is 35; an
+   *  out-of-range import above 35 still lands here, hence the open interval.) */
   bin30plus: number
 }
 
@@ -88,6 +90,8 @@ export function thresholdSummaryToMeta(s: ThresholdSummary): Record<string, stri
     thBin0_10: String(s.bin0to10),
     thBin10_20: String(s.bin10to20),
     thBin20_30: String(s.bin20to30),
+    // Wire key kept as `thBin30_35` for telemetry continuity, but the value is
+    // the open-ended [30, ∞) bin (`bin30plus`), not a closed [30, 35] count.
     thBin30_35: String(s.bin30plus),
   }
 }

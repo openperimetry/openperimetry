@@ -638,6 +638,12 @@ export async function getAdminStats(): Promise<AdminStats> {
   const activeSessions = (database.prepare('SELECT COUNT(*) as c FROM sessions').get() as { c: number }).c
   const totalVFResults = (database.prepare('SELECT COUNT(*) as c FROM vf_results').get() as { c: number }).c
   const totalSurveys = (database.prepare('SELECT COUNT(*) as c FROM vf_surveys').get() as { c: number }).c
+  // All-time completed tests. The sqlite events table has no TTL, so a direct
+  // COUNT is the true all-time total (the DynamoDB store uses a persistent
+  // counter instead, because its events table expires after 90 days).
+  const totalTestsCompleted = (database.prepare(
+    "SELECT COUNT(*) as c FROM events WHERE event = 'test_completed'"
+  ).get() as { c: number }).c
 
   // Last 30 days completed tests by day — counts test_completed events
   // (server-side timestamps) rather than vf_results sync rows, so the
@@ -656,7 +662,7 @@ export async function getAdminStats(): Promise<AdminStats> {
     resultsByDay.push({ date: key, count: dayCounts.get(key) ?? 0 })
   }
 
-  return { totalUsers, activeSessions, totalVFResults, totalSurveys, resultsByDay }
+  return { totalUsers, activeSessions, totalVFResults, totalSurveys, totalTestsCompleted, resultsByDay }
 }
 
 export async function listAllUsers(): Promise<AdminUserRecord[]> {

@@ -147,6 +147,16 @@ export function makeRingScotoma(
   return points
 }
 
+// Synthetic calibration for the demo scenarios. These are illustrative
+// *full-field* Goldmann results (V4e out to ~55–72°), so the reference screen
+// must span the full clinical field — otherwise scoreField() caps every
+// isopter's "expected normal" to a small device rectangle and shifts each
+// scenario one severity band milder (Moderate → Mild → compared to "Early RP").
+// At 20 px/deg, 3600×2800 px ≈ 180°×140°, giving an expectedNormalArea
+// (≈19,800 deg²) above every NORMAL_ISOPTER_AREA — so the cap is a no-op and
+// the scenarios score against the clinical normal, matching their labels.
+// A real device screen can't reach this; that's the point — the demo
+// illustrates clinical stages, not a screen-limited home test.
 const baseCal: CalibrationData = {
   pixelsPerDegree: 20,
   maxEccentricityDeg: 50,
@@ -154,8 +164,8 @@ const baseCal: CalibrationData = {
   brightnessFloor: 0.05,
   reactionTimeMs: 350,
   fixationOffsetPx: -200,
-  screenWidthPx: 1440,
-  screenHeightPx: 900,
+  screenWidthPx: 3600,
+  screenHeightPx: 2800,
 }
 
 // ────────────────────────────────────────────────────
@@ -512,9 +522,10 @@ export function getAllScenarios(): ClinicalScenario[] {
   ]
   return builders.map(([build, profileKey]) => {
     const scenario = build()
-    // Dense 2° grid for demo-page rendering — sparse 24-2 grid shows the
-    // sample lattice as a visible square pattern under the Gaussian smoother.
-    scenario.staticPoints = makeStaticThresholdPoints(SCENARIO_PROFILES[profileKey], 2)
+    // Real sparse 24-2 grid (54 points): the demo's static result page renders
+    // HFAResultsView, whose dB numbers grid needs the clinical grid — and a
+    // 54-point greyscale is how a real 24-2 result looks.
+    scenario.staticPoints = makeStaticThresholdPoints(SCENARIO_PROFILES[profileKey])
     return scenario
   })
 }

@@ -915,6 +915,8 @@ export type AdminStats = {
   activeSessions: number
   totalVFResults: number
   totalSurveys: number
+  /** All-time count of completed tests (signed-in and anonymous). */
+  totalTestsCompleted: number
   /** VF results per day (last 30 days), sorted oldest first */
   resultsByDay: { date: string; count: number }[]
 }
@@ -994,7 +996,9 @@ export async function getAdminStats(): Promise<AdminStats> {
     resultsByDay.push({ date: key, count: dayCounts.get(key) ?? 0 })
   }
 
-  return { totalUsers, activeSessions, totalVFResults, totalSurveys, resultsByDay }
+  const totalTestsCompleted = await readTestCompletedTotal()
+
+  return { totalUsers, activeSessions, totalVFResults, totalSurveys, totalTestsCompleted, resultsByDay }
 }
 
 // ── Admin: list all login sessions with user info ──
@@ -1314,6 +1318,72 @@ export type EventType =
 const RECENT_EVENTS_INDEX = 'recent-events-index'
 const EVENTS_GSI_PK = 'evt'
 
+// All-time completed-tests counter. Event items expire after 90 days (TTL), so a
+// scan only sees recent history. This persistent sentinel item in the same table
+// accumulates a true all-time total. It deliberately sets NO `ttlEpoch` and NO
+// `gsiPk`, so it never expires and stays invisible to the resultsByDay scan
+// (filters on `event`) and the recent-events GSI feed (queries `gsiPk`).
+const COUNTER_DEVICE_ID = '__counter__'
+const TEST_COMPLETED_COUNTER_KEY = 'test_completed_total'
+
+// Best available historical baseline: count of test_completed events still in the
+// table (≤90 days; older anonymous events have expired and are unrecoverable).
+// Scanned once per process and memoized — used only to seed the counter on its
+// first increment, and as the read fallback before the counter item exists.
+let testCompletedBaselinePromise: Promise<number> | undefined
+function testCompletedBaseline(): Promise<number> {
+  if (!testCompletedBaselinePromise) {
+    testCompletedBaselinePromise = (async () => {
+      let total = 0
+      let key: Record<string, unknown> | undefined
+      do {
+        const response = await ddb.send(new ScanCommand({
+          TableName: DDB_EVENTS_TABLE,
+          Select: 'COUNT',
+          FilterExpression: '#event = :ev',
+          ExpressionAttributeNames: { '#event': 'event' },
+          ExpressionAttributeValues: { ':ev': 'test_completed' },
+          ExclusiveStartKey: key,
+        }))
+        total += response.Count ?? 0
+        key = response.LastEvaluatedKey as Record<string, unknown> | undefined
+      } while (key)
+      return total
+    })()
+  }
+  return testCompletedBaselinePromise
+}
+
+// Increment the all-time counter, seeding it from the baseline the first time the
+// sentinel item is created (`if_not_exists`). Best-effort: a counter failure must
+// never break event tracking.
+async function bumpTestCompletedCounter(): Promise<void> {
+  try {
+    const base = await testCompletedBaseline()
+    await ddb.send(new UpdateCommand({
+      TableName: DDB_EVENTS_TABLE,
+      Key: { deviceId: COUNTER_DEVICE_ID, eventKey: TEST_COMPLETED_COUNTER_KEY },
+      UpdateExpression: 'SET #c = if_not_exists(#c, :base) + :one',
+      ExpressionAttributeNames: { '#c': 'count' },
+      ExpressionAttributeValues: { ':base': base, ':one': 1 },
+    }))
+  } catch {
+    // admin-only stat — not worth failing a request over
+  }
+}
+
+// All-time total of completed tests. Reads the sentinel counter; if it doesn't
+// exist yet (no test completed since the counter shipped) falls back to the
+// baseline scan so the figure still reflects existing history.
+async function readTestCompletedTotal(): Promise<number> {
+  const response = await ddb.send(new GetCommand({
+    TableName: DDB_EVENTS_TABLE,
+    Key: { deviceId: COUNTER_DEVICE_ID, eventKey: TEST_COMPLETED_COUNTER_KEY },
+  }))
+  const count = response.Item?.count
+  return typeof count === 'number' ? count : testCompletedBaseline()
+}
+
 export async function trackEvent(deviceId: string, event: EventType, meta?: Record<string, string>): Promise<void> {
   const now = new Date()
   const eventKey = `${now.toISOString()}#${randomUUID().slice(0, 8)}`
@@ -1331,6 +1401,11 @@ export async function trackEvent(deviceId: string, event: EventType, meta?: Reco
       gsiPk: EVENTS_GSI_PK,
     },
   }))
+
+  // Maintain the all-time completed-tests counter (best-effort).
+  if (event === 'test_completed') {
+    await bumpTestCompletedCounter()
+  }
 }
 
 export type EventPage = {

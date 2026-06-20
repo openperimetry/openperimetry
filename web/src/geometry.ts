@@ -15,6 +15,10 @@ export function pixelsPerCm(calib: CalibrationData): number {
  *  noticeably matters past ~20° where the linear approximation
  *  under-projects peripheral points on a flat monitor.
  *
+ *  ⚠ Despite the `sphericityCorrection` flag name, `D·tan(θ)` is the
+ *  flat-screen (gnomonic) projection, not a spherical correction — see the
+ *  field doc on `CalibrationData.sphericityCorrection` and report caveat C2.
+ *
  *  Explicit opt-out (`sphericityCorrection: false`): plain
  *  `deg * pixelsPerDegree`. Retained so tests, imported OVFX files, or
  *  consumers that deliberately want the small-angle approximation

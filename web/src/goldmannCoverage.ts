@@ -45,7 +45,10 @@ export function detectTruncatedIsopters(
 
     // Bucket by quantized meridian so a patient's individual presentation
     // jitter doesn't fracture "the 90° meridian" into many near-neighbours.
-    const bin = (m: number) => Math.round(((m % 360) + 360) % 360 / 5) * 5
+    // The final `% 360` folds the 357.5°–360° band back onto bin 0 — without
+    // it, round(359/5)*5 = 360 becomes a phantom bucket distinct from bin 0,
+    // splitting the same physical direction across two keys.
+    const bin = (m: number) => (Math.round(((m % 360) + 360) % 360 / 5) * 5) % 360
     const byMeridian = new Map<number, { detected: number[]; missed: number[] }>()
     for (const p of stimPts) {
       const key = bin(p.meridianDeg)
